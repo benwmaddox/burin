@@ -31,6 +31,16 @@ impl Piece {
     }
 }
 
+/// Deflate's header for a stored (uncompressed) block of `n` bytes (at most 65535), on a byte
+/// boundary, not final: bytes made for one request join the stream with no compression work.
+#[inline]
+pub fn stored_header(n: usize) -> [u8; 5] {
+    let n = n as u16;
+    let [a, b] = n.to_le_bytes();
+    let [c, d] = (!n).to_le_bytes();
+    [0, a, b, c, d]
+}
+
 /// gzip's header: deflate, no name, no time, any OS.
 pub const HEADER: [u8; 10] = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
 /// an empty final block (fixed Huffman codes): it ends the joined stream
@@ -48,6 +58,14 @@ impl Crc {
     pub fn add(&mut self, p: &Piece) {
         self.crc = multmodp(p.op, self.crc) ^ p.crc;
         self.len += p.len;
+    }
+    /// Bytes made for this request, added as they are: the CRC continues over them.
+    #[inline]
+    pub fn add_raw(&mut self, b: &[u8]) {
+        let mut h = crc32fast::Hasher::new_with_initial(self.crc);
+        h.update(b);
+        self.crc = h.finalize();
+        self.len += b.len() as u64;
     }
     /// The gzip trailer: CRC-32 and length, little-endian.
     pub fn trailer(&self) -> [u8; 8] {

@@ -89,14 +89,32 @@ fn lowered(extra: &str, frag: &str) -> Result<(), String> {
 }
 
 #[test]
-fn viewer_text_in_a_shared_fragment_is_refused() {
+fn a_cached_fragment_reading_the_viewer_is_refused() {
+    // text and conditions alike: a cached fragment is the same for everyone
     let e = lowered(r#"fragment p(x: Post) <<<<b>{{viewer.name}}</b>{{x.body}}>>>"#, "p").unwrap_err();
-    assert!(e.contains("depends on the viewer"), "{e}");
+    assert!(e.contains("a cached fragment is the same for everyone"), "{e}");
+    let e = lowered(r#"fragment p(x: Post) <<<{{if x.author == viewer}}<b>mine</b>{{end}}{{x.body}}>>>"#, "p").unwrap_err();
+    assert!(e.contains("mark it `per viewer`"), "{e}");
 }
 
 #[test]
-fn viewer_conditions_in_a_shared_fragment_pass() {
-    lowered(r#"fragment p(x: Post) varies by viewer <<<{{if x.author == viewer}}<b>mine</b>{{end}}{{x.body}}>>>"#, "p").unwrap();
+fn a_per_request_fragment_merges_the_cached_ones_it_calls() {
+    // the post is a cached piece, merged by reference where the per-request list calls it
+    let src = "fragment post(x: Post) <<<<p>{{x.body}}</p>>>>
+fragment mine() per viewer <<<{{for x in recent()}}{{if x.author == viewer}}{{post(x)}}{{end}}{{end}}>>>";
+    let decls = parse::parse_file(&format!("{BASE}
+{src}"), 0).map_err(|e| e.msg).unwrap();
+    let app = App { files: vec!["t.etch".into()], decls };
+    let m = check::Model::new(&app).map_err(|e| e.msg).unwrap();
+    check::check(&m).map_err(|e| e.msg).unwrap();
+    let (ll, _) = crate::llvm::module(&m, &["post", "mine"], "", "").unwrap();
+    assert!(ll.contains("call void @etch_piece(ptr %splits"), "no merged piece");
+}
+
+#[test]
+fn varies_by_is_gone() {
+    let e = verdict(r#"fragment p(x: Post) varies by viewer <<<{{x.body}}>>>"#).unwrap_err();
+    assert!(e.contains("a cached fragment is the same for everyone"), "{e}");
 }
 
 #[test]
@@ -115,18 +133,4 @@ fn a_password_in_a_page_is_refused() {
 #[test]
 fn signing_in_and_out_pass() {
     verdict("entity Login { user: User  password: Password? }\naction sign_in(u: User, p: Text) public {\n  let l = first(Login where .user == u)\n  require l != none and authenticates(l.password, p) else unauthenticated\n  sign in u\n}\naction sign_out() {\n  sign out\n}").unwrap();
-}
-
-#[test]
-fn a_variant_its_key_doesnt_declare_is_refused() {
-    let e = lowered(r#"fragment p(x: Post) <<<{{if x.author == viewer}}<b>mine</b>{{end}}{{x.body}}>>>"#, "p").unwrap_err();
-    assert!(e.contains("which its key doesn't declare: add `varies by viewer`"), "{e}");
-    let e = lowered(r#"fragment p(x: Post) varies by viewer <<<{{if x.author.name == "Ada" or viewer.name == "Bo"}}<b>!</b>{{end}}>>>"#, "p").unwrap_err();
-    assert!(e.contains("`viewer.name`"), "{e}");
-}
-
-#[test]
-fn a_key_declaring_more_than_it_uses_is_refused() {
-    let e = lowered(r#"fragment p(x: Post) varies by viewer, viewer.name <<<{{if x.author == viewer}}<b>mine</b>{{end}}>>>"#, "p").unwrap_err();
-    assert!(e.contains("declares `varies by viewer.name`, but nothing it shows depends on"), "{e}");
 }

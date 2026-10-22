@@ -1,10 +1,15 @@
 //! The server every app runs, the same for every app: the fast path, the cold path (the golden
 //! model), the writer and its delta edges. What is app-specific is generated (`Glue`), and called
 //! by static dispatch, so it inlines.
+//!
+//! A page is merged from two kinds of parts: cached pieces (fragments that never read the viewer:
+//! built once at write time, kept, precompressed, borrowed into every response) and fragments
+//! rendered for the viewer per request (into reused per-thread buffers), which themselves merge
+//! the cached pieces they call. Nothing per viewer is kept.
 
 use crate::abi::{Arena, Ctx, Db, Deltas, Writer};
 use crate::out::{push_int, Out};
-use crate::store::{Reg, Seg, Snap};
+use crate::store::{Part, Reg, Seg, Snap};
 use crate::{http_date, Req};
 use arc_swap::ArcSwap;
 use rusqlite::Connection;
@@ -32,9 +37,6 @@ impl Rec {
     pub fn ptr(&self) -> *const u8 {
         self.bytes.as_ptr() as *const u8
     }
-    pub fn ptr_mut(&mut self) -> *mut u8 {
-        self.bytes.as_mut_ptr() as *mut u8
-    }
 }
 
 /// What the compiler generates for an app.
@@ -45,8 +47,8 @@ pub unsafe trait Glue: Send + Sync + 'static {
     const REGS: usize;
     const LISTS: usize;
     const SCREENS: usize;
-    /// Register kinds keyed by the viewer.
-    fn per_viewer(kind: usize) -> bool;
+    /// Register kinds rendered per request (they read the viewer); the rest are cached.
+    fn per_request(kind: usize) -> bool;
     /// The register kind a screen list's items are.
     fn list_item(list: usize) -> usize;
     /// The screen (and its parameter) a screen list belongs to.
@@ -75,33 +77,26 @@ pub unsafe trait Glue: Send + Sync + 'static {
     fn guards(c: &Connection, s: usize, key: i64, viewer: i64) -> Result<(), Option<String>>;
     /// Where "/" goes for a viewer (the request's cookies, as ids).
     fn home(c: &Connection, viewer: i64, cookie: &dyn Fn(&str) -> Option<i64>) -> Option<String>;
-    /// A register's record size, and its loader, variant key and builder.
+    /// A register's record size, its loader and its builder.
     fn rec_size(kind: usize) -> usize;
     /// # Safety: `rec` is a zeroed record of `kind`'s size.
-    unsafe fn load(kind: usize, ctx: &Ctx, db: *mut Db, key: i64, rec: *mut u8, arena: *mut Arena) -> bool;
-    /// # Safety: `rec` is a loaded record of `kind`; `viewer` a viewer record.
-    unsafe fn bits(kind: usize, rec: *const u8, viewer: *const u8) -> i64;
-    /// # Safety: as `bits`; `tmps` has `tmps(kind)` buffers.
-    unsafe fn build(kind: usize, ctx: &Ctx, rec: *const u8, viewer: *const u8, out: &mut Vec<u8>, tmps: &[*mut Vec<u8>], splits: &mut Vec<usize>);
+    unsafe fn load(kind: usize, ctx: &Ctx, db: *mut Db, key: i64, viewer: i64, rec: *mut u8, arena: *mut Arena) -> bool;
+    /// # Safety: `rec` is a loaded record of `kind`; `viewer` a viewer record (or null, for a
+    /// cached register: it never reads it); `tmps` has `tmps(kind)` buffers.
+    unsafe fn build(kind: usize, ctx: &Ctx, rec: *const u8, viewer: *const u8, out: &mut Vec<u8>, tmps: &[*mut Vec<u8>], pieces: &mut Vec<usize>);
     fn tmps(kind: usize) -> usize;
     fn viewer_size() -> usize;
     /// # Safety: `rec` a zeroed viewer record.
     unsafe fn load_viewer(ctx: &Ctx, db: *mut Db, key: i64, rec: *mut u8, arena: *mut Arena) -> bool;
-    /// # Safety: kept records of the kinds the patch names.
-    unsafe fn patch(reg: i64, list: i64, field: i64, rec: *mut u8, item: i64, value: i64) -> bool;
-    /// # Safety: as `patch`.
-    unsafe fn find(reg: i64, list: i64, field: i64, rec: *mut u8, row: i64) -> bool;
-    /// A screen instance: its audience (sorted), whether its write-time guards hold, its headers.
+    /// A screen instance: its audience (sorted) and headers; None when its write-time guards
+    /// don't hold.
     fn screen(c: &Connection, s: usize, key: i64) -> Option<(Vec<i64>, Vec<u8>)>;
-    /// The registers a screen instance needs, keyed by its parameter: (kind, key).
+    /// The cached registers a screen instance needs, keyed by its parameter: (kind, key).
     fn screen_regs(s: usize, key: i64) -> Vec<(usize, i64)>;
     /// The screen's lists' items, from SQLite: (list, item keys).
     fn screen_lists(c: &Connection, s: usize, key: i64) -> Vec<(usize, Vec<i64>)>;
-    /// The register kinds a screen needs per viewer.
-    fn viewer_regs(s: usize) -> Vec<usize>;
-    /// The page: its pieces in order, for the viewer at `place` in the audience; false when a
-    /// piece isn't in the snapshot.
-    fn assemble<'a>(snap: &'a Snap, s: usize, key: i64, viewer: i64, place: usize, push: &mut dyn FnMut(&'a Seg)) -> bool;
+    /// The page's parts in order; false when a cached piece isn't in the snapshot.
+    fn assemble<'a>(snap: &'a Snap, s: usize, key: i64, emit: &mut dyn FnMut(Part<'a>)) -> bool;
     /// Runs an action (its form fields); Ok(0) or its outcome's name.
     fn act(name: &str, c: &Connection, ctx: &Ctx, db: *mut Db, w: &mut Writer, viewer: i64, vrec: *const u8, form: &[(String, String)], d: &mut Deltas) -> Result<(), &'static str>;
     /// The page to go to after an action (its form fields).
@@ -131,78 +126,39 @@ pub fn with_db<T>(c: &Connection, f: impl FnOnce(*mut Db) -> T) -> T {
     })
 }
 
-fn tmps(n: usize) -> (Vec<Vec<u8>>, Vec<*mut Vec<u8>>) {
-    let mut bufs: Vec<Vec<u8>> = (0..n.max(1)).map(|_| Vec::with_capacity(256)).collect();
-    let ptrs = bufs.iter_mut().map(|b| b as *mut Vec<u8>).collect();
-    (bufs, ptrs)
-}
-
-/// A register's record, loaded from SQLite (a read).
-pub fn load<G: Glue>(c: &Connection, ctx: &Ctx, kind: usize, key: i64) -> Option<Rec> {
+/// A register's record, loaded from SQLite (a read); `viewer` for one rendered per request.
+pub fn load<G: Glue>(c: &Connection, ctx: &Ctx, kind: usize, key: i64, viewer: i64) -> Option<Rec> {
     let (rec, p, a) = Rec::new(G::rec_size(kind));
-    let ok = with_db(c, |db| unsafe { G::load(kind, ctx, db, key, p, a) });
+    let ok = with_db(c, |db| unsafe { G::load(kind, ctx, db, key, viewer, p, a) });
     ok.then_some(rec)
 }
 
-/// A viewer's record (a read).
+/// A viewer's record (a read): the forwarded records' values, a per-request fragment's viewer.
 pub fn load_viewer<G: Glue>(c: &Connection, ctx: &Ctx, key: i64) -> Rec {
     let (rec, p, a) = Rec::new(G::viewer_size());
     with_db(c, |db| unsafe { G::load_viewer(ctx, db, key, p, a) });
     rec
 }
 
-/// A register's value from its record: a variant per distinct key among the viewers (or, keyed
-/// by a viewer, its pieces between splices).
-pub fn build<G: Glue>(ctx: &Ctx, kind: usize, rec: *const u8, viewers: &[*const u8]) -> Reg {
-    let (_bufs, ptrs) = tmps(G::tmps(kind));
-    let mut splits = vec![];
-    if G::per_viewer(kind) {
-        let mut out = Vec::with_capacity(8192);
-        unsafe { G::build(kind, ctx, rec, viewers[0], &mut out, &ptrs, &mut splits) };
-        // its pieces between splices; by_place holds each splice's site, in order
-        let mut variants = vec![];
-        let mut sites = vec![];
-        let mut at = 0;
-        for s in splits {
-            let (s, site) = crate::abi::split_at(s);
-            variants.push(Seg::new(out[at..s].to_vec()));
-            sites.push(site as u8);
-            at = s;
-        }
-        variants.push(Seg::new(out[at..].to_vec()));
-        return Reg { variants, by_place: sites, overflow: false };
-    }
-    let mut keys: Vec<i64> = vec![];
-    let mut variants = vec![];
-    let mut by = Vec::with_capacity(viewers.len());
-    for v in viewers {
-        let k = unsafe { G::bits(kind, rec, *v) };
-        let i = match keys.iter().position(|x| *x == k) {
-            Some(i) => i,
-            None => {
-                keys.push(k);
-                let mut out = Vec::with_capacity(4096);
-                unsafe { G::build(kind, ctx, rec, *v, &mut out, &ptrs, &mut splits) };
-                variants.push(Seg::new(out));
-                keys.len() - 1
-            }
-        };
-        by.push(i as u8);
-    }
-    if variants.is_empty() {
-        // no audience yet: the variant for no viewer
-        let mut out = Vec::with_capacity(4096);
-        let none = vec![0u64; G::viewer_size().div_ceil(8).max(1)];
-        unsafe { G::build(kind, ctx, rec, none.as_ptr() as *const u8, &mut out, &ptrs, &mut splits) };
-        variants.push(Seg::new(out));
-    }
-    let overflow = variants.len() > 256;
-    Reg { variants, by_place: if overflow { vec![] } else { by }, overflow }
+/// A cached register's bytes, as they are.
+fn build_raw<G: Glue>(ctx: &Ctx, kind: usize, rec: *const u8) -> Vec<u8> {
+    let mut bufs: Vec<Vec<u8>> = (0..G::tmps(kind).max(1)).map(|_| Vec::with_capacity(256)).collect();
+    let ptrs: Vec<*mut Vec<u8>> = bufs.iter_mut().map(|b| b as *mut Vec<u8>).collect();
+    let mut out = Vec::with_capacity(4096);
+    let mut pieces = vec![];
+    unsafe { G::build(kind, ctx, rec, std::ptr::null(), &mut out, &ptrs, &mut pieces) };
+    out
 }
 
-/// Builds a screen instance into `snap` from SQLite: its audience and headers, the registers keyed
-/// by its parameter, its lists and their items. False if its write-time guards don't hold.
-pub fn build_screen<G: Glue>(c: &Connection, ctx: &Ctx, snap: &mut Snap, viewers: &mut HashMap<i64, Rec>, s: usize, key: i64) -> bool {
+/// A cached register's value from its record: one piece, compressed once.
+pub fn build<G: Glue>(ctx: &Ctx, kind: usize, rec: *const u8) -> Reg {
+    Reg::one(build_raw::<G>(ctx, kind, rec))
+}
+
+/// Builds a screen instance into `snap` from SQLite: its audience and headers, the cached
+/// registers keyed by its parameter, its lists and their items. False if its write-time guards
+/// don't hold.
+pub fn build_screen<G: Glue>(c: &Connection, ctx: &Ctx, snap: &mut Snap, s: usize, key: i64) -> bool {
     let (audience, headers) = match G::screen(c, s, key) {
         Some(x) => x,
         None => {
@@ -210,20 +166,16 @@ pub fn build_screen<G: Glue>(c: &Connection, ctx: &Ctx, snap: &mut Snap, viewers
             return false;
         }
     };
-    for u in &audience {
-        viewers.entry(*u).or_insert_with(|| load_viewer::<G>(c, ctx, *u));
-    }
-    let vs: Vec<*const u8> = audience.iter().map(|u| viewers[u].ptr()).collect();
     for (kind, k) in G::screen_regs(s, key) {
-        if let Some(rec) = load::<G>(c, ctx, kind, k) {
-            snap.regs[kind].insert(k, Arc::new(build::<G>(ctx, kind, rec.ptr(), &vs)));
+        if let Some(rec) = load::<G>(c, ctx, kind, k, 0) {
+            snap.regs[kind].insert(k, Arc::new(build::<G>(ctx, kind, rec.ptr())));
         }
     }
     for (list, items) in G::screen_lists(c, s, key) {
         let kind = G::list_item(list);
         for id in &items {
-            if let Some(rec) = load::<G>(c, ctx, kind, *id) {
-                snap.regs[kind].insert(*id, Arc::new(build::<G>(ctx, kind, rec.ptr(), &vs)));
+            if let Some(rec) = load::<G>(c, ctx, kind, *id, 0) {
+                snap.regs[kind].insert(*id, Arc::new(build::<G>(ctx, kind, rec.ptr())));
             }
         }
         snap.lists[list].insert(key, Arc::new(items));
@@ -232,11 +184,182 @@ pub fn build_screen<G: Glue>(c: &Connection, ctx: &Ctx, snap: &mut Snap, viewers
     true
 }
 
+// ---- merging a page: cached pieces and fragments rendered for the viewer
+
+/// Where a page's parts go: a cached piece (borrowed: its bytes outlive the response) or bytes
+/// made for this request.
+pub trait Sink<'a> {
+    fn seg(&mut self, s: &'a Seg);
+    fn bytes(&mut self, b: &[u8]);
+}
+
+/// A gzip response: cached pieces' precompressed bytes, borrowed; bytes made for this request in
+/// stored (uncompressed) blocks; the CRC combined from the pieces' and continued over the rest.
+struct GzOut<'o> {
+    out: &'o mut Out,
+    crc: crate::gz::Crc,
+}
+
+impl<'a> Sink<'a> for GzOut<'_> {
+    fn seg(&mut self, s: &'a Seg) {
+        // Safety: the response holds the snapshot the piece is from
+        unsafe { self.out.push_borrowed(&s.gz.deflate) };
+        self.crc.add(&s.gz);
+    }
+    fn bytes(&mut self, b: &[u8]) {
+        for chunk in b.chunks(65535) {
+            self.out.push_own(|o| {
+                o.extend_from_slice(&crate::gz::stored_header(chunk.len()));
+                o.extend_from_slice(chunk);
+            });
+            self.crc.add_raw(chunk);
+        }
+    }
+}
+
+/// A plain response: pieces borrowed, the rest copied in.
+struct RawOut<'o> {
+    out: &'o mut Out,
+}
+
+impl<'a> Sink<'a> for RawOut<'_> {
+    fn seg(&mut self, s: &'a Seg) {
+        unsafe { self.out.push_borrowed(&s.raw) };
+    }
+    fn bytes(&mut self, b: &[u8]) {
+        self.out.push_own(|o| o.extend_from_slice(b));
+    }
+}
+
+/// A page in one buffer (the cold path, the golden model, the scrubber).
+struct VecSink(Vec<u8>);
+
+impl<'a> Sink<'a> for VecSink {
+    fn seg(&mut self, s: &'a Seg) {
+        self.0.extend_from_slice(&s.raw);
+    }
+    fn bytes(&mut self, b: &[u8]) {
+        self.0.extend_from_slice(b);
+    }
+}
+
+/// A thread's buffers for rendering per-request fragments, reused (no allocation once warm).
+struct Scratch {
+    rec: Vec<u64>,
+    arena: Arena,
+    viewer: Vec<u64>,
+    varena: Arena,
+    out: Vec<u8>,
+    pieces: Vec<usize>,
+    tmps: Vec<Vec<u8>>,
+    ptrs: Vec<*mut Vec<u8>>,
+}
+
+thread_local! {
+    static SCRATCH: RefCell<Option<Scratch>> = const { RefCell::new(None) };
+}
+
+impl Scratch {
+    fn new() -> Scratch {
+        Scratch { rec: Vec::with_capacity(512), arena: Arena::new(), viewer: Vec::with_capacity(64), varena: Arena::new(), out: Vec::with_capacity(65536), pieces: Vec::with_capacity(256), tmps: vec![], ptrs: vec![] }
+    }
+
+    fn load_viewer<G: Glue>(&mut self, c: &Connection, ctx: &Ctx, viewer: i64) {
+        self.viewer.clear();
+        self.viewer.resize(G::viewer_size().div_ceil(8).max(1), 0);
+        self.varena.reset();
+        let (p, a) = (self.viewer.as_mut_ptr() as *mut u8, &mut self.varena as *mut Arena);
+        with_db(c, |db| unsafe { G::load_viewer(ctx, db, viewer, p, a) });
+    }
+
+    /// A per-request fragment rendered: its bytes in `out`, its cached pieces' places in `pieces`.
+    fn render<G: Glue>(&mut self, c: &Connection, ctx: &Ctx, kind: usize, key: i64, viewer: i64) -> bool {
+        self.rec.clear();
+        self.rec.resize(G::rec_size(kind).div_ceil(8).max(1), 0);
+        self.arena.reset();
+        let (p, a) = (self.rec.as_mut_ptr() as *mut u8, &mut self.arena as *mut Arena);
+        if !with_db(c, |db| unsafe { G::load(kind, ctx, db, key, viewer, p, a) }) {
+            return false;
+        }
+        self.out.clear();
+        self.pieces.clear();
+        while self.tmps.len() < G::tmps(kind).max(1) {
+            self.tmps.push(Vec::with_capacity(256));
+        }
+        self.ptrs.clear();
+        for t in self.tmps.iter_mut() {
+            t.clear();
+            self.ptrs.push(t as *mut Vec<u8>);
+        }
+        unsafe { G::build(kind, ctx, self.rec.as_ptr() as *const u8, self.viewer.as_ptr() as *const u8, &mut self.out, &self.ptrs, &mut self.pieces) };
+        true
+    }
+}
+
+/// A page's parts, in order, to `sink`: cached pieces from `snap`; fragments rendered for the
+/// viewer now, each merged with the cached pieces it calls (a piece the snapshot doesn't keep is
+/// built now, as it is, and noted in `keep` for the writer to keep). False when a part can't be
+/// made (a cached piece of the page itself missing, a row gone).
+pub fn emit_page<'a, G: Glue>(snap: &'a Snap, c: &Connection, ctx: &Ctx, s: usize, key: i64, viewer: i64, sink: &mut dyn Sink<'a>, keep: &mut Vec<(usize, i64)>) -> bool {
+    SCRATCH.with(|sc| {
+        let mut guard = sc.borrow_mut();
+        let sc = guard.get_or_insert_with(Scratch::new);
+        let (mut ok, mut viewer_loaded) = (true, false);
+        let done = G::assemble(snap, s, key, &mut |part| {
+            if !ok {
+                return;
+            }
+            match part {
+                Part::Seg(seg) => sink.seg(seg),
+                Part::Render(kind, k) => {
+                    if !viewer_loaded {
+                        sc.load_viewer::<G>(c, ctx, viewer);
+                        viewer_loaded = true;
+                    }
+                    if !sc.render::<G>(c, ctx, kind, k, viewer) {
+                        ok = false;
+                        return;
+                    }
+                    let mut at = 0;
+                    for pair in sc.pieces.chunks(2) {
+                        let (place, pk) = crate::abi::split_at(pair[0]);
+                        let pkey = pair[1] as i64;
+                        if place > at {
+                            sink.bytes(&sc.out[at..place]);
+                        }
+                        at = place;
+                        match snap.reg(pk, pkey) {
+                            Some(r) => sink.seg(&r.seg),
+                            None => match load::<G>(c, ctx, pk, pkey, 0) {
+                                Some(rec) => {
+                                    sink.bytes(&build_raw::<G>(ctx, pk, rec.ptr()));
+                                    keep.push((pk, pkey));
+                                }
+                                None => {
+                                    ok = false;
+                                    return;
+                                }
+                            },
+                        }
+                    }
+                    if at < sc.out.len() {
+                        sink.bytes(&sc.out[at..]);
+                    }
+                }
+            }
+        });
+        done && ok
+    })
+}
+
 // ---- the server
 
 pub enum Cmd {
     Act { name: String, viewer: i64, form: Vec<(String, String)>, reply: SyncSender<Result<Done, &'static str>> },
-    Warm { screen: usize, key: i64, viewer: i64 },
+    /// a screen instance to build (a read missed it)
+    Warm { screen: usize, key: i64 },
+    /// a cached piece a per-request fragment merged that the snapshot didn't keep
+    Keep { kind: usize, key: i64 },
 }
 
 /// A done action: where it goes, and its session cookie (Some(token): signed in; Some(empty):
@@ -259,22 +382,23 @@ pub struct Stats {
     pub acts: AtomicU64,
     /// registers loaded from SQLite after a commit (a read after the write)
     pub write_reads: AtomicU64,
-    /// registers built from forwarded records, or patched kept records: no read
+    /// registers built from forwarded records: no read
     pub forwarded: AtomicU64,
-    pub patched: AtomicU64,
+    /// fragments rendered for a viewer (per request)
+    pub rendered: AtomicU64,
     /// writes that cleared every screen (an edge the writer has no rule for): should stay 0
     pub cleared: AtomicU64,
-    /// screen instances rebuilt because their audience changed
+    /// screen instances whose audience changed
     pub audiences: AtomicU64,
     /// kept pages the scrubber compared with a fresh build, and the ones it found different (and
     /// rebuilt): a missed edge
     pub scrubbed: AtomicU64,
+    pub scrub_fixed: AtomicU64,
     /// verified pages a concurrent write made incomparable (not counted as verified)
     pub verify_raced: AtomicU64,
     /// the writer's commits, and the commits its published snapshot includes
     pub commits: AtomicU64,
     pub published: AtomicU64,
-    pub scrub_fixed: AtomicU64,
 }
 
 pub struct App<G: Glue> {
@@ -306,6 +430,19 @@ pub fn open_write(path: &str) -> Connection {
     c.pragma_update(None, "synchronous", "NORMAL").ok();
     c.pragma_update(None, "wal_autocheckpoint", 0).ok();
     c
+}
+
+fn page_response(out: &mut Out, body: &[u8], headers: &[u8]) {
+    out.push_own(|b| {
+        b.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: ");
+        push_int(b, body.len() as u64);
+        b.extend_from_slice(b"\r\n");
+        b.extend_from_slice(headers);
+        b.extend_from_slice(b"Date: ");
+        http_date(b);
+        b.extend_from_slice(b"\r\n\r\n");
+        b.extend_from_slice(body);
+    });
 }
 
 impl<G: Glue> App<G> {
@@ -357,7 +494,8 @@ impl<G: Glue> App<G> {
         }
     }
 
-    /// The fast path: a screen instance and the viewer's registers, from the snapshot.
+    /// The fast path: a screen instance from the snapshot, its cached pieces borrowed, its
+    /// per-request fragments rendered for the viewer.
     pub fn fast(&self, req: &Req, out: &mut Out) -> bool {
         if req.method != b"GET" || !req.query.is_empty() || req.cookie(b"flash").is_some() {
             return false;
@@ -383,14 +521,13 @@ impl<G: Glue> App<G> {
         let inst = match snap.screens[s].get(&key) {
             Some(i) => i.clone(),
             None => {
-                self.send(Cmd::Warm { screen: s, key, viewer: uid });
+                self.send(Cmd::Warm { screen: s, key });
                 return false;
             }
         };
-        let place = match inst.audience.binary_search(&uid) {
-            Ok(p) => p,
-            Err(_) => return false, // not in its audience: the cold path answers
-        };
+        if inst.audience.binary_search(&uid).is_err() {
+            return false; // not in its audience: the cold path answers
+        }
         let first = out.placeholder();
         // Safety: every borrowed range is owned by `snap`, which the response holds
         unsafe { out.push_borrowed(&inst.headers) };
@@ -403,21 +540,25 @@ impl<G: Glue> App<G> {
             b.extend_from_slice(b"\r\n\r\n");
         });
         let head_len = out.len();
-        let ok = if req.gzip {
-            out.push_static(&crate::gz::HEADER);
-            let mut crc = crate::gz::Crc::default();
-            let ok = G::assemble(&snap, s, key, uid, place, &mut |seg| {
-                unsafe { out.push_borrowed(&seg.gz.deflate) };
-                crc.add(&seg.gz);
-            });
-            out.push_static(&crate::gz::FINAL);
-            out.push_own(|b| b.extend_from_slice(&crc.trailer()));
-            ok
-        } else {
-            G::assemble(&snap, s, key, uid, place, &mut |seg| unsafe { out.push_borrowed(&seg.raw) })
-        };
+        let mut keep = Vec::new();
+        let ok = self.with_reader(|c| {
+            if req.gzip {
+                out.push_static(&crate::gz::HEADER);
+                let mut gz = GzOut { out: &mut *out, crc: crate::gz::Crc::default() };
+                let ok = emit_page::<G>(&snap, c, &self.ctx, s, key, uid, &mut gz, &mut keep);
+                let trailer = gz.crc.trailer();
+                out.push_static(&crate::gz::FINAL);
+                out.push_own(|b| b.extend_from_slice(&trailer));
+                ok
+            } else {
+                emit_page::<G>(&snap, c, &self.ctx, s, key, uid, &mut RawOut { out: &mut *out }, &mut keep)
+            }
+        });
+        for (kind, k) in keep {
+            self.send(Cmd::Keep { kind, key: k });
+        }
         if !ok {
-            self.send(Cmd::Warm { screen: s, key, viewer: uid });
+            self.send(Cmd::Warm { screen: s, key });
             out.reset();
             return false;
         }
@@ -447,7 +588,7 @@ impl<G: Glue> App<G> {
             }
             fast = plain;
         }
-        let fresh = self.with_reader(|c| self.fresh(c, s, key, uid));
+        let fresh = self.with_reader(|c| fresh::<G>(c, &self.ctx, s, key, uid));
         // a write committed while this page was served or built afresh (or committed but not yet
         // published when it was served): the two can't be compared
         if c0 != p0 || self.stats.commits.load(Ordering::SeqCst) != c0 {
@@ -469,29 +610,6 @@ impl<G: Glue> App<G> {
         }
     }
 
-    /// The page built fresh from SQLite (the cold path, and the golden model): None when the
-    /// viewer isn't in its audience or its guards don't hold.
-    fn fresh(&self, c: &Connection, s: usize, key: i64, uid: i64) -> Option<(Vec<u8>, Vec<u8>)> {
-        let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
-        let mut viewers = HashMap::new();
-        if !build_screen::<G>(c, &self.ctx, &mut snap, &mut viewers, s, key) {
-            return None;
-        }
-        let inst = snap.screens[s].get(&key)?.clone();
-        let place = inst.audience.binary_search(&uid).ok()?;
-        viewers.entry(uid).or_insert_with(|| load_viewer::<G>(c, &self.ctx, uid));
-        for kind in G::viewer_regs(s) {
-            if let Some(rec) = load::<G>(c, &self.ctx, kind, uid) {
-                snap.regs[kind].insert(uid, Arc::new(build::<G>(&self.ctx, kind, rec.ptr(), &[viewers[&uid].ptr()])));
-            }
-        }
-        let mut page = Vec::with_capacity(400_000);
-        if !G::assemble(&snap, s, key, uid, place, &mut |seg| page.extend_from_slice(&seg.raw)) {
-            return None;
-        }
-        Some((page, inst.headers.clone()))
-    }
-
     fn cold(&self, req: &Req, out: &mut Out) {
         self.stats.cold.fetch_add(1, Ordering::Relaxed);
         let path = req.path;
@@ -502,8 +620,9 @@ impl<G: Glue> App<G> {
             let st = &self.stats;
             let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
             let s = format!(
-                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"patched":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"version":{}}}"#,
-                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.patched), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced), self.snap.load().version
+                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"rendered":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"kept":{},"version":{}}}"#,
+                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.rendered), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced),
+                self.snap.load().regs.iter().map(|r| r.len()).sum::<usize>(), self.snap.load().version
             );
             return respond(out, 200, "application/json", &[], s.as_bytes());
         }
@@ -513,7 +632,7 @@ impl<G: Glue> App<G> {
                 let name = String::from_utf8_lossy(name).into_owned();
                 let mut form = parse_form(req.body);
                 // hidden arguments come only from here, never from the form
-                form.retain(|(k, _)| !k.starts_with("__verified") && k != "__session");
+                form.retain(|(k, _)| !k.starts_with("__verified") && !k.starts_with("__hashed") && k != "__session");
                 let viewer = match (viewer, G::public_act(&name)) {
                     (Some(v), _) => v,
                     (None, true) => 0,
@@ -558,18 +677,9 @@ impl<G: Glue> App<G> {
         }
         if req.method == b"GET" {
             if let Some(s) = G::public_screen(path) {
-                return match self.with_reader(|c| self.public_page(c, s)) {
-                    Some((body, headers)) => out.push_own(|b| {
-                        b.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: ");
-                        push_int(b, body.len() as u64);
-                        b.extend_from_slice(b"\r\n");
-                        b.extend_from_slice(&headers);
-                        b.extend_from_slice(b"Date: ");
-                        http_date(b);
-                        b.extend_from_slice(b"\r\n\r\n");
-                        b.extend_from_slice(&body);
-                    }),
-                    None => respond(out, 500, "text/plain", &[], b"the page couldn't be built"),
+                return match self.with_reader(|c| per_request::<G>(c, &self.ctx, s, 0, 0)) {
+                    Ok((body, headers)) => page_response(out, &body, &headers),
+                    Err(_) => respond(out, 500, "text/plain", &[], b"the page couldn't be built"),
                 };
             }
             if let Some((s, key)) = G::route(path).filter(|(s, _)| G::cold(*s)) {
@@ -577,17 +687,8 @@ impl<G: Glue> App<G> {
                     Some(v) => v,
                     None => return redirect(out, "/session/new", None),
                 };
-                return match self.with_reader(|c| self.cold_page(c, s, key, viewer)) {
-                    Ok((body, headers)) => out.push_own(|b| {
-                        b.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: ");
-                        push_int(b, body.len() as u64);
-                        b.extend_from_slice(b"\r\n");
-                        b.extend_from_slice(&headers);
-                        b.extend_from_slice(b"Date: ");
-                        http_date(b);
-                        b.extend_from_slice(b"\r\n\r\n");
-                        b.extend_from_slice(&body);
-                    }),
+                return match self.with_reader(|c| G::guards(c, s, key, viewer).and_then(|_| per_request::<G>(c, &self.ctx, s, key, viewer))) {
+                    Ok((body, headers)) => page_response(out, &body, &headers),
                     Err(Some(to)) => redirect(out, &to, None),
                     Err(None) => respond(out, 404, "text/plain", &[], b"not found"),
                 };
@@ -597,23 +698,12 @@ impl<G: Glue> App<G> {
                     Some(v) => v,
                     None => return redirect(out, "/session/new", None),
                 };
-                let r = self.with_reader(|c| match self.fresh(c, s, key, viewer) {
+                let r = self.with_reader(|c| match fresh::<G>(c, &self.ctx, s, key, viewer) {
                     Some(p) => Ok(p),
                     None => Err(G::refuse(c, s, key, viewer)),
                 });
                 return match r {
-                    Ok((body, headers)) => {
-                        out.push_own(|b| {
-                            b.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: ");
-                            push_int(b, body.len() as u64);
-                            b.extend_from_slice(b"\r\n");
-                            b.extend_from_slice(&headers);
-                            b.extend_from_slice(b"Date: ");
-                            http_date(b);
-                            b.extend_from_slice(b"\r\n\r\n");
-                            b.extend_from_slice(&body);
-                        });
-                    }
+                    Ok((body, headers)) => page_response(out, &body, &headers),
                     Err(Some(to)) => redirect(out, &to, None),
                     Err(None) => respond(out, 501, "text/plain", &[], b"not in this phase"),
                 };
@@ -640,49 +730,43 @@ impl<G: Glue> App<G> {
         let t = String::from_utf8_lossy(t).into_owned();
         self.with_reader(|c| G::session(c, &t))
     }
+}
 
-    /// A cold screen for a viewer, built from SQLite after its guards (in order).
-    fn cold_page(&self, c: &Connection, s: usize, key: i64, viewer: i64) -> Result<(Vec<u8>, Vec<u8>), Option<String>> {
-        G::guards(c, s, key, viewer)?;
-        let v = load_viewer::<G>(c, &self.ctx, viewer);
-        let vs = [v.ptr()];
-        let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
-        for (kind, k) in G::screen_regs(s, key) {
-            let rec = load::<G>(c, &self.ctx, kind, k).ok_or(None)?;
-            snap.regs[kind].insert(k, Arc::new(build::<G>(&self.ctx, kind, rec.ptr(), &vs)));
-        }
-        for kind in G::viewer_regs(s) {
-            let rec = load::<G>(c, &self.ctx, kind, viewer).ok_or(None)?;
-            snap.regs[kind].insert(viewer, Arc::new(build::<G>(&self.ctx, kind, rec.ptr(), &vs)));
-        }
-        for (list, items) in G::screen_lists(c, s, key) {
-            let kind = G::list_item(list);
-            for id in &items {
-                if let Some(rec) = load::<G>(c, &self.ctx, kind, *id) {
-                    snap.regs[kind].insert(*id, Arc::new(build::<G>(&self.ctx, kind, rec.ptr(), &vs)));
-                }
-            }
-            snap.lists[list].insert(key, Arc::new(items));
-        }
-        let (_, headers) = G::screen(c, s, key).ok_or(None)?;
-        let mut page = Vec::with_capacity(65536);
-        if G::assemble(&snap, s, key, viewer, 0, &mut |seg| page.extend_from_slice(&seg.raw)) {
-            Ok((page, headers))
-        } else {
-            Err(None)
-        }
+/// A page built fresh from SQLite (the cold path, and the golden model): None when the viewer
+/// isn't in its audience or its guards don't hold.
+fn fresh<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, uid: i64) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
+    if !build_screen::<G>(c, ctx, &mut snap, s, key) {
+        return None;
     }
+    let inst = snap.screens[s].get(&key)?.clone();
+    inst.audience.binary_search(&uid).ok()?;
+    let mut page = VecSink(Vec::with_capacity(400_000));
+    emit_page::<G>(&snap, c, ctx, s, key, uid, &mut page, &mut vec![]).then_some((page.0, inst.headers.clone()))
+}
 
-    /// A public screen, built from SQLite (no viewer: each register's variant for nobody).
-    fn public_page(&self, c: &Connection, s: usize) -> Option<(Vec<u8>, Vec<u8>)> {
-        let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
-        for (kind, k) in G::screen_regs(s, 0) {
-            let rec = load::<G>(c, &self.ctx, kind, k)?;
-            snap.regs[kind].insert(k, Arc::new(build::<G>(&self.ctx, kind, rec.ptr(), &[])));
+/// A page built per request (a cold screen, a public one): its cached pieces built now too.
+fn per_request<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, viewer: i64) -> Result<(Vec<u8>, Vec<u8>), Option<String>> {
+    let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
+    for (kind, k) in G::screen_regs(s, key) {
+        let rec = load::<G>(c, ctx, kind, k, 0).ok_or(None)?;
+        snap.regs[kind].insert(k, Arc::new(build::<G>(ctx, kind, rec.ptr())));
+    }
+    for (list, items) in G::screen_lists(c, s, key) {
+        let kind = G::list_item(list);
+        for id in &items {
+            if let Some(rec) = load::<G>(c, ctx, kind, *id, 0) {
+                snap.regs[kind].insert(*id, Arc::new(build::<G>(ctx, kind, rec.ptr())));
+            }
         }
-        let (_, headers) = G::screen(c, s, 0)?;
-        let mut page = Vec::with_capacity(16384);
-        G::assemble(&snap, s, 0, 0, 0, &mut |seg| page.extend_from_slice(&seg.raw)).then_some((page, headers))
+        snap.lists[list].insert(key, Arc::new(items));
+    }
+    let (_, headers) = G::screen(c, s, key).ok_or(None)?;
+    let mut page = VecSink(Vec::with_capacity(65536));
+    if emit_page::<G>(&snap, c, ctx, s, key, viewer, &mut page, &mut vec![]) {
+        Ok((page.0, headers))
+    } else {
+        Err(None)
     }
 }
 
@@ -698,11 +782,12 @@ impl<G: Glue> crate::Handler for App<G> {
 // ---- the writer
 
 /// The writer: actions in batches (group commit), then their delta edges into the next snapshot.
+/// It keeps only cached pieces: nothing per viewer, so a write's work doesn't grow with the
+/// people who can see it.
 fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Receiver<Cmd>, stats: Arc<Stats>, seq: i64, scrub_ms: u64) {
     let mut w = Writer::new(seq);
-    // kept between batches: viewers' records, per-viewer registers' records (patched in place)
+    // viewers' records: an action's viewer (forwarding copies values from it)
     let mut viewers: HashMap<i64, Rec> = HashMap::new();
-    let mut kept: HashMap<(usize, i64), Rec> = HashMap::new();
     // the sessions' tokens by their row's id (a deleted row's token is forgotten by its id)
     let mut tokens: HashMap<i64, Box<[u8]>> = G::sessions(&c).into_iter().map(|(id, t, _)| (id, t.into_bytes().into_boxed_slice())).collect();
     let mut batch = Vec::with_capacity(256);
@@ -718,7 +803,7 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             match rx.recv_timeout(std::time::Duration::from_millis(scrub_ms)) {
                 Ok(c) => c,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    scrub::<G>(&c, &ctx, &snap, &mut viewers, &mut kept, &stats, &mut cursor);
+                    scrub::<G>(&c, &ctx, &snap, &stats, &mut cursor);
                     continue;
                 }
                 Err(_) => break,
@@ -736,7 +821,7 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
         let cur = snap.load_full();
         let mut replies = vec![];
         let mut deltas = Deltas::default();
-        let mut warm: Vec<(usize, i64, i64)> = vec![];
+        let (mut warm, mut keep): (Vec<(usize, i64)>, Vec<(usize, i64)>) = (vec![], vec![]);
         w.begin(crate::time::now_ms());
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).expect("begin");
         for cmd in batch.drain(..) {
@@ -746,7 +831,7 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     // each action is all or nothing: a savepoint, rolled back (with its delta
                     // edges) when it doesn't end ok, a failed require after a write or a write
                     // a constraint refused
-                    let marks = (deltas.list.len(), deltas.patches.len(), deltas.finds.len());
+                    let marks = deltas.list.len();
                     tx.execute_batch("SAVEPOINT act").expect("savepoint");
                     let mut r = with_db(&tx, |db| G::act(&name, &tx, &ctx, db, &mut w, viewer, vrec, &form, &mut deltas));
                     if let Some(e) = crate::abi::take_write_failure() {
@@ -763,25 +848,21 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                         tx.execute_batch("RELEASE act").expect("release");
                     } else {
                         tx.execute_batch("ROLLBACK TO act; RELEASE act").expect("rollback");
-                        deltas.list.truncate(marks.0);
-                        deltas.patches.truncate(marks.1);
-                        deltas.finds.truncate(marks.2);
+                        deltas.list.truncate(marks);
                     }
                     replies.push((reply, r.map(|_| Done { to: G::after_act(&name, &form), cookie, go })));
                 }
-                Cmd::Warm { screen, key, viewer } => warm.push((screen, key, viewer)),
+                Cmd::Warm { screen, key } => warm.push((screen, key)),
+                Cmd::Keep { kind, key } => keep.push((kind, key)),
             }
         }
         tx.commit().expect("commit");
         stats.commits.fetch_add(1, Ordering::SeqCst);
         let t_commit = t0.elapsed();
         let mut next = cur.next();
-        let mut reload: HashSet<(usize, i64)> = HashSet::new();
-        let mut dirty: HashSet<(usize, i64)> = HashSet::new();
         let mut forwarded: HashMap<i64, i64> = HashMap::new();
         let mut recheck: HashSet<(usize, i64)> = HashSet::new();
         let (mut shared, mut relist, mut dropped, mut audiences): (HashSet<(usize, i64)>, HashSet<(usize, i64)>, HashSet<(usize, i64)>, HashSet<(usize, i64)>) = Default::default();
-        let mut rescreen: HashSet<(usize, i64)> = HashSet::new();
         for &(op, a, key, item) in &deltas.list {
             let a = a as usize;
             match op {
@@ -789,26 +870,22 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     forwarded.insert(key, item);
                 }
                 2 | 7 => {
-                    // a new item appended to a screen list: its register built for the screen's audience
+                    // a new item in a kept screen list: its piece built (from the forwarded
+                    // record, or read), added in order
                     let s = G::list_screen(a);
-                    let inst = match next.screens[s].get(&key) {
-                        Some(i) => i.clone(),
-                        None => continue,
-                    };
-                    let kind = G::list_item(a);
-                    for u in &inst.audience {
-                        viewers.entry(*u).or_insert_with(|| load_viewer::<G>(&c, &ctx, *u));
+                    if !next.screens[s].contains_key(&key) {
+                        continue;
                     }
-                    let vs: Vec<*const u8> = inst.audience.iter().map(|u| viewers[u].ptr()).collect();
+                    let kind = G::list_item(a);
                     let reg = match forwarded.get(&item) {
                         Some(rec) => {
                             stats.forwarded.fetch_add(1, Ordering::Relaxed);
-                            build::<G>(&ctx, kind, *rec as *const u8, &vs)
+                            build::<G>(&ctx, kind, *rec as *const u8)
                         }
                         None => {
                             stats.write_reads.fetch_add(1, Ordering::Relaxed);
-                            match load::<G>(&c, &ctx, kind, item) {
-                                Some(rec) => build::<G>(&ctx, kind, rec.ptr(), &vs),
+                            match load::<G>(&c, &ctx, kind, item, 0) {
+                                Some(rec) => build::<G>(&ctx, kind, rec.ptr()),
                                 None => continue,
                             }
                         }
@@ -832,43 +909,19 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     next.lists[a].insert(key, Arc::new(items));
                     recheck.insert((s, key));
                 }
-                3 if G::per_viewer(a) => {
-                    if kept.contains_key(&(a, key)) {
-                        reload.insert((a, key));
-                    }
-                }
-                4 if G::per_viewer(a) => {
-                    reload.extend(kept.keys().filter(|(k, _)| *k == a).copied());
-                }
-                // a shared register at a key: rebuilt for the audience of the screen showing it
+                // a cached register at a key, or every kept one of it
                 3 => {
                     shared.insert((a, key));
                 }
-                // every kept instance of a shared register (a nested list changed)
                 4 => {
                     shared.extend(next.regs[a].keys().map(|k| (a, *k)));
                 }
-                // what the viewers' records read changed (a fallback): every record read again,
-                // every kept per-viewer register too, the screens rebuilt on demand
-                15 if key == i64::MIN => {
-                    stats.cleared.fetch_add(1, Ordering::Relaxed);
-                    viewers.clear();
-                    reload.extend(kept.keys().copied());
-                    for s in &mut next.screens {
-                        s.clear();
-                    }
-                }
-                // one viewer's row changed: their record, their own registers, and every kept page
-                // they can see (their variants may change)
+                // a viewer's row changed: their record is read again (no piece depends on it)
                 15 => {
-                    viewers.remove(&key);
-                    reload.extend(kept.keys().filter(|(_, u)| *u == key).copied());
-                    for s in 0..G::SCREENS {
-                        for (k, inst) in next.screens[s].iter() {
-                            if inst.audience.binary_search(&key).is_ok() {
-                                rescreen.insert((s, *k));
-                            }
-                        }
+                    if key == i64::MIN {
+                        viewers.clear();
+                    } else {
+                        viewers.remove(&key);
                     }
                 }
                 // a new row's register: no screen keeps it yet (a list that shows it adds it,
@@ -893,15 +946,6 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                         tokens.insert(key, t);
                     }
                 }
-                // a deleted row's screen instance (and its lists)
-                13 => {
-                    next.screens[a].remove(&key);
-                    for l in 0..G::LISTS {
-                        if G::list_screen(l) == a {
-                            next.lists[l].remove(&key);
-                        }
-                    }
-                }
                 // a session row deleted
                 11 => {
                     if let Some(old) = tokens.remove(&key) {
@@ -911,6 +955,15 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 // what a screen's audience reads changed: its audience again (every key: i64::MIN)
                 12 => {
                     audiences.insert((a, key));
+                }
+                // a deleted row's screen instance (and its lists)
+                13 => {
+                    next.screens[a].remove(&key);
+                    for l in 0..G::LISTS {
+                        if G::list_screen(l) == a {
+                            next.lists[l].remove(&key);
+                        }
+                    }
                 }
                 // anything else: the screens rebuild on demand (counted: a write should never need it)
                 _ => {
@@ -928,17 +981,15 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             .collect();
         for (list, key) in relist {
             let s = G::list_screen(list);
-            let Some(inst) = next.screens[s].get(&key).cloned() else { continue };
+            if !next.screens[s].contains_key(&key) {
+                continue;
+            }
             let kind = G::list_item(list);
             let Some((_, items)) = G::screen_lists(&c, s, key).into_iter().find(|(l, _)| *l == list) else { continue };
-            for u in &inst.audience {
-                viewers.entry(*u).or_insert_with(|| load_viewer::<G>(&c, &ctx, *u));
-            }
-            let vs: Vec<*const u8> = inst.audience.iter().map(|u| viewers[u].ptr()).collect();
             for id in &items {
                 if !next.regs[kind].contains_key(id) {
-                    if let Some(rec) = load::<G>(&c, &ctx, kind, *id) {
-                        next.regs[kind].insert(*id, Arc::new(build::<G>(&ctx, kind, rec.ptr(), &vs)));
+                    if let Some(rec) = load::<G>(&c, &ctx, kind, *id, 0) {
+                        next.regs[kind].insert(*id, Arc::new(build::<G>(&ctx, kind, rec.ptr())));
                         stats.write_reads.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -952,66 +1003,33 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
         }
         for (kind, key) in shared {
             if !next.regs[kind].contains_key(&key) {
-                continue; // not kept: built when a screen needs it
+                continue; // not kept: built when a page needs it
             }
-            let Some(audience) = audience_of::<G>(&next, kind, key) else {
-                next.regs[kind].remove(&key);
-                continue;
-            };
-            for u in &audience {
-                viewers.entry(*u).or_insert_with(|| load_viewer::<G>(&c, &ctx, *u));
-            }
-            let vs: Vec<*const u8> = audience.iter().map(|u| viewers[u].ptr()).collect();
             stats.write_reads.fetch_add(1, Ordering::Relaxed);
-            match load::<G>(&c, &ctx, kind, key) {
+            match load::<G>(&c, &ctx, kind, key, 0) {
                 Some(rec) => {
-                    next.regs[kind].insert(key, Arc::new(build::<G>(&ctx, kind, rec.ptr(), &vs)));
+                    next.regs[kind].insert(key, Arc::new(build::<G>(&ctx, kind, rec.ptr())));
                 }
                 None => {
                     next.regs[kind].remove(&key);
                 }
             }
         }
-        // pages rebuilt in full (a viewer's row changed)
-        for (s, key) in rescreen {
-            if next.screens[s].contains_key(&key) {
-                build_screen::<G>(&c, &ctx, &mut next, &mut viewers, s, key);
-            }
-        }
-        // audiences that may have changed: read again; a kept instance whose audience changed is
-        // rebuilt (its variants are indexed by place in the audience); a viewer who left can't be
-        // served it, one who joined can
+        // audiences that may have changed: read again (the pieces don't depend on who sees them,
+        // so only the instance's audience changes: a viewer who left can't be served it)
         for (s, key) in audiences {
             let keys: Vec<i64> = if key == i64::MIN { next.screens[s].keys().copied().collect() } else { vec![key] };
             for key in keys {
                 let Some(inst) = next.screens[s].get(&key).cloned() else { continue };
                 match G::screen(&c, s, key) {
                     Some((aud, _)) if aud == inst.audience => {}
-                    _ => {
+                    Some((audience, headers)) => {
                         stats.audiences.fetch_add(1, Ordering::Relaxed);
-                        build_screen::<G>(&c, &ctx, &mut next, &mut viewers, s, key);
+                        next.screens[s].insert(key, Arc::new(crate::store::Screen { audience, headers }));
                     }
-                }
-            }
-        }
-        let mut found: HashMap<(usize, i64, i64), bool> = HashMap::new();
-        for &(reg, key, item, list, field, value) in &deltas.patches {
-            if let Some(k) = kept.get_mut(&(reg as usize, key)) {
-                let hit = unsafe { G::patch(reg, list, field, k.ptr_mut(), item, value) };
-                *found.entry((reg as usize, key, item)).or_insert(false) |= hit;
-            }
-        }
-        for ((reg, key, _), hit) in found {
-            if hit {
-                dirty.insert((reg, key));
-            } else {
-                reload.insert((reg, key));
-            }
-        }
-        for &(reg, row, list, field) in &deltas.finds {
-            for ((k, uid), r) in kept.iter_mut() {
-                if *k == reg as usize && unsafe { G::find(reg, list, field, r.ptr_mut(), row) } {
-                    reload.insert((*k, *uid));
+                    None => {
+                        next.screens[s].remove(&key);
+                    }
                 }
             }
         }
@@ -1021,29 +1039,16 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 next.screens[s].remove(&key);
             }
         }
-        for (s, key, viewer) in warm {
+        for (s, key) in warm {
             if !next.screens[s].contains_key(&key) {
-                build_screen::<G>(&c, &ctx, &mut next, &mut viewers, s, key);
-            }
-            for kind in G::viewer_regs(s) {
-                if !kept.contains_key(&(kind, viewer)) {
-                    reload.insert((kind, viewer));
-                }
+                build_screen::<G>(&c, &ctx, &mut next, s, key);
             }
         }
-        for (kind, key) in &reload {
-            if let Some(rec) = load::<G>(&c, &ctx, *kind, *key) {
-                kept.insert((*kind, *key), rec);
-                dirty.insert((*kind, *key));
-                stats.write_reads.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        for (kind, key) in dirty {
-            if let Some(r) = kept.get(&(kind, key)) {
-                let v = viewers.entry(key).or_insert_with(|| load_viewer::<G>(&c, &ctx, key)).ptr();
-                next.regs[kind].insert(key, Arc::new(build::<G>(&ctx, kind, r.ptr(), &[v])));
-                if !reload.contains(&(kind, key)) {
-                    stats.patched.fetch_add(1, Ordering::Relaxed);
+        // pieces per-request fragments merged that weren't kept: kept from now on
+        for (kind, key) in keep {
+            if !next.regs[kind].contains_key(&key) {
+                if let Some(rec) = load::<G>(&c, &ctx, kind, key, 0) {
+                    next.regs[kind].insert(key, Arc::new(build::<G>(&ctx, kind, rec.ptr())));
                 }
             }
         }
@@ -1064,9 +1069,9 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
 }
 
 /// The scrubber (while the writer is idle): one kept page, for one member of its audience in
-/// turn, is built afresh from SQLite (the viewer's record too) and compared with what readers are
-/// served. A difference is a missed edge: logged, counted, and the page rebuilt.
-fn scrub<G: Glue>(c: &Connection, ctx: &Ctx, snap: &ArcSwap<Snap>, viewers: &mut HashMap<i64, Rec>, kept: &mut HashMap<(usize, i64), Rec>, stats: &Stats, cursor: &mut usize) {
+/// turn, is built afresh from SQLite and compared with what readers are served. A difference is
+/// a missed edge: logged, counted, and the page rebuilt.
+fn scrub<G: Glue>(c: &Connection, ctx: &Ctx, snap: &ArcSwap<Snap>, stats: &Stats, cursor: &mut usize) {
     let cur = snap.load_full();
     let mut all: Vec<(usize, i64)> = (0..G::SCREENS).flat_map(|s| cur.screens[s].keys().map(move |k| (s, *k))).collect();
     if all.is_empty() {
@@ -1080,79 +1085,25 @@ fn scrub<G: Glue>(c: &Connection, ctx: &Ctx, snap: &ArcSwap<Snap>, viewers: &mut
     if inst.audience.is_empty() {
         return;
     }
-    let place = round % inst.audience.len();
-    let uid = inst.audience[place];
-    // the page as served (a viewer whose own registers aren't kept yet: nothing to compare)
-    let mut fast = Vec::with_capacity(400_000);
-    if !G::assemble(&cur, s, key, uid, place, &mut |seg| fast.extend_from_slice(&seg.raw)) {
+    let uid = inst.audience[round % inst.audience.len()];
+    // the page as served (a piece missing: nothing to compare)
+    let mut fast = VecSink(Vec::with_capacity(400_000));
+    if !emit_page::<G>(&cur, c, ctx, s, key, uid, &mut fast, &mut vec![]) {
         return;
     }
     stats.scrubbed.fetch_add(1, Ordering::Relaxed);
-    // the page built afresh
-    let mut tmp = Snap::new(G::REGS, G::LISTS, G::SCREENS);
-    let mut fresh_viewers = HashMap::new();
-    let fresh = if build_screen::<G>(c, ctx, &mut tmp, &mut fresh_viewers, s, key) {
-        tmp.screens[s].get(&key).cloned().and_then(|t| {
-            let p = t.audience.binary_search(&uid).ok()?;
-            fresh_viewers.entry(uid).or_insert_with(|| load_viewer::<G>(c, ctx, uid));
-            for kind in G::viewer_regs(s) {
-                let rec = load::<G>(c, ctx, kind, uid)?;
-                tmp.regs[kind].insert(uid, Arc::new(build::<G>(ctx, kind, rec.ptr(), &[fresh_viewers[&uid].ptr()])));
-            }
-            let mut page = Vec::with_capacity(400_000);
-            G::assemble(&tmp, s, key, uid, p, &mut |seg| page.extend_from_slice(&seg.raw)).then_some(page)
-        })
-    } else {
-        None
-    };
-    if fresh.as_ref() == Some(&fast) {
+    let fresh = fresh::<G>(c, ctx, s, key, uid);
+    if fresh.as_ref().map(|f| &f.0) == Some(&fast.0) {
         return;
     }
     stats.scrub_fixed.fetch_add(1, Ordering::Relaxed);
-    let at = fresh.as_ref().map(|f| f.iter().zip(&fast).position(|(a, b)| a != b).unwrap_or(f.len().min(fast.len())));
+    let at = fresh.as_ref().map(|f| f.0.iter().zip(&fast.0).position(|(a, b)| a != b).unwrap_or(f.0.len().min(fast.0.len())));
     eprintln!("scrub: screen {s} key {key} viewer {uid}: the kept page differed from a fresh build (at byte {at:?}); rebuilt");
-    // rebuilt: the screen, the viewer's record and own registers
     let mut next = cur.next();
-    viewers.insert(uid, load_viewer::<G>(c, ctx, uid));
-    if !build_screen::<G>(c, ctx, &mut next, viewers, s, key) {
+    if !build_screen::<G>(c, ctx, &mut next, s, key) {
         next.screens[s].remove(&key);
     }
-    for kind in G::viewer_regs(s) {
-        match load::<G>(c, ctx, kind, uid) {
-            Some(rec) => {
-                next.regs[kind].insert(uid, Arc::new(build::<G>(ctx, kind, rec.ptr(), &[viewers[&uid].ptr()])));
-                kept.insert((kind, uid), rec);
-            }
-            None => {
-                next.regs[kind].remove(&uid);
-                kept.remove(&(kind, uid));
-            }
-        }
-    }
     snap.store(Arc::new(next));
-}
-
-/// The audience a kept shared register is built for: the screen instance whose list holds it, or
-/// whose registers include it.
-fn audience_of<G: Glue>(snap: &Snap, kind: usize, key: i64) -> Option<Vec<i64>> {
-    for l in 0..G::LISTS {
-        if G::list_item(l) != kind {
-            continue;
-        }
-        for (sk, items) in &snap.lists[l] {
-            if items.contains(&key) {
-                return snap.screens[G::list_screen(l)].get(sk).map(|i| i.audience.clone());
-            }
-        }
-    }
-    for s in 0..G::SCREENS {
-        for (sk, inst) in &snap.screens[s] {
-            if G::screen_regs(s, *sk).contains(&(kind, key)) {
-                return Some(inst.audience.clone());
-            }
-        }
-    }
-    None
 }
 
 // ---- responses

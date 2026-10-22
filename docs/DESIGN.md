@@ -119,6 +119,32 @@ Rust helps here: a per-request arena with a lifetime lets the borrow checker pro
 outlives the request, which crudspec's Go runtime can't prove (its bench README: "nothing proves
 it here").
 
+### Cached pieces never depend on the viewer (22 Oct 2026)
+
+The first design also kept per-viewer pieces (each person's sidebar) and shared pieces with
+variants by viewer (a message "mine" or not). The mixed benchmark (117 people, 60 rooms) showed
+the cost: one post marked a room unread for everyone in it, and the writer rebuilt and
+recompressed every member's sidebar (posts went from 2 ms to 60 ms), and memory grew with people.
+The rule now (the owner's decision):
+
+- **A cached fragment is the same for everyone.** It reads its row (or nothing), never the
+  viewer; the compiler refuses one that does. It is built once at write time, precompressed, and
+  borrowed into every response. Its cache key is its row.
+- **A fragment that reads the viewer is `per viewer`: rendered per request**, never kept. It is
+  straight-line code over prepared queries, into reused per-thread buffers (the fast path still
+  allocates nothing). It merges the cached fragments it calls: each call is a reference to the
+  cached piece, which goes into the response as it is (no copy).
+- **Merging** is a scatter list: cached pieces borrowed, per-request bytes written once. In a
+  gzip response the per-request bytes are stored deflate blocks (no compression work; the CRC
+  continues over them).
+- What only decorates a page per viewer (their own messages marked, the edit controls theirs or
+  an administrator's) is shown by the page's script from the viewer's id and role; the server
+  still decides every action. With the script applied, the pages equal the former server-built
+  ones byte for byte (`scripts/golden-viewer-js.py`, in the checks).
+
+So a write's work no longer grows with the people who can see what it changed, and the writer
+keeps no per-viewer state at all.
+
 ### Keeping precomputed pages right (22 Oct 2026)
 
 A kept page must always equal a fresh render. Time limits on cached pages were considered and

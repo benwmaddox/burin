@@ -228,6 +228,8 @@ pub struct Module {
     pub viewer_reads: Vec<(String, String)>,
     /// each register's viewer dependence, as read (the report)
     pub keys: Vec<(String, Vec<String>)>,
+    /// every register's name, in kind order (known before any is generated)
+    pub order: Vec<String>,
 }
 
 impl Module {
@@ -340,8 +342,11 @@ impl<'a, 'b> Gen<'a, 'b> {
         let shape = shape_of(&ty);
         let key = std::iter::once(root.clone()).chain(path.iter().cloned()).collect::<Vec<_>>().join(".");
         if root == "viewer" {
-            if self.bits && !self.viewer_uses.contains(&key) {
-                self.viewer_uses.push(key.clone());
+            if !self.per_viewer {
+                return Err(format!(
+                    "fragment {}: reads the viewer (`{key}`), but a cached fragment is the same for everyone: mark it `per viewer` (rendered per request), or move what depends on the viewer out of it",
+                    self.frag
+                ));
             }
             let i = self.md.viewer.field(&key, shape);
             return Ok((self.gep_load("%viewer", "%Viewer", i, shape), shape));
@@ -895,6 +900,18 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 TNode::Hole(e) => {
                     if let Expr::Call(f, args, _) = e {
+                        if let (true, Some(kind)) = (self.per_viewer, self.md.order.iter().position(|r| r == f)) {
+                            if !matches!(self.m.fragments.get(f), Some(Decl::Fragment { per_viewer: true, .. })) {
+                                // a cached piece, merged where it goes: its kind and key
+                                self.flush(out);
+                                let key = match args.first() {
+                                    Some(a) => self.value(roots, a)?.0,
+                                    None => "0".into(),
+                                };
+                                self.line(&format!("call void @etch_piece(ptr %splits, ptr {out}, i64 {kind}, i64 {key})"));
+                                continue;
+                            }
+                        }
                         if let Some(Decl::Fragment { params, body, .. }) = self.m.fragments.get(f) {
                             // a fragment called with constants: its template, inlined
                             let env: HashMap<String, Expr> = params.iter().map(|p| p.name.clone()).zip(args.iter().cloned()).collect();
@@ -919,13 +936,6 @@ impl<'a, 'b> Gen<'a, 'b> {
                             self.line(&format!("call void @etch_split(ptr %splits, ptr {out}, i64 {site})"));
                         }
                         continue;
-                    }
-                    if !self.per_viewer && Self::viewer_value(e) {
-                        return Err(format!(
-                            "fragment {}: `{}` writes text that depends on the viewer; a shared fragment's text may depend on the viewer only through conditions (mark the fragment `per viewer`, or show it under an if)",
-                            self.frag,
-                            show(e)
-                        ));
                     }
                     let t = self.m.type_of(e, &self.scope).map_err(|x| format!("{}: {}", show(e), x.msg))?;
                     self.text(roots, e, out, t.strip_opt() != &Type::Html)?;
@@ -990,110 +1000,56 @@ fn types(frag: &str, s: &Schema, at: &mut Vec<usize>, out: &mut String) {
 
 /// One register's functions: its variant key and its builder (its loader comes after, from the
 /// settled record). Its splices are registers too.
-fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[TNode], per_viewer: bool, varies: &[String]) -> Result<(), String> {
-    let roots: HashMap<String, Root> = if per_viewer {
-        HashMap::new()
-    } else {
-        params.iter().map(|p| (p.name.clone(), Root::Rec { ptr: "%in".into(), at: vec![] })).collect()
-    };
+fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[TNode], per_viewer: bool) -> Result<(), String> {
+    // a cached register reads its row (its parameter) or nothing; one rendered per request reads
+    // its row and the viewer
+    let roots: HashMap<String, Root> = params.iter().map(|p| (p.name.clone(), Root::Rec { ptr: "%in".into(), at: vec![] })).collect();
     let mut schema = Schema::default();
-    let mut out = (String::new(), String::new(), 0usize, 0usize);
-    let mut splices = vec![];
-    let mut uses: Vec<String> = vec![];
+    let (mut body, mut tmps) = (String::new(), 0usize);
+    // the first pass settles the record's layout
     for pass in 0..2 {
-        for bits in [true, false] {
-            let mut g = Gen {
-                m,
-                md: &mut *md,
-                frag: name.to_string(),
-                body: String::new(),
-                n: 0,
-                pending: vec![],
-                schema: schema.clone(),
-                scope: Scope::of(params),
-                tmps: 0,
-                depth: 0,
-                bits,
-                max_bits: 0,
-                mult: 1,
-                per_viewer,
-                splice_params: if per_viewer { params.iter().map(|p| p.name.clone()).collect() } else { vec![] },
-                splices: vec![],
-                hoisted: vec![],
-                prologue: String::new(),
-                viewer_uses: vec![],
-            };
-            if bits {
-                // the key starts with a 1: bit strings of different lengths stay different keys
-                g.prologue.push_str("  %key = alloca i64\n  store i64 1, ptr %key\n");
-            }
-            g.nodes(&roots, nodes, "%out")?;
-            g.flush("%out");
-            if bits && pass == 1 {
-                uses = g.viewer_uses.clone();
-            }
-            let (b, sch, tmps, maxb, sp) = (if bits { g.prologue + &g.body } else { g.body }, g.schema, g.tmps, g.max_bits, g.splices);
-            if pass == 0 {
-                schema = sch;
-                continue;
-            }
-            if bits {
-                out.0 = b;
-                out.3 = maxb;
-            } else {
-                out.1 = b;
-                out.2 = tmps;
-                splices = sp;
-            }
+        let mut g = Gen {
+            m,
+            md: &mut *md,
+            frag: name.to_string(),
+            body: String::new(),
+            n: 0,
+            pending: vec![],
+            schema: schema.clone(),
+            scope: Scope::of(params),
+            tmps: 0,
+            depth: 0,
+            bits: false,
+            max_bits: 0,
+            mult: 1,
+            per_viewer,
+            splice_params: vec![],
+            splices: vec![],
+            hoisted: vec![],
+            prologue: String::new(),
+            viewer_uses: vec![],
+        };
+        g.nodes(&roots, nodes, "%out")?;
+        g.flush("%out");
+        if pass == 0 {
+            schema = g.schema;
+        } else {
+            body = g.body;
+            tmps = g.tmps;
         }
-    }
-    // its declared cache key: what about the viewer its variants depend on, exactly
-    if !per_viewer && !name.contains("__s") {
-        uses.sort();
-        let mut want = varies.to_vec();
-        want.sort();
-        want.dedup();
-        if let Some(u) = uses.iter().find(|u| !want.contains(u)) {
-            return Err(format!(
-                "fragment {name}: its variants depend on {} (through its conditions), which its key doesn't declare: add `varies by {}`, or mark it `per viewer`",
-                if u == "viewer" { "who the viewer is".to_string() } else { format!("`{u}`") },
-                uses.join(", ")
-            ));
-        }
-        if let Some(w) = want.iter().find(|w| !uses.contains(w)) {
-            return Err(format!("fragment {name}: declares `varies by {w}`, but nothing it shows depends on {w} (drop it)"));
-        }
-    }
-    md.keys.push((name.to_string(), uses.clone()));
-    if out.3 > 63 {
-        return Err(format!("fragment {name}: its variant key needs up to {} bits; at most 63 (bound its lists, or mark it `per viewer`)", out.3));
     }
     let mut f = String::new();
     types(name, &schema, &mut vec![], &mut f);
-    let _ = writeln!(f, "\n; {name}: its variant key ({} bits at most)", out.3);
-    let _ = writeln!(f, "define i64 @etch_bits_{name}(ptr noalias %in, ptr noalias %viewer) {{\nentry:\n{}  %r = load i64, ptr %key\n  ret i64 %r\n}}\n", out.0);
-    let _ = writeln!(f, "; {name}: its bytes ({} temporary buffers)", out.2);
-    let _ = writeln!(f, "define void @etch_build_{name}(ptr noalias %ctx, ptr noalias %in, ptr noalias %viewer, ptr noalias %out, ptr noalias %tmps, ptr noalias %splits) {{\nentry:\n{}  ret void\n}}\n", out.1);
+    let _ = writeln!(f, "; {name}: its bytes ({tmps} temporary buffers){}", if per_viewer { ", per request" } else { ", cached" });
+    let _ = writeln!(f, "define void @etch_build_{name}(ptr noalias %ctx, ptr noalias %in, ptr noalias %viewer, ptr noalias %out, ptr noalias %tmps, ptr noalias %splits) {{\nentry:\n{body}  ret void\n}}\n");
     md.funcs.push_str(&f);
-    let root = if per_viewer {
-        None
-    } else {
-        match params.first().map(|p| (p.name.clone(), p.ty.strip_opt().clone())) {
-            Some((r, Type::Ref(e))) if params.len() == 1 => Some((r, e)),
-            // no parameters: one instance for the app (key 0)
-            None => None,
-            _ => return Err(format!("fragment {name}: a register needs one row parameter, none, or `per viewer`")),
-        }
+    let root = match params.first().map(|p| (p.name.clone(), p.ty.strip_opt().clone())) {
+        Some((r, Type::Ref(e))) if params.len() == 1 => Some((r, e)),
+        // no parameters: one instance for the app (key 0)
+        None => None,
+        _ => return Err(format!("fragment {name}: a fragment the page keeps or renders takes one row parameter, or none")),
     };
-    let mut names = vec![];
-    for (i, e) in splices.iter().enumerate() {
-        // the splice's own register: the hole alone, keyed by the parameter it reads
-        let sname = format!("{name}__s{i}");
-        let used: Vec<Param> = params.iter().filter(|p| Gen::mentions(e, std::slice::from_ref(&p.name))).cloned().collect();
-        register(m, md, &sname, &used, &[TNode::Hole(e.clone())], false, &[])?;
-        names.push(sname);
-    }
-    md.registers.push(RegInfo { name: name.to_string(), schema, tmps: out.2, bits: out.3, per_viewer, root, splices: names, reads: vec![] });
+    md.registers.push(RegInfo { name: name.to_string(), schema, tmps, bits: 0, per_viewer, root, splices: vec![], reads: vec![] });
     Ok(())
 }
 
@@ -1123,9 +1079,13 @@ fn emit_lists(m: &Model, md: &mut Module, b: &mut String, n: &mut usize, qid: &m
         for (bi, bind) in sel.binds.iter().enumerate() {
             let crate::sql::Bind::Path(e) = bind;
             let (root, path) = path_of(e).ok_or("a query's parameter isn't a path")?;
-            let is_key = (path.is_empty() && reg.root.as_ref().map(|(r, _)| *r == root).unwrap_or(false)) || (root == "viewer" && path.is_empty() && reg.per_viewer);
-            if is_key {
+            if path.is_empty() && reg.root.as_ref().map(|(r, _)| *r == root).unwrap_or(false) {
                 let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr {st}, i32 {}, i64 %key)", bi + 1);
+                continue;
+            }
+            // the viewer (a per-request register's lists: the sidebar's rooms)
+            if root == "viewer" && path.is_empty() {
+                let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr {st}, i32 {}, i64 %viewer)", bi + 1);
                 continue;
             }
             // a field of the record the list hangs off
@@ -1192,7 +1152,7 @@ fn loader(m: &Model, md: &mut Module, reg: &RegInfo, qid: &mut usize) -> Result<
     let mut b = String::new();
     let mut n = 0usize;
     let ty = type_name(&reg.name, &[]);
-    let _ = writeln!(b, "define i1 @etch_load_{}(ptr noalias %ctx, ptr noalias %db, i64 %key, ptr noalias %rec, ptr noalias %arena) {{\nentry:", reg.name);
+    let _ = writeln!(b, "define i1 @etch_load_{}(ptr noalias %ctx, ptr noalias %db, i64 %key, i64 %viewer, ptr noalias %rec, ptr noalias %arena) {{\nentry:", reg.name);
     let schema = &reg.schema;
     let root_name = reg.root.as_ref().map(|(r, _)| r.clone()).unwrap_or_default();
     let only_key = schema.scalars.is_empty() && schema.fields.iter().all(|(p, _)| *p == root_name);
@@ -1231,7 +1191,7 @@ fn loader(m: &Model, md: &mut Module, reg: &RegInfo, qid: &mut usize) -> Result<
     Ok(b)
 }
 
-/// The viewer's record: `etch_load_viewer(ctx, db, key, rec, arena) -> i1`.
+/// The viewer's record: `etch_load_viewer(ctx, db, key, viewer, rec, arena) -> i1` (the viewer is the key).
 fn viewer_loader(m: &Model, md: &mut Module, qid: &mut usize) -> Result<String, String> {
     let ent = m.viewer_entity().ok_or("no viewer declaration")?.to_string();
     let reg = RegInfo { name: "viewer".into(), schema: md.viewer.clone(), tmps: 0, bits: 0, per_viewer: false, root: Some(("viewer".into(), ent)), splices: vec![], reads: vec![] };
@@ -1253,7 +1213,7 @@ declare void @etch_first_word(ptr, ptr, i64)
 declare void @etch_initials(ptr, ptr, i64)
 declare void @etch_lower(ptr, ptr, i64)
 declare void @etch_sentence(ptr, ptr, i64)
-declare void @etch_split(ptr, ptr, i64)
+declare void @etch_piece(ptr, ptr, i64, i64)
 declare void @etch_replace(ptr, ptr, ptr, i64, ptr, i64, i64)
 declare void @etch_time(ptr, i64, i64, i64)
 declare void @etch_config(ptr, ptr, i64, i64)
@@ -1290,18 +1250,19 @@ declare void @etch_w_go(ptr, ptr, i64, i64, ptr, i64)
 
 /// The module for these registers, and a Rust header with the same records.
 pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> Result<(String, String), String> {
-    let mut md = Module { globals: String::new(), strs: HashMap::new(), viewer: Schema::default(), funcs: String::new(), registers: vec![], viewer_reads: vec![], keys: vec![] };
+    let mut md = Module { globals: String::new(), strs: HashMap::new(), viewer: Schema::default(), funcs: String::new(), registers: vec![], viewer_reads: vec![], keys: vec![], order: vec![] };
     md.viewer.field("viewer", Shape::I64);
     // the registers: those named, or (by default) what the screens show
     let auto = crate::glue::registers_of(m);
     let registers: Vec<&str> = if registers.is_empty() { auto.iter().map(String::as_str).collect() } else { registers.to_vec() };
+    md.order = registers.iter().map(|r| r.to_string()).collect();
     for r in &registers {
         let (params, body, per_viewer) = match m.fragments.get(&r.to_string()) {
-            Some(Decl::Fragment { params, body, per_viewer, varies, .. }) => (params, body, (*per_viewer, varies)),
+            Some(Decl::Fragment { params, body, per_viewer, .. }) => (params, body, (*per_viewer, ())),
             _ => return Err(format!("no fragment {r}")),
         };
         let nodes = inline::nodes(m, &body.nodes, &HashMap::new());
-        register(m, &mut md, r, params, &nodes, per_viewer.0, per_viewer.1)?;
+        register(m, &mut md, r, params, &nodes, per_viewer.0)?;
     }
     let mut qid = 0usize;
     let regs = md.registers.clone();
@@ -1333,18 +1294,14 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
     // the viewer's loader last: forwarding may have added fields to the viewer's record
     let vl = viewer_loader(m, &mut md, &mut qid)?;
     md.funcs.push_str(&vl);
-    // each kept piece's cache key: its row (or the viewer, or nothing), and what about the
-    // viewer its variants depend on
-    eprintln!("cache keys:");
+    // each piece: cached (keyed by its row, or one for the app) or rendered per request
+    eprintln!("pieces:");
     for r in &md.registers {
-        let row = match (&r.root, r.per_viewer) {
-            (_, true) => "the viewer".to_string(),
-            (Some((p, e)), _) => format!("{p} ({e})"),
-            (None, _) => "nothing (one for the app)".to_string(),
+        let row = match &r.root {
+            Some((p, e)) => format!("{p} ({e})"),
+            None => "nothing (one for the app)".to_string(),
         };
-        let uses = md.keys.iter().find(|(n, _)| *n == r.name).map(|(_, u)| u.clone()).unwrap_or_default();
-        let varies = if r.per_viewer || uses.is_empty() { String::new() } else { format!("; varies by {} ({} bits at most)", uses.join(", "), r.bits) };
-        eprintln!("  {}: keyed by {row}{varies}", r.name);
+        eprintln!("  {}: {}", r.name, if r.per_viewer { format!("rendered per request (for the viewer, at {row})") } else { format!("cached, keyed by {row}") });
     }
     for a in &acts {
         eprintln!("{}: delta edges", a.name);
@@ -1422,16 +1379,15 @@ fn rust_header(md: &Module) -> String {
     }
     rec(&mut s, "", &md.viewer, &mut vec![]);
     let _ = writeln!(s, "extern \"C\" {{");
-    let _ = writeln!(s, "    pub fn etch_load_viewer(ctx: *const etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, rec: *mut Viewer, arena: *mut etch_rt::abi::Arena) -> bool;");
+    let _ = writeln!(s, "    pub fn etch_load_viewer(ctx: *const etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, viewer: i64, rec: *mut Viewer, arena: *mut etch_rt::abi::Arena) -> bool;");
     for r in &md.registers {
         let name = &r.name;
-        let _ = writeln!(s, "    pub fn etch_load_{name}(ctx: *const etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, rec: *mut In_{name}, arena: *mut etch_rt::abi::Arena) -> bool;");
-        let _ = writeln!(s, "    pub fn etch_bits_{name}(input: *const In_{name}, viewer: *const Viewer) -> i64;");
+        let _ = writeln!(s, "    pub fn etch_load_{name}(ctx: *const etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, viewer: i64, rec: *mut In_{name}, arena: *mut etch_rt::abi::Arena) -> bool;");
         let _ = writeln!(s, "    pub fn etch_build_{name}(ctx: *const etch_rt::abi::Ctx, input: *const In_{name}, viewer: *const Viewer, out: *mut Vec<u8>, tmps: *const *mut Vec<u8>, splits: *mut Vec<usize>);");
     }
     let _ = writeln!(s, "}}\n");
     for r in &md.registers {
-        let _ = writeln!(s, "/// {}: {} temporary buffers, a variant key of at most {} bits{}", r.name, r.tmps, r.bits, if r.per_viewer { ", keyed by the viewer" } else { "" });
+        let _ = writeln!(s, "/// {}: {} temporary buffers, {}", r.name, r.tmps, if r.per_viewer { "rendered per request" } else { "cached" });
         let _ = writeln!(s, "pub const TMPS_{}: usize = {};", r.name.to_uppercase(), r.tmps);
         rec(&mut s, &r.name, &r.schema, &mut vec![]);
     }

@@ -54,7 +54,7 @@ fragment profile_page() per viewer <<<\
 screen user_page(user: User) at "/users/{user}" cold
 <<<{{user_card(user)}}>>>
 
-fragment user_card(user: User) varies by viewer <<<\
+fragment user_card(user: User) per viewer <<<\
 {{settings_head(user.name)}}\
 <div class="flex flex-column align-center gap"><img src="/avatars/User/{{user.id}}" width="128" height="128" class="avatar" alt="">\
 <h2 class="txt-large">{{user.name}}</h2>{{if user.bio != none}}<p>{{user.bio}}</p>{{end}}\

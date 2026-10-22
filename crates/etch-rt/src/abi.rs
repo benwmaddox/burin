@@ -100,14 +100,35 @@ pub unsafe extern "C" fn etch_int(out: *mut Vec<u8>, n: i64) {
 /// The text in `t` as a JSON string literal. # Safety: live Vecs.
 #[no_mangle]
 pub unsafe extern "C" fn etch_json(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
-    put(buf(out), &html::json_string(text(t)), esc);
+    // as html::json_string, written as it goes (no allocation)
+    let o = buf(out);
+    put(o, "\"", esc);
+    for ch in text(t).chars() {
+        match ch {
+            '"' => put(o, "\\\"", esc),
+            '\\' => put(o, "\\\\", esc),
+            '\n' => put(o, "\\n", esc),
+            '\r' => put(o, "\\r", esc),
+            '\t' => put(o, "\\t", esc),
+            '\u{2028}' => put(o, "\\u2028", esc),
+            '\u{2029}' => put(o, "\\u2029", esc),
+            c if (c as u32) < 0x20 => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let u = [b'\\', b'u', b'0', b'0', HEX[(c as usize) >> 4], HEX[(c as usize) & 15]];
+                put(o, std::str::from_utf8_unchecked(&u), esc);
+            }
+            c => put(o, c.encode_utf8(&mut [0u8; 4]), esc),
+        }
+    }
+    put(o, "\"", esc);
 }
 
 /// # Safety: `ctx` is a live Ctx; live Vecs.
 #[no_mangle]
 pub unsafe extern "C" fn etch_sign(ctx: *const Ctx, out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
-    let c = &*ctx;
-    put(buf(out), &c.signer.token(text(t)), esc);
+    // base64url and a dot: nothing to escape
+    let _ = esc;
+    (*ctx).signer.token_into(text(t), buf(out));
 }
 
 /// # Safety: live Vecs.
@@ -120,9 +141,13 @@ pub unsafe extern "C" fn etch_autolink(out: *mut Vec<u8>, t: *mut Vec<u8>) {
 #[no_mangle]
 pub unsafe extern "C" fn etch_asset(ctx: *const Ctx, out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     let name = text(t);
-    let c = &*ctx;
-    let url = c.assets.get(name).cloned().unwrap_or_else(|| format!("/assets/{name}"));
-    put(buf(out), &url, esc);
+    match (*ctx).assets.get(name) {
+        Some(url) => put(buf(out), url, esc),
+        None => {
+            put(buf(out), "/assets/", esc);
+            put(buf(out), name, esc);
+        }
+    }
 }
 
 /// # Safety: live Vecs.
@@ -134,14 +159,19 @@ pub unsafe extern "C" fn etch_first_word(out: *mut Vec<u8>, t: *mut Vec<u8>, esc
 /// # Safety: live Vecs.
 #[no_mangle]
 pub unsafe extern "C" fn etch_initials(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
-    let s: String = text(t).split_whitespace().filter_map(|w| w.chars().next()).collect();
-    put(buf(out), &s, esc);
+    let o = buf(out);
+    for c in text(t).split_whitespace().filter_map(|w| w.chars().next()) {
+        put(o, c.encode_utf8(&mut [0u8; 4]), esc);
+    }
 }
 
 /// # Safety: live Vecs.
 #[no_mangle]
 pub unsafe extern "C" fn etch_upper(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
-    put(buf(out), &text(t).to_uppercase(), esc);
+    let o = buf(out);
+    for c in text(t).chars().flat_map(char::to_uppercase) {
+        put(o, c.encode_utf8(&mut [0u8; 4]), esc);
+    }
 }
 
 /// `choose`: the CRC-32 of a text, modulo n (Campfire picks an avatar's color this way).
@@ -154,7 +184,10 @@ pub unsafe extern "C" fn etch_crc_mod(t: *mut Vec<u8>, n: i64) -> i64 {
 /// # Safety: live Vecs.
 #[no_mangle]
 pub unsafe extern "C" fn etch_lower(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
-    put(buf(out), &text(t).to_ascii_lowercase(), esc);
+    let o = buf(out);
+    for c in text(t).chars().map(|c| c.to_ascii_lowercase()) {
+        put(o, c.encode_utf8(&mut [0u8; 4]), esc);
+    }
 }
 
 /// # Safety: live Vecs and byte ranges.
@@ -334,6 +367,8 @@ pub unsafe extern "C" fn etch_alloc(arena: *mut Arena, size: i64) -> *mut u8 {
 #[derive(Default)]
 pub struct Arena {
     chunks: Vec<Vec<u64>>,
+    /// the chunk being filled, and the words used in it
+    cur: usize,
     used: usize,
 }
 
@@ -343,28 +378,34 @@ impl Arena {
     }
     fn take(&mut self, n: usize) -> *mut u8 {
         let words = n.div_ceil(8).max(1);
-        let fits = self.chunks.last().map(|c| c.len() - self.used >= words).unwrap_or(false);
-        if !fits {
+        // the next chunk with room (chunks are kept across resets: a reused arena allocates
+        // nothing once it has grown to its largest use)
+        while self.cur < self.chunks.len() && self.chunks[self.cur].len() - self.used < words {
+            self.cur += 1;
+            self.used = 0;
+        }
+        if self.cur == self.chunks.len() {
             self.chunks.push(vec![0u64; words.max(8192)]);
             self.used = 0;
         }
-        let c = self.chunks.last_mut().unwrap();
+        let c = &mut self.chunks[self.cur];
         let p = c[self.used..].as_mut_ptr() as *mut u8;
         self.used += words;
         p
     }
-    /// Lets go of everything taken (keeps the first chunk).
+    /// Lets go of everything taken (the chunks are kept, for the next use).
     pub fn reset(&mut self) {
-        self.chunks.truncate(1);
+        self.cur = 0;
         self.used = 0;
     }
 }
 
-/// Marks a splice's place in a per-viewer register's bytes, and which splice goes there (its
-/// site, in the high bits). # Safety: live Vecs.
+/// Marks where a cached piece goes in a per-request fragment's bytes: its place, its kind and its
+/// key (two entries: the place with the kind in the high bits, then the key). # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_split(splits: *mut Vec<usize>, out: *mut Vec<u8>, site: i64) {
-    (*splits).push((*out).len() | ((site as usize) << 48));
+pub unsafe extern "C" fn etch_piece(pieces: *mut Vec<usize>, out: *mut Vec<u8>, kind: i64, key: i64) {
+    (*pieces).push((*out).len() | ((kind as usize) << 48));
+    (*pieces).push(key as usize);
 }
 
 /// A split's offset and site.
@@ -376,14 +417,15 @@ pub fn split_at(s: usize) -> (usize, usize) {
 #[no_mangle]
 pub unsafe extern "C" fn etch_sentence(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     let all = text(t);
-    let items: Vec<&str> = if all.is_empty() { vec![] } else { all.strip_suffix('\0').unwrap_or(all).split('\0').collect() };
-    let s = match items.len() {
-        0 => String::new(),
-        1 => items[0].to_string(),
-        2 => format!("{} and {}", items[0], items[1]),
-        n => format!("{}, and {}", items[..n - 1].join(", "), items[n - 1]),
-    };
-    put(buf(out), &s, esc);
+    let all = all.strip_suffix('\0').unwrap_or(all);
+    let n = if all.is_empty() { 0 } else { all.split('\0').count() };
+    let o = buf(out);
+    for (i, item) in all.split('\0').enumerate().take(n) {
+        if i > 0 {
+            put(o, if n == 2 { " and " } else if i == n - 1 { ", and " } else { ", " }, 0);
+        }
+        put(o, item, esc);
+    }
 }
 
 /// Binds a text field's value (none: NULL). # Safety: live statement; `s` a live Str.

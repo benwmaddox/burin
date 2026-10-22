@@ -1,6 +1,8 @@
 //! The hot-path rules (DESIGN.md principle 2) on the generated app: once warm, answering a room
-//! page on the fast path allocates and frees nothing, and writes only its status line, length and
-//! date (the body is borrowed from the snapshot). Needs ETCH_TEST_DATA: a copy of the golden data.
+//! page on the fast path allocates and frees nothing. Its cached pieces are borrowed from the
+//! snapshot; what it writes is its status line, length and date, and its per-request parts (the
+//! sidebar, the title), rendered into reused buffers. Needs ETCH_TEST_DATA: a copy of the golden
+//! data. ETCH_TRACE_ALLOCS=1 prints where the first allocations come from.
 
 use campfire_app::gen::Spec;
 use etch_rt::abi::Ctx;
@@ -12,18 +14,62 @@ use std::sync::Arc;
 
 struct Counting;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+static FREES: AtomicUsize = AtomicUsize::new(0);
+/// ETCH_TRACE_ALLOCS: where the first allocations on a measured request come from
+static TRACE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TRACED: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static IN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// this thread's allocations are counted (the request's: the writer's and the checkpointer's
+    /// own work isn't the hot path)
+    static COUNTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn counted() -> bool {
+    COUNTED.with(|c| c.get())
+}
+
+fn trace() {
+    if !TRACE.load(Ordering::Relaxed) || TRACED.fetch_add(1, Ordering::Relaxed) >= 6 {
+        return;
+    }
+    IN.with(|i| {
+        if i.get() {
+            return;
+        }
+        i.set(true);
+        let b = std::backtrace::Backtrace::force_capture().to_string();
+        let frames: Vec<&str> = b.lines().filter(|l| !l.contains("at /rustc") && !l.contains("std::") && !l.contains("core::") && !l.contains("alloc::")).take(14).collect();
+        eprintln!("alloc from:
+{}", frames.join("
+"));
+        i.set(false);
+    });
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if counted() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
+        trace();
         System.alloc(l)
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if counted() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
+        FREES.fetch_add(1, Ordering::Relaxed);
+        if TRACE.load(Ordering::Relaxed) {
+            trace();
+        }
         System.dealloc(p, l)
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if counted() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
+        trace();
         System.realloc(p, l, n)
     }
 }
@@ -70,14 +116,19 @@ fn the_fast_path_allocates_and_frees_nothing_and_copies_only_headers() {
         out.reset();
         std::thread::sleep(std::time::Duration::from_millis(50));
         for _ in 0..3 {
+            COUNTED.with(|c| c.set(true));
             let before = ALLOCS.load(Ordering::SeqCst);
+            TRACE.store(std::env::var("ETCH_TRACE_ALLOCS").map(|v| v == "1").unwrap_or(false), Ordering::SeqCst);
             assert!(app.fast(&req, &mut out));
+            TRACE.store(false, Ordering::SeqCst);
             let (segs, own, len) = (out.segments(), out.own_bytes(), out.len());
+            let (mid, mid_frees) = (ALLOCS.load(Ordering::SeqCst), FREES.load(Ordering::SeqCst));
             out.reset();
             let after = ALLOCS.load(Ordering::SeqCst);
+            COUNTED.with(|c| c.set(false));
+            eprintln!("  the request: {} (frees so far {mid_frees}); the reset: {}", mid - before, after - mid);
+            eprintln!("fast page (gzip {gzip}): {len} bytes in {segs} segments, {own} bytes written by the request (its per-request parts), {} allocations", after - before);
             assert_eq!(after - before, 0, "allocations or frees on the fast path (gzip {gzip})");
-            assert!(own < 200, "{own} bytes written per request");
-            eprintln!("fast page (gzip {gzip}): {len} bytes in {segs} segments, {own} bytes written by the request, 0 allocations");
         }
     }
 }

@@ -45,14 +45,15 @@ fragment top(board: Board) <<<\
 <!doctype html><html><head><meta charset="utf-8"><title>{{board.title}}</title></head>
 <body><h1>{{board.title}}</h1><ol class="posts">>>>
 
-fragment post(p: Post) varies by viewer <<<\
-<li class="post{{if p.author == viewer}} mine{{end}}" id="post-{{p.id}}"><b>{{p.author.name}}</b> \
+// a post: cached, the same for everyone; the page's script marks the viewer's own
+fragment post(p: Post) <<<\
+<li class="post" id="post-{{p.id}}" data-author-id="{{p.author.id}}"><b>{{p.author.name}}</b> \
 <span>{{p.text}}</span> <time datetime="{{iso(p.created)}}">{{clock(p.created)}}</time></li>
 >>>
 
 // per viewer: who's signed in, and their latest posts
 fragment me() per viewer <<<\
-</ol><aside><p>Signed in as <b>{{viewer.name}}</b></p><ul class="mine">\
+</ol><aside id="me" data-user-id="{{viewer.id}}"><p>Signed in as <b>{{viewer.name}}</b></p><ul class="mine">\
 {{for p in mine()}}<li><a href="/boards/{{p.board.id}}#post-{{p.id}}">{{p.text}}</a></li>{{end}}</ul></aside>
 >>>
 
@@ -61,7 +62,8 @@ fragment form(board: Board) <<<\
 <textarea name="text" maxlength="500"></textarea><button>Post</button></form>
 >>>
 
-fragment bottom() <<<</body></html>
+fragment bottom() <<<<script>(function(){var m=document.getElementById("me");if(m)document.querySelectorAll(".post[data-author-id=\""+m.dataset.userId+"\"]").forEach(function(p){p.classList.add("mine")})})()</script>
+</body></html>
 >>>
 
 // Posts to a board the viewer is a member of.

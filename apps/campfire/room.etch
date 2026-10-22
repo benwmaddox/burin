@@ -25,25 +25,37 @@ fn original_room(): Room = first(Room order by .created, .seq)
 screen room(room: Room) at "/rooms/{room}"
   require member(viewer, room) else go "/"
   cookie last_room = text(room.id)
-<<<{{room_head(room)}}{{invitation(room)}}<div class="messages" data-live-list>{{for m in room_messages(room)}}{{message(m)}}{{end}}{{room_tail(room)}}{{sidebar(room)}}{{page_end()}}>>>
+<<<{{head_top()}}{{room_title(room)}}{{head_mid()}}{{room_title(room)}}{{head_end(room)}}{{invitation(room)}}<div class="messages" data-live-list>{{for m in room_messages(room)}}{{message(m)}}{{end}}{{room_tail(room)}}{{sidebar(room)}}{{page_end()}}>>>
 
 fragment icon(name: Text) <<<<img src="{{asset(name)}}" width="20" height="20" aria-hidden="true" class="colorize--black">>>>
 
-fragment room_head(room: Room) varies by viewer <<<\
+// The room page's head, cached around its title (a direct room's title names the other people:
+// rendered for the viewer).
+fragment head_top() <<<\
 <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
-<title>{{display_name(room)}}</title>{{for css in stylesheets}}<link rel="stylesheet" href="{{asset(css)}}">{{end}}\
+<title>>>>
+
+fragment room_title(room: Room) per viewer <<<{{display_name(room)}}>>>
+
+fragment head_mid() <<<\
+</title>{{for css in stylesheets}}<link rel="stylesheet" href="{{asset(css)}}">{{end}}\
 <link rel="alternate" type="text/markdown" href="/llms.txt" title="For AI agents"></head>
 <body class="sidebar">
 <a href="#main-content" class="skip-navigation btn">Skip to main content</a>
-<nav id="nav"><div class="btn btn--reversed btn--faux room--current"><h1 class="room__contents txt-medium overflow-ellipsis">{{display_name(room)}}</h1></div>\
-<a href="/rooms/{{room.id}}/edit" class="btn">{{icon("menu-dots-horizontal.svg")}}<span class="for-screen-reader">Settings for this room</span></a>\
+<nav id="nav"><div class="btn btn--reversed btn--faux room--current"><h1 class="room__contents txt-medium overflow-ellipsis">>>>
+
+fragment head_end(room: Room) <<<\
+</h1></div><a href="/rooms/{{room.id}}/edit" class="btn">{{icon("menu-dots-horizontal.svg")}}<span class="for-screen-reader">Settings for this room</span></a>\
 <button type="button" class="btn" hidden data-push-subscribe="/_do/subscribe_push" data-push-params="endpoint,p256dh_key,auth_key" data-push-key="{{config.vapid_public}}">\
 {{icon("notification-bell-alert.svg")}}<span data-push-label class="for-screen-reader">Notification settings for this room</span></button></nav>
 
 <main id="main-content"><section class="message-area" id="message-area">>>>
 
-fragment message(m: Message) varies by viewer, viewer.role <<<\
-<div id="message_{{m.client_id}}" class="message message--formatted{{if m.creator == viewer}} message--me{{end}}" data-mentioned="false" \
+// A message: cached, the same for everyone. What depends on the viewer (their own messages
+// marked, the edit controls theirs or an administrator's, removing their own boosts) the page's
+// script shows (scripts/viewer.js.html), from the viewer's id and role on the sidebar.
+fragment message(m: Message) <<<\
+<div id="message_{{m.client_id}}" class="message message--formatted" data-mentioned="false" \
 data-message-id="{{m.id}}" data-user-id="{{m.creator.id}}"><div class="message__day-separator">\
 <time class="message__timestamp" datetime="{{iso(m.created)}}">{{date(m.created)}}</time></div>\
 <div class="avatar message__avatar"><a href="/users/{{m.creator.id}}" class="btn avatar" title="{{m.creator.name}}">\
@@ -68,7 +80,7 @@ data-message-id="{{m.id}}" data-user-id="{{m.creator.id}}"><div class="message__
 {{json("> " + replace(m.body, "\n", "\n> ") + "\n\n")}}+t.value;t.focus()}">{{icon("reply.svg")}}<span class="for-screen-reader">Reply</span></button>\
 <button type="button" class="btn" onclick="navigator.clipboard.writeText({{json("http://" + config.host + "/rooms/" + text(m.room.id) + "?at=" + text(m.id))}})">\
 {{icon("link.svg")}}<span class="for-screen-reader">Copy link</span></button>\
-{{if can_administer(viewer, m.creator)}}<details class="position-relative"><summary class="message__action-btn">{{icon("pencil.svg")}}<span class="for-screen-reader">Edit</span></summary>\
+<details class="position-relative message__edit" hidden><summary class="message__action-btn">{{icon("pencil.svg")}}<span class="for-screen-reader">Edit</span></summary>\
 <div class="message__actions-menu border shadow"><form method="post" action="/_do/edit_message" enctype="multipart/form-data" class="flex flex-column gap" id="">\
 <input type="hidden" name="__arg_message" value="#{{m.id}}"><input type="hidden" name="__h" value="{{edit_token(m)}}">\
 <fieldset  class="flex flex-column gap borderless unpad"><label class="flex align-center gap input input--actor">\
@@ -76,15 +88,15 @@ data-message-id="{{m.id}}" data-user-id="{{m.creator.id}}"><div class="message__
 <button type="submit" class="btn btn--reversed center">{{icon("check.svg")}}<span class="for-screen-reader">Save</span></button></fieldset></form>\
 <form method="post" action="/_do/delete_message" class="flex-inline" onsubmit="return confirm(&quot;Are you sure?&quot;)">\
 <input type="hidden" name="__arg_message" value="#{{m.id}}"><input type="hidden" name="__h" value="{{plain_token(m.room)}}">\
-<button type="submit" class="btn">{{icon("trash.svg")}}<span class="for-screen-reader">Delete</span></button></form></div></details>{{end}}\
+<button type="submit" class="btn">{{icon("trash.svg")}}<span class="for-screen-reader">Delete</span></button></form></div></details>\
 </div></div></details></div></div>\
 <div id="presentation_message_{{m.id}}" class="message__presentation" dir="auto">{{autolink(m.body)}}</div>\
 <div class="boosts flex flex-wrap align-center gap full-width"><div class="" data-live-list>\
 {{for b in boosts(m)}}<div class="boost"><figure class="avatar "><img src="/avatars/User/{{b.booster.id}}" alt="{{b.booster.name + " boosted " + b.content}}"></figure>\
 <span class="">{{b.content}}</span>\
-{{if b.booster == viewer}}<form method="post" action="/_do/unboost" class="flex-inline" ><input type="hidden" name="__arg_boost" value="#{{b.id}}">\
+<form method="post" action="/_do/unboost" class="flex-inline boost__remove" data-booster-id="{{b.booster.id}}" hidden><input type="hidden" name="__arg_boost" value="#{{b.id}}">\
 <input type="hidden" name="__h" value="{{plain_token(m.room)}}"><button type="submit" class="btn">{{icon("minus.svg")}}\
-<span class="for-screen-reader">Delete this boost</span></button></form>{{end}}</div>{{end}}\
+<span class="for-screen-reader">Delete this boost</span></button></form></div>{{end}}\
 </div></div></div></div></div>>>>
 
 fragment room_tail(room: Room) <<<\
@@ -109,10 +121,10 @@ data-unfurl-src="/_view/unfurl_link?link=" onkeydown="if(event.key==='Enter'&&!e
 <div class="typing-indicator__author spinner"></div></div></div></footer></main>
 >>>
 
-// per viewer: what it shows depends on who is asking, not only through Bools; the compiler keys
-// it by the viewer and reports its memory per viewer
+// per viewer: rendered for each request (never kept); it merges the cached pieces it calls. It
+// carries the viewer's id and role for the page's script (scripts/viewer.js.html)
 fragment sidebar(page_room: Room) per viewer <<<\
-<aside id="sidebar"><div class="sidebar__container overflow-y overflow-hide-scrollbar"><div class="directs gap overflow-x overflow-hide-scrollbar">\
+<aside id="sidebar" data-user-id="{{viewer.id}}" data-role="{{viewer.role}}"><div class="sidebar__container overflow-y overflow-hide-scrollbar"><div class="directs gap overflow-x overflow-hide-scrollbar">\
 <a href="/rooms/directs/new" class="direct direct__new"><div class="avatar avatar--icon">{{icon("messages-add.svg")}}</div>\
 <div class="direct__author flex max-width min-width border-radius pad-inline-half"><span class="for-screen-reader">New</span><span class="txt-small overflow-clip">Ping</span></div></a>\
 <div class="" data-live-list>\
@@ -134,7 +146,7 @@ fragment sidebar(page_room: Room) per viewer <<<\
 <a href="/account/edit" class="btn align-center gap txt-reversed sidebar__tool">{{icon("settings.svg")}}<span class="for-screen-reader">Account Settings</span></a></div></aside>
 >>>
 
-fragment page_end() <<<\
+fragment page_end() <<<{{include("scripts/viewer.js.html")}}\
 <a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="{{asset("campfire-icon.png")}}" alt="Campfire logo"></a>
 </body></html>>>>
 

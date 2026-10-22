@@ -22,27 +22,23 @@ impl Seg {
     }
 }
 
-/// A register's value: its variants (one per kind of viewer, for a register with variant bits)
-/// and which variant each audience member sees; or its pieces between splices (per viewer).
+/// A cached register's value: one piece, the same for everyone (a cached fragment never reads
+/// the viewer).
 pub struct Reg {
-    pub variants: Vec<Seg>,
-    /// per audience place, the variant's index (empty: every viewer sees variant 0)
-    pub by_place: Vec<u8>,
-    /// more kinds of viewer than 256 variants: not kept (its pages are served cold)
-    pub overflow: bool,
+    pub seg: Seg,
 }
 
 impl Reg {
     pub fn one(raw: Vec<u8>) -> Reg {
-        Reg { variants: vec![Seg::new(raw)], by_place: vec![], overflow: false }
+        Reg { seg: Seg::new(raw) }
     }
-    #[inline]
-    pub fn for_place(&self, place: usize) -> &Seg {
-        match self.by_place.get(place) {
-            Some(&i) => &self.variants[i as usize],
-            None => &self.variants[0],
-        }
-    }
+}
+
+/// A page's parts, in order: a cached piece, or a fragment rendered for the viewer now (its
+/// kind, its key) that merges the cached pieces it calls.
+pub enum Part<'a> {
+    Seg(&'a Seg),
+    Render(usize, i64),
 }
 
 /// A screen instance's sorted audience (who may see it), and whether its write-time guards hold.
@@ -76,6 +72,6 @@ impl Snap {
     }
     #[inline]
     pub fn reg(&self, kind: usize, key: i64) -> Option<&Reg> {
-        self.regs[kind].get(&key).map(|r| &**r).filter(|r| !r.overflow)
+        self.regs[kind].get(&key).map(|r| &**r)
     }
 }

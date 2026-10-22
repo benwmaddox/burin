@@ -178,6 +178,10 @@ fn list_reads(m: &Model, regs: &[RegInfo]) -> Result<Vec<ListRead>, String> {
         Ok(())
     }
     for (i, r) in regs.iter().enumerate() {
+        // rendered per request: never kept, so no write reaches one
+        if r.per_viewer {
+            continue;
+        }
         walk(m, i, r, &r.schema, false, &mut out)?;
     }
     Ok(out)
@@ -455,8 +459,11 @@ impl<'a, 'b> Act<'a, 'b> {
     fn delta(&mut self, op: i32, a: usize, key: &str, item: &str) {
         // ops that rebuild a register or list in full cover all its reads (op 3 covers the read
         // path its caller names: `cover`)
+        // op 4 rebuilds every kept instance: all its reads covered. Ops 1, 6 and 9 concern one new
+        // or deleted row's own instance: the register's other instances may still read what the
+        // write changed (a scan of the table: the fail-safe below sees it)
         match op {
-            1 | 4 | 6 | 9 => self.touched.push(('r', a, None)),
+            4 => self.touched.push(('r', a, None)),
             2 | 5 | 7 => self.touched.push(('l', a, None)),
             _ => {}
         }
@@ -564,7 +571,7 @@ impl<'a, 'b> Act<'a, 'b> {
         let verb = if created { "create" } else if removed { "delete" } else { "set" };
         // registers keyed by a row of this entity
         for (ri, r) in regs.iter().enumerate() {
-            if !r.root.as_ref().map(|(_, e)| e == ent).unwrap_or(false) {
+            if r.per_viewer || !r.root.as_ref().map(|(_, e)| e == ent).unwrap_or(false) {
                 continue;
             }
             if removed {
@@ -598,7 +605,7 @@ impl<'a, 'b> Act<'a, 'b> {
         }
         // a row-keyed register's fields through a reference to the written row (a message's
         // creator's name): every kept one rebuilt
-        for (ri, r) in regs.iter().enumerate() {
+        for (ri, r) in regs.iter().enumerate().filter(|(_, r)| !r.per_viewer) {
             let Some((_, rent)) = &r.root else { continue };
             if rows_change {
                 continue;
@@ -637,61 +644,20 @@ impl<'a, 'b> Act<'a, 'b> {
             if direct {
                 let key = l.keyed_by.as_ref().and_then(|f| vals.get(f).cloned());
                 // a patch: only item fields change, nothing the list's filter or order reads
-                let patchable = !rows_change
-                    && key.is_some()
-                    && cols.iter().all(|c| !reads_query(c))
-                    && cols.iter().filter(|c| reads_item(c)).all(|c| l.items.fields.iter().any(|(p, s)| p.split('.').skip(1).collect::<Vec<_>>() == [c.as_str()] && *s == Shape::I64));
-                match (key, patchable) {
-                    (Some(k), true) => {
-                        let id = vals.get("id").cloned().ok_or("the written row's id")?;
-                        for (c, e) in sets {
-                            if !reads_item(c) {
-                                continue;
-                            }
-                            let fi = l.items.fields.iter().position(|(p, _)| p.split('.').skip(1).collect::<Vec<_>>() == [c.as_str()]).unwrap();
-                            let (v, _) = self.value(e)?;
-                            let slot = l.slot.unwrap();
-                            self.line(&format!("call void @etch_delta_patch(ptr %d, i64 {}, i64 {k}, i64 {id}, i64 {slot}, i64 {fi}, i64 {v})", l.reg));
-                            self.cover(l.reg, &l.entity, c);
-                            if !self.patches.contains(&(l.reg, slot, fi)) {
-                                self.patches.push((l.reg, slot, fi));
-                            }
-                        }
-                        self.note(format!("set {ent}.{} → {reg_name}: patched (the kept record's item, then its bytes)", cols.join(",")));
-                    }
-                    (Some(k), false) => {
+                match key {
+                    Some(k) => {
                         self.delta(3, l.reg, &k, "0");
                         self.cover(l.reg, &l.entity, "*");
                         for c in cols {
                             self.cover(l.reg, &l.entity, c);
                         }
-                        self.note(format!("{verb} {ent} → {reg_name}: READ (its list changes order or rows)"));
+                        self.note(format!("{verb} {ent} → {reg_name}: READ (rebuilt at its key)"));
                     }
-                    (None, _) => {
+                    None => {
                         self.delta(4, l.reg, "0", "0");
                         self.note(format!("{verb} {ent} → {reg_name}: READ (every kept one rebuilt)"));
                     }
                 }
-            } else if let Some((slot, pi)) = via.as_ref().and_then(|p0| {
-                // the written column only orders the list (no filter reads it, no item shows it):
-                // rows can't enter or leave it; only kept lists holding the row reorder. They are
-                // found in the kept records (the item's reference), not by a query
-                let only_order = cols.iter().all(|c| {
-                    let path = [p0.clone(), c.clone()];
-                    !l.filter_paths.iter().any(|p| *p == path) && !l.item_paths.iter().any(|p| *p == path)
-                });
-                let pi = l.items.fields.iter().position(|(p, s)| p.split('.').skip(1).collect::<Vec<_>>() == [p0.as_str()] && *s == Shape::I64)?;
-                if only_order { l.slot.map(|s| (s, pi)) } else { None }
-            }) {
-                let id = vals.get("id").cloned().ok_or("the written row's id")?;
-                self.line(&format!("call void @etch_delta_find(ptr %d, i64 {}, i64 {id}, i64 {slot}, i64 {pi})", l.reg));
-                for c in cols {
-                    self.cover(l.reg, &l.entity, &format!("{}.{c}", l.items.fields[pi].0.split('.').nth(1).unwrap_or("")));
-                }
-                if !self.finds.contains(&(l.reg, slot, pi)) {
-                    self.finds.push((l.reg, slot, pi));
-                }
-                self.note(format!("set {ent}.{} → {reg_name} (it orders the list): only kept lists holding the row (found in the kept records), READ for those", cols.join(",")));
             } else if let (Some(p0), Some(f)) = (via, &l.keyed_by) {
                 // the keys of the list's rows that reach the written row
                 let id = vals.get("id").cloned().ok_or("the written row's id")?;
@@ -799,11 +765,7 @@ impl<'a, 'b> Act<'a, 'b> {
             reads.iter().any(|(s, p)| reaches(s, p) && !touched.iter().any(|(k, x, c)| *k == kind && *x == i && c.as_ref() == Some(&(s.clone(), p.clone()))))
         };
         for (ri, r) in regs.iter().enumerate() {
-            if uncovered(&self.touched, 'r', ri, &r.reads) {
-                // a row-keyed register of a new row isn't kept yet; of a deleted one, dropped
-                if rows_change && r.root.as_ref().map(|(_, e)| e == ent).unwrap_or(false) {
-                    continue;
-                }
+            if !r.per_viewer && uncovered(&self.touched, 'r', ri, &r.reads) {
                 self.delta(4, ri, "0", "0");
                 self.note(format!("{verb} {ent}.{} → {}: FALLBACK (every kept one rebuilt; no precise rule)", cols.join(","), r.name));
             }

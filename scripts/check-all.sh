@@ -5,6 +5,7 @@
 cd /mnt/d/code/etch
 export ETCH_BIN=$HOME/hw/etch-gen-release
 echo "== golden";        bash scripts/golden.sh 2>&1 | tail -4
+echo "== the viewer script"; for p in "david-1 room" "jason-1 room-jason"; do set -- $p; python3 scripts/golden-viewer-js.py /tmp/etch-golden/$1.html data/golden-pages/$2-server-rendered.html; done
 echo "== writes";        bash scripts/writes-verify.sh 2>&1 | tail -2
 echo "== outcomes";      bash scripts/outcomes.sh 2>&1 | tail -4
 echo "== edits";         bash scripts/edits-verify.sh 2>&1 | tail -1

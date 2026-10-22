@@ -38,6 +38,40 @@ pub fn registers_of(m: &Model) -> Vec<String> {
             }
         }
     }
+    // the cached fragments a per-request fragment merges (called with a row, or nothing)
+    fn walk(m: &Model, ns: &[TNode], out: &mut Vec<String>, seen: &mut Vec<String>) {
+        for n in ns {
+            match n {
+                TNode::Hole(Expr::Call(f, _, _)) => {
+                    if let Some(Decl::Fragment { params, per_viewer, body, .. }) = m.fragments.get(f) {
+                        let rowish = params.len() <= 1 && params.iter().all(|p| matches!(p.ty.strip_opt(), Type::Ref(_)));
+                        if !per_viewer && rowish {
+                            if !out.iter().any(|x| x == f) {
+                                out.push(f.clone());
+                            }
+                        } else if !seen.contains(f) {
+                            // inlined into the per-request fragment: what it calls is merged too
+                            seen.push(f.clone());
+                            walk(m, &crate::inline::nodes(m, &body.nodes, &std::collections::HashMap::new()), out, seen);
+                            seen.pop();
+                        }
+                    }
+                }
+                TNode::If(_, a, b) => {
+                    walk(m, a, out, seen);
+                    walk(m, b, out, seen);
+                }
+                TNode::For(_, _, _, b) => walk(m, b, out, seen),
+                TNode::Text(_) | TNode::Hole(_) => {}
+            }
+        }
+    }
+    let per_request: Vec<String> = out.iter().filter(|f| matches!(m.fragments.get(*f), Some(Decl::Fragment { per_viewer: true, .. }))).cloned().collect();
+    for f in per_request {
+        if let Some(Decl::Fragment { body, .. }) = m.fragments.get(&f) {
+            walk(m, &crate::inline::nodes(m, &body.nodes, &std::collections::HashMap::new()), &mut out, &mut vec![f.clone()]);
+        }
+    }
     out
 }
 
@@ -76,7 +110,7 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     let _ = writeln!(s, "unsafe impl etch_rt::app::Glue for Spec {{");
     let _ = writeln!(s, "    const REGS: usize = {};\n    const LISTS: usize = {};\n    const SCREENS: usize = {};", md.registers.len(), screens.len(), screen_decls.len());
     let pv: Vec<String> = md.registers.iter().enumerate().filter(|(_, r)| r.per_viewer).map(|(i, _)| i.to_string()).collect();
-    let _ = writeln!(s, "    fn per_viewer(kind: usize) -> bool {{ matches!(kind, {}) }}", if pv.is_empty() { "usize::MAX".into() } else { pv.join(" | ") });
+    let _ = writeln!(s, "    fn per_request(kind: usize) -> bool {{ matches!(kind, {}) }}", if pv.is_empty() { "usize::MAX".into() } else { pv.join(" | ") });
 
     // screen lists: their item kind, screen, bound
     let mut li = String::new();
@@ -146,31 +180,26 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     }
     let _ = writeln!(s, "        _ => 0 }} }}");
     let _ = writeln!(s, "    fn tmps(kind: usize) -> usize {{ match kind {{ {}_ => 0 }} }}", md.registers.iter().enumerate().map(|(i, r)| format!("{i} => {}, ", r.tmps)).collect::<String>());
-    let _ = writeln!(s, "    unsafe fn load(kind: usize, ctx: &etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, rec: *mut u8, arena: *mut etch_rt::abi::Arena) -> bool {{ match kind {{");
+    let _ = writeln!(s, "    unsafe fn load(kind: usize, ctx: &etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, viewer: i64, rec: *mut u8, arena: *mut etch_rt::abi::Arena) -> bool {{ match kind {{");
     for (i, r) in md.registers.iter().enumerate() {
-        let _ = writeln!(s, "        {i} => etch_load_{}(ctx, db, key, rec as *mut In_{}, arena),", r.name, r.name);
+        let _ = writeln!(s, "        {i} => etch_load_{}(ctx, db, key, viewer, rec as *mut In_{}, arena),", r.name, r.name);
     }
     let _ = writeln!(s, "        _ => false }} }}");
-    let _ = writeln!(s, "    unsafe fn bits(kind: usize, rec: *const u8, viewer: *const u8) -> i64 {{ match kind {{");
-    for (i, r) in md.registers.iter().enumerate() {
-        let _ = writeln!(s, "        {i} => etch_bits_{}(rec as *const In_{}, viewer as *const Viewer),", r.name, r.name);
-    }
-    let _ = writeln!(s, "        _ => 0 }} }}");
+
     let _ = writeln!(s, "    unsafe fn build(kind: usize, ctx: &etch_rt::abi::Ctx, rec: *const u8, viewer: *const u8, out: &mut Vec<u8>, tmps: &[*mut Vec<u8>], splits: &mut Vec<usize>) {{ match kind {{");
     for (i, r) in md.registers.iter().enumerate() {
         let _ = writeln!(s, "        {i} => etch_build_{}(ctx, rec as *const In_{}, viewer as *const Viewer, out, tmps.as_ptr(), splits),", r.name, r.name);
     }
     let _ = writeln!(s, "        _ => {{}} }} }}");
     let _ = writeln!(s, "    fn viewer_size() -> usize {{ std::mem::size_of::<Viewer>() }}");
-    let _ = writeln!(s, "    unsafe fn load_viewer(ctx: &etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, rec: *mut u8, arena: *mut etch_rt::abi::Arena) -> bool {{ etch_load_viewer(ctx, db, key, rec as *mut Viewer, arena) }}");
-    let _ = writeln!(s, "    unsafe fn patch(reg: i64, list: i64, field: i64, rec: *mut u8, item: i64, value: i64) -> bool {{ patch(reg, list, field, rec, item, value) }}");
-    let _ = writeln!(s, "    unsafe fn find(reg: i64, list: i64, field: i64, rec: *mut u8, row: i64) -> bool {{ find(reg, list, field, rec, row) }}");
+    let _ = writeln!(s, "    unsafe fn load_viewer(ctx: &etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, rec: *mut u8, arena: *mut etch_rt::abi::Arena) -> bool {{ etch_load_viewer(ctx, db, key, key, rec as *mut Viewer, arena) }}");
+
 
     // screens
     let mut screen_fn = String::new();
     let mut regs_fn = String::new();
     let mut lists_fn = String::new();
-    let mut vregs_fn = String::new();
+
     let mut asm_fn = String::new();
     let mut refuse_fn = String::new();
     let mut guards_fn = String::new();
@@ -295,34 +324,30 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
 
         // the read stage, in template order
         let mut regs = vec![];
-        let mut vregs = vec![];
         let mut lists_rs = String::new();
         let mut asm = String::new();
         for n in &body.nodes {
             match n {
                 TNode::Text(t) => {
                     consts.push(t.clone());
-                    let _ = writeln!(asm, "                push(&consts()[{}]);", consts.len() - 1);
+                    let _ = writeln!(asm, "                emit(etch_rt::store::Part::Seg(&consts()[{}]));", consts.len() - 1);
                 }
                 TNode::Hole(Expr::Call(f, args, _)) if m.fragments.contains_key(f) => {
                     let k = kind_of(md, f)?;
                     let reg = &md.registers[k];
-                    if reg.per_viewer {
-                        vregs.push(k);
-                        let splice_kinds: Vec<usize> = reg.splices.iter().map(|n| kind_of(md, n)).collect::<Result<_, _>>()?;
-                        for sk in &splice_kinds {
-                            regs.push(format!("({sk}, key)"));
-                        }
-                        let _ = writeln!(asm, "                let Some(r) = snap.reg({k}, viewer) else {{ return false }};");
-                        let _ = writeln!(asm, "                for (i, seg) in r.variants.iter().enumerate() {{\n                    if i > 0 {{\n                        let site = r.by_place[i - 1] as usize;\n                        let sk = [{}][site];\n                        let Some(sp) = snap.reg(sk, key) else {{ return false }};\n                        push(&sp.variants[0]);\n                    }}\n                    push(seg);\n                }}", splice_kinds.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "));
-                    } else if args.is_empty() {
-                        regs.push(format!("({k}, 0)"));
-                        let _ = writeln!(asm, "                let Some(r) = snap.reg({k}, 0) else {{ return false }};\n                push(r.for_place(place));");
+                    let at = if args.is_empty() {
+                        "0"
                     } else if matches!(&args[0], Expr::Name(n, _) if n == p) {
-                        regs.push(format!("({k}, key)"));
-                        let _ = writeln!(asm, "                let Some(r) = snap.reg({k}, key) else {{ return false }};\n                push(r.for_place(place));");
+                        "key"
                     } else {
                         return Err(format!("a screen calls {f} with something other than its parameter"));
+                    };
+                    if reg.per_viewer {
+                        // rendered for the viewer now (it merges the cached pieces it calls)
+                        let _ = writeln!(asm, "                emit(etch_rt::store::Part::Render({k}, {at}));");
+                    } else {
+                        regs.push(format!("({k}, {at})"));
+                        let _ = writeln!(asm, "                let Some(r) = snap.reg({k}, {at}) else {{ return false }};\n                emit(etch_rt::store::Part::Seg(&r.seg));");
                     }
                 }
                 TNode::For(var, list, _, b) => {
@@ -333,13 +358,16 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
                     };
                     let sel = sql::list_select(m, list, &[var.clone()], &Scope::of(params))?;
                     let _ = write!(lists_rs, "            {{ let mut st = c.prepare_cached(r##\"{}\"##).expect(\"a list\"); out.push(({li}, st.query_map({}, |r| r.get(0)).expect(\"a list\").flatten().collect())); }}\n", sel.sql, binds_rs(&sel, p)?);
-                    let _ = writeln!(asm, "                let Some(items) = snap.lists[{li}].get(&key) else {{ return false }};\n                for id in items.iter() {{\n                    let Some(r) = snap.reg({k}, *id) else {{ return false }};\n                    push(r.for_place(place));\n                }}");
+                    if md.registers[k].per_viewer {
+                        return Err(format!("a screen's list shows cached fragments: {} is rendered per request", md.registers[k].name));
+                    }
+                    let _ = writeln!(asm, "                let Some(items) = snap.lists[{li}].get(&key) else {{ return false }};\n                for id in items.iter() {{\n                    let Some(r) = snap.reg({k}, *id) else {{ return false }};\n                    emit(etch_rt::store::Part::Seg(&r.seg));\n                }}");
                 }
                 _ => return Err("a screen's template holds fragments, loops of a fragment, and text".into()),
             }
         }
         let _ = writeln!(regs_fn, "        {si} => vec![{}],", regs.join(", "));
-        let _ = writeln!(vregs_fn, "        {si} => vec![{}],", vregs.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "));
+
         let _ = write!(lists_fn, "        {si} => {{\n            let mut out = vec![];\n{lists_rs}            out\n        }}\n");
         let _ = write!(asm_fn, "            {si} => {{\n{asm}                true\n            }}\n");
     }
@@ -348,9 +376,9 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     let _ = writeln!(s, "    fn guards(c: &rusqlite::Connection, s: usize, key: i64, viewer: i64) -> Result<(), Option<String>> {{\n        let _ = (c, key, viewer);\n        match s {{\n{guards_fn}        _ => Err(None),\n        }}\n    }}");
     let _ = writeln!(s, "    fn cold(s: usize) -> bool {{ matches!(s, {}) }}", if colds.is_empty() { "usize::MAX".to_string() } else { colds.join(" | ") });
     let _ = writeln!(s, "    fn screen_regs(s: usize, key: i64) -> Vec<(usize, i64)> {{ let _ = key; match s {{\n{regs_fn}        _ => vec![] }} }}");
-    let _ = writeln!(s, "    fn viewer_regs(s: usize) -> Vec<usize> {{ match s {{\n{vregs_fn}        _ => vec![] }} }}");
+
     let _ = writeln!(s, "    fn screen_lists(c: &rusqlite::Connection, s: usize, key: i64) -> Vec<(usize, Vec<i64>)> {{\n        match s {{\n{lists_fn}        _ => vec![],\n        }}\n    }}");
-    let _ = writeln!(s, "    fn assemble<'a>(snap: &'a etch_rt::store::Snap, s: usize, key: i64, viewer: i64, place: usize, push: &mut dyn FnMut(&'a etch_rt::store::Seg)) -> bool {{\n        let _ = (viewer, place);\n        match s {{\n{asm_fn}            _ => false,\n        }}\n    }}");
+    let _ = writeln!(s, "    fn assemble<'a>(snap: &'a etch_rt::store::Snap, s: usize, key: i64, emit: &mut dyn FnMut(etch_rt::store::Part<'a>)) -> bool {{\n        let _ = (snap, key);\n        match s {{\n{asm_fn}            _ => false,\n        }}\n    }}");
 
     // actions
     let _ = writeln!(s, "    fn act(name: &str, c: &rusqlite::Connection, ctx: &etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, w: &mut etch_rt::abi::Writer, viewer: i64, vrec: *const u8, form: &[(String, String)], d: &mut etch_rt::abi::Deltas) -> Result<(), &'static str> {{\n        let _ = c;\n        match name {{");
