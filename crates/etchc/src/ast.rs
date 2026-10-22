@@ -86,6 +86,11 @@ pub enum BinOp {
     Ge,
     Add,
     Sub,
+    Mul,
+    /// truncating toward 0, as SQLite's: none when the divisor is 0
+    Div,
+    /// the remainder, with the dividend's sign: none when the divisor is 0
+    Mod,
     /// `x in list`: a row among a list argument's rows
     In,
 }

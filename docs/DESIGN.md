@@ -248,6 +248,63 @@ then shown in the compile report). The checker enforces these rules:
 | **Queries name their order and go through indexes** | write-time rebuilds are index lookups; incremental appends where the order is proved monotone | nothing: a scan of a table on a hot rebuild is reported as an error |
 | **Holes are escaped for where they are**, at write time | safety without per-request work; `on…=` holes take only `json(…)` | `raw(…)` for `Html` values (autolink's output), which the checker types |
 
+## Numbers and time (23 Oct 2026)
+
+Three number types, each a 64-bit integer in an `INTEGER` column (no floating point, so SQLite
+and the fragments' code compute the same bits):
+
+- **`Int`**: a whole number.
+- **`Time`**: an instant, in milliseconds since 1970 (UTC). `now` is the action's time (one value
+  for the whole action); every row has `created` and `updated`.
+- **`Duration`**: a length of time, in milliseconds. Literals take a unit: `250ms`, `30s`, `5min`,
+  `2h`, `3d`; `-30s` is negative.
+
+What arithmetic means, by type (anything else is refused, naming the two types):
+
+| | gives |
+| --- | --- |
+| `Int + - * / % Int` | `Int` |
+| `Time + Duration`, `Duration + Time`, `Time - Duration` | `Time` |
+| `Time - Time` | `Duration` (how long between) |
+| `Duration + - % Duration`, `Duration * Int`, `Int * Duration`, `Duration / Int` | `Duration` |
+| `Duration / Duration` | `Int`: how many fit (`elapsed / 1h` is whole hours) |
+
+So `now + p.took * (p.level + 1)` is a Time, and a rate per hour is `p.rate * (now - p.updated) / 1h`
+(multiply first: whole hours would drop the minutes). `*`, `/` and `%` bind tighter than `+` and
+`-`. Functions: `min`, `max` and `clamp(x, lo, hi)` (= `max(lo, min(x, hi))`) on Ints, Times or
+Durations of one kind; `abs` on an Int or a Duration. Comparisons order Times and Durations.
+
+**The rules are SQLite's, in both places.** An action computes in SQL (`require`, `set`, `let`, and
+values in `create`); a fragment computes in its own LLVM code, at write time. They must agree, or a
+page could say "can build" while the action refuses. So the fragments' code copies SQLite's integer
+rules:
+
+- `/` truncates toward 0 (`-7 / 2` is `-3`) and `%` takes the dividend's sign (`-7 % 3` is `-1`).
+- **none in, none out**: `p.bonus + 1` is none when `bonus` is (the checker types it `Int?`).
+- **dividing by 0 gives none** (SQLite's NULL). So `a / b` is `Int?`, unless `b` is a nonzero
+  literal (`a / 4`, `d / 1h`).
+- **overflow gives none.** A result outside 64 bits is none in a page, through LLVM's
+  overflow-checked add, subtract and multiply. In SQL, SQLite makes it a REAL; an action reads any
+  computed value that isn't an INTEGER as none (`etch_col_int`), and a STRICT table refuses to
+  store a REAL, so the write fails and the action rolls back. One gap remains: an overflow *inside*
+  a `require`'s comparison compares as a REAL in SQL, and as none in a page.
+
+A `set` whose value is arithmetic comes back with `RETURNING`, so a forwarded value is the one
+stored (computing `p.n - 1` again after the UPDATE would read the new `p.n`).
+
+Shown in a page: `{{n}}` or `text(n)` for an Int's digits, `grouped(n)` with thousands grouped
+("1,234,567"), `text(d)` for a Duration in its two largest units ("2h 5m", "45s", "-1m 30s"),
+and `iso(t)`, `date(t)` and `clock(t)` for a Time. A page can't read `now`, because a cached
+fragment must stay right until a write changes it. To show a countdown, write the end time with
+`iso(…)` into a `<time datetime>`, and count in the browser.
+
+`apps/numbers` (a tiny build queue) and `scripts/numbers-check.sh` check all of this end to end.
+Each page value is compared with the same value computed by an action in SQL, and by Python, on
+rows made to hit the edges: dividing by 0, none, negatives, and overflow at 64 bits.
+
+**Not yet:** fractional numbers (one design: `Decimal`, an Int scaled by 10⁴), scheduled actions
+(run at a time), and `now` in `cold` screens.
+
 ## Lessons kept from crudspec and AgentLang
 
 - **The whole app is one program, checked as a whole** (crudspec): names, types, permissions,

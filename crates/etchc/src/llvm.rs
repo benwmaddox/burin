@@ -367,7 +367,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         match e {
             Expr::Str(s, _) => Some(s.clone()),
             Expr::Int(n, _) => Some(n.to_string()),
-            Expr::Bin(BinOp::Add, l, r, _) => Some(self.constant(roots, l)? + &self.constant(roots, r)?),
+            Expr::Bin(BinOp::Add, l, r, _) if !self.numeric(e) => Some(self.constant(roots, l)? + &self.constant(roots, r)?),
             Expr::Name(n, _) => match roots.get(n) {
                 Some(Root::Const(c)) => self.constant(roots, c),
                 _ => None,
@@ -464,9 +464,80 @@ impl<'a, 'b> Gen<'a, 'b> {
         (self.scope, self.mult) = l.saved;
     }
 
+    /// Whether `e` is arithmetic on numbers, times or durations (not text joined with `+`).
+    fn numeric(&self, e: &Expr) -> bool {
+        matches!(self.m.type_of(e, &self.scope).map(|t| t.strip_opt().clone()), Ok(Type::Int | Type::Time | Type::Duration))
+    }
+
+    /// `a op b` on i64s, as SQLite computes it on INTEGERs, so a page and an action's `require`
+    /// agree: none (i64::MIN) in gives none; so do a divisor of 0 and an overflow (SQLite turns an
+    /// overflow into a REAL, which a STRICT column refuses).
+    fn arith(&mut self, op: &BinOp, a: &str, b: &str) -> String {
+        const NONE: &str = "-9223372036854775808";
+        let (na, nb, bad) = (self.v(), self.v(), self.v());
+        self.line(&format!("{na} = icmp eq i64 {a}, {NONE}\n  {nb} = icmp eq i64 {b}, {NONE}\n  {bad} = or i1 {na}, {nb}"));
+        let (x, fail) = match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                let f = match op {
+                    BinOp::Add => "sadd",
+                    BinOp::Sub => "ssub",
+                    _ => "smul",
+                };
+                let (p, x, o, fail) = (self.v(), self.v(), self.v(), self.v());
+                self.line(&format!("{p} = call {{i64, i1}} @llvm.{f}.with.overflow.i64(i64 {a}, i64 {b})\n  {x} = extractvalue {{i64, i1}} {p}, 0\n  {o} = extractvalue {{i64, i1}} {p}, 1\n  {fail} = or i1 {bad}, {o}"));
+                (x, fail)
+            }
+            _ => {
+                // the divisor made 1 where the answer is none anyway: sdiv by 0 is undefined
+                let (z, fail, d, x) = (self.v(), self.v(), self.v(), self.v());
+                let ins = if *op == BinOp::Div { "sdiv" } else { "srem" };
+                self.line(&format!("{z} = icmp eq i64 {b}, 0\n  {fail} = or i1 {bad}, {z}\n  {d} = select i1 {fail}, i64 1, i64 {b}\n  {x} = {ins} i64 {a}, {d}"));
+                (x, fail)
+            }
+        };
+        let r = self.v();
+        self.line(&format!("{r} = select i1 {fail}, i64 {NONE}, i64 {x}"));
+        r
+    }
+
+    /// The smaller (`min`) or larger of two i64s; none when either is none, as SQLite's.
+    fn pick(&mut self, max: bool, a: &str, b: &str) -> String {
+        const NONE: &str = "-9223372036854775808";
+        let (na, nb, bad, c, x, r) = (self.v(), self.v(), self.v(), self.v(), self.v(), self.v());
+        self.line(&format!(
+            "{na} = icmp eq i64 {a}, {NONE}\n  {nb} = icmp eq i64 {b}, {NONE}\n  {bad} = or i1 {na}, {nb}\n  {c} = icmp {} i64 {a}, {b}\n  {x} = select i1 {c}, i64 {a}, i64 {b}\n  {r} = select i1 {bad}, i64 {NONE}, i64 {x}",
+            if max { "sgt" } else { "slt" }
+        ));
+        r
+    }
+
     fn value(&mut self, roots: &HashMap<String, Root>, e: &Expr) -> Result<(String, Shape), String> {
         match e {
-            Expr::Int(n, _) => Ok((n.to_string(), Shape::I64)),
+            Expr::Int(n, _) | Expr::Dur(n, _) => Ok((n.to_string(), Shape::I64)),
+            Expr::Bin(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod), l, r, _) if self.numeric(e) => {
+                let (a, _) = self.value(roots, l)?;
+                let (b, _) = self.value(roots, r)?;
+                Ok((self.arith(op, &a, &b), Shape::I64))
+            }
+            Expr::Call(f, a, _) if f == "min" || f == "max" => {
+                let (x, _) = self.value(roots, &a[0])?;
+                let (y, _) = self.value(roots, &a[1])?;
+                Ok((self.pick(f == "max", &x, &y), Shape::I64))
+            }
+            Expr::Call(f, a, _) if f == "clamp" => {
+                let (x, _) = self.value(roots, &a[0])?;
+                let (lo, _) = self.value(roots, &a[1])?;
+                let (hi, _) = self.value(roots, &a[2])?;
+                let m = self.pick(false, &x, &hi);
+                Ok((self.pick(true, &lo, &m), Shape::I64))
+            }
+            Expr::Call(f, a, _) if f == "abs" => {
+                // none (i64::MIN) is its own negation, so it stays none
+                let (x, _) = self.value(roots, &a[0])?;
+                let (n, c, r) = (self.v(), self.v(), self.v());
+                self.line(&format!("{n} = sub i64 0, {x}\n  {c} = icmp slt i64 {x}, 0\n  {r} = select i1 {c}, i64 {n}, i64 {x}"));
+                Ok((r, Shape::I64))
+            }
             Expr::Call(f, a, _) if f == "count" && matches!(&a[0], Expr::Query(q) if Self::split_viewer(q).1.is_some()) => {
                 let Expr::Query(q) = &a[0] else { unreachable!() };
                 let (rest, vc) = Self::split_viewer(q);
@@ -520,8 +591,10 @@ impl<'a, 'b> Gen<'a, 'b> {
             return Ok(());
         }
         if let Expr::Bin(BinOp::Add, l, r, _) = e {
-            self.text(roots, l, out, esc)?;
-            return self.text(roots, r, out, esc);
+            if !self.numeric(e) {
+                self.text(roots, l, out, esc)?;
+                return self.text(roots, r, out, esc);
+            }
         }
         self.flush(out);
         if let Expr::If(c, a, b, _) = e {
@@ -557,10 +630,17 @@ impl<'a, 'b> Gen<'a, 'b> {
         };
         match e {
             Expr::Call(f, args, _) => match f.as_str() {
-                "text" => {
+                "text" | "grouped" => {
+                    let dur = matches!(self.m.type_of(&args[0], &self.scope).map_err(|x| x.msg)?.strip_opt(), Type::Duration);
                     let (v, _) = self.value(roots, &args[0])?;
                     if !self.bits {
-                        self.line(&format!("call void @etch_int(ptr {out}, i64 {v})"));
+                        if dur {
+                            self.line(&format!("call void @etch_time(ptr {out}, i64 3, i64 {v}, i64 {e1})"));
+                        } else if f == "grouped" {
+                            self.line(&format!("call void @etch_time(ptr {out}, i64 4, i64 {v}, i64 {e1})"));
+                        } else {
+                            self.line(&format!("call void @etch_int(ptr {out}, i64 {v})"));
+                        }
                     }
                 }
                 "json" | "quote" => via_tmp(self, &args[0], &|t| format!("call void @etch_json(ptr {out}, ptr {t}, i64 {e1})"))?,
@@ -655,6 +735,13 @@ impl<'a, 'b> Gen<'a, 'b> {
                         self.line(&format!("call void @etch_sentence(ptr {out}, ptr {t}, i64 {e1})"));
                     }
                     self.untmp();
+                }
+                // a number (`min`, `max`, `clamp`, `abs`): its digits
+                _ if self.numeric(e) && matches!(f.as_str(), "min" | "max" | "clamp" | "abs") => {
+                    let (v, _) = self.value(roots, e)?;
+                    if !self.bits {
+                        self.line(&format!("call void @etch_int(ptr {out}, i64 {v})"));
+                    }
                 }
                 _ => return Err(format!("`{f}` can't be lowered in a fragment yet")),
             },
@@ -1212,6 +1299,9 @@ fn viewer_loader(m: &Model, md: &mut Module, qid: &mut usize) -> Result<String, 
 
 const DECLS: &str = r#"%Str = type { ptr, i64 }
 %List = type { ptr, i64 }
+declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)
+declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)
+declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)
 declare void @etch_put(ptr, ptr, i64)
 declare void @etch_esc(ptr, ptr, i64)
 declare void @etch_clear(ptr)
@@ -1231,6 +1321,7 @@ declare void @etch_config(ptr, ptr, i64, i64)
 declare i1 @etch_str_eq(ptr, i64, ptr, i64)
 declare ptr @etch_stmt(ptr, i64, ptr, i64)
 declare i64 @etch_col_i64(ptr, i32)
+declare i64 @etch_col_int(ptr, i32)
 declare void @etch_col_str(ptr, i32, ptr, ptr)
 declare void @etch_bind_str(ptr, i32, ptr)
 declare void @etch_bind_i64(ptr, i32, i64)

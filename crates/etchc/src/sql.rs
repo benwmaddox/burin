@@ -259,13 +259,20 @@ impl<'a> Tx<'a> {
                     BinOp::Ge => ">=",
                     BinOp::Add => "+",
                     BinOp::Sub => "-",
+                    // on INTEGERs: truncating, and NULL (none) by 0, as the fragments' code does
+                    BinOp::Mul => "*",
+                    BinOp::Div => "/",
+                    BinOp::Mod => "%",
                     // a list argument is bound as a JSON array of ids
                     BinOp::In => return Ok(format!("({a} IN (SELECT value FROM json_each({b})))")),
                 };
                 format!("({a} {o} {b})")
             }
             Expr::Call(f, args, _) if f == "lower" => format!("lower({})", self.expr(&args[0])?),
-            Expr::Call(f, args, _) if f == "max" => format!("max({}, {})", self.expr(&args[0])?, self.expr(&args[1])?),
+            // SQLite's scalar min and max: NULL when either is
+            Expr::Call(f, args, _) if f == "max" || f == "min" => format!("{f}({}, {})", self.expr(&args[0])?, self.expr(&args[1])?),
+            Expr::Call(f, args, _) if f == "clamp" => format!("max({}, min({}, {}))", self.expr(&args[1])?, self.expr(&args[0])?, self.expr(&args[2])?),
+            Expr::Call(f, args, _) if f == "abs" => format!("abs({})", self.expr(&args[0])?),
             Expr::Call(f, args, _) if f == "exists" && self.semijoin(&args[0])?.is_some() => self.semijoin(&args[0])?.unwrap(),
             Expr::Call(f, args, _) if f == "exists" || f == "count" => {
                 let (from, w) = self.subquery(&args[0])?;
@@ -520,9 +527,10 @@ pub fn cond_select_with(m: &Model, cond: &Expr, params: &[(String, String)]) -> 
 
 /// A set over the rows a filter selects, as one UPDATE: `sets` are (column, value); the columns in
 /// `returning` come back for each changed row (what the delta edges need).
-pub fn update(m: &Model, ent: &str, filter: Option<&Expr>, sets: &[(String, Expr)], returning: &[String]) -> Result<Select, String> {
+/// `params`: the action's rows (its parameters, the viewer), whose fields a value or filter reads by id.
+pub fn update(m: &Model, ent: &str, filter: Option<&Expr>, sets: &[(String, Expr)], returning: &[String], params: &[(String, String)]) -> Result<Select, String> {
     // no joins in an UPDATE: paths through references are correlated subselects (the alias isn't t0)
-    let mut tx = Tx { m, joins: Joins { list: vec![], sql: String::new(), next: 0 }, binds: vec![], params: vec![], rows: vec![("u0".into(), ent.to_string())], sub: 0 };
+    let mut tx = Tx { m, joins: Joins { list: vec![], sql: String::new(), next: 0 }, binds: vec![], params: params.to_vec(), rows: vec![("u0".into(), ent.to_string())], sub: 0 };
     let mut set_sql = vec![];
     for (c, v) in sets {
         // a value may read the row's own fields (`.n + 1`); anything else is bound

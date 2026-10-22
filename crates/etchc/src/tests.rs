@@ -134,3 +134,94 @@ fn a_password_in_a_page_is_refused() {
 fn signing_in_and_out_pass() {
     verdict("entity Login { user: User  password: Password? }\naction sign_in(u: User, p: Text) public {\n  let l = first(Login where .user == u)\n  require l != none and authenticates(l.password, p) else unauthenticated\n  sign in u\n}\naction sign_out() {\n  sign out\n}").unwrap();
 }
+
+// Numbers and time: an Int, a Time (an instant) and a Duration (a length of time), all in i64
+// (times and durations in milliseconds).
+
+const BUILD: &str = "entity Build { level: Int  started: Time  done: Time  took: Duration  bonus: Int? }";
+
+/// The type a function's body has, by the checker: its error, if any.
+fn typed(params: &str, ret: &str, body: &str) -> Result<(), String> {
+    verdict(&format!("{BUILD}\nfn f({params}): {ret} = {body}"))
+}
+
+#[test]
+fn time_and_duration_arithmetic_has_types() {
+    typed("b: Build", "Duration", "b.done - b.started").unwrap();
+    typed("b: Build", "Time", "b.started + b.took").unwrap();
+    typed("b: Build", "Time", "b.took + b.started").unwrap();
+    typed("b: Build", "Time", "b.done - 30s").unwrap();
+    typed("b: Build", "Duration", "b.took * 3 + 2d").unwrap();
+    typed("b: Build", "Duration", "b.took / 2").unwrap();
+    typed("b: Build", "Int", "b.took / 1h").unwrap();
+    typed("b: Build", "Duration", "b.took % 1min").unwrap();
+    typed("b: Build", "Bool", "b.took < 5min and b.done - b.started >= b.took").unwrap();
+    typed("b: Build", "Duration", "max(b.took, 1s)").unwrap();
+    typed("b: Build", "Time", "min(b.started, b.done)").unwrap();
+    typed("b: Build", "Duration", "abs(b.took - 1h)").unwrap();
+    typed("b: Build", "Text", "text(b.took)").unwrap();
+}
+
+#[test]
+fn meaningless_time_arithmetic_is_refused() {
+    let e = typed("b: Build", "Time", "b.started + b.done").unwrap_err();
+    assert!(e.contains("can't add Time and Time"), "{e}");
+    let e = typed("b: Build", "Time", "b.started * 2").unwrap_err();
+    assert!(e.contains("can't multiply Time by Int"), "{e}");
+    let e = typed("b: Build", "Int", "b.level / b.took").unwrap_err();
+    assert!(e.contains("can't divide Int by Duration"), "{e}");
+    let e = typed("b: Build", "Duration", "b.took * b.took").unwrap_err();
+    assert!(e.contains("can't multiply Duration by Duration"), "{e}");
+    let e = typed("b: Build", "Int", "b.level + b.took").unwrap_err();
+    assert!(e.contains("can't add Int and Duration"), "{e}");
+    let e = typed("b: Build", "Time", "max(b.started, b.took)").unwrap_err();
+    assert!(e.contains("all of one kind"), "{e}");
+}
+
+#[test]
+fn int_arithmetic_and_none() {
+    typed("b: Build", "Int", "b.level * 2 + 1 - b.level % 3").unwrap();
+    typed("b: Build", "Int", "clamp(b.level, 0, 40)").unwrap();
+    typed("b: Build", "Text", "grouped(b.level * 1000)").unwrap();
+    typed("b: Build", "Int", "-5 * abs(b.level)").unwrap();
+    // a divisor that may be 0, and a value that may be none, give a value that may be none
+    let m = |body: &str| {
+        let src = format!("{BASE}\n{BUILD}");
+        let decls = parse::parse_file(&src, 0).map_err(|e| e.msg).unwrap();
+        let app = App { files: vec!["t.etch".into()], decls };
+        let m = check::Model::new(&app).map_err(|e| e.msg).unwrap();
+        let e = parse::parse_expr(body).map_err(|e| e.msg).unwrap();
+        let sc = check::Scope::default().with("b", crate::ast::Type::Ref("Build".into()));
+        m.type_of(&e, &sc).map_err(|e| e.msg).unwrap().show()
+    };
+    assert_eq!(m("b.level / 4"), "Int");
+    assert_eq!(m("b.level / b.level"), "Int?");
+    assert_eq!(m("b.level % 0"), "Int?");
+    assert_eq!(m("b.bonus + 1"), "Int?");
+    assert_eq!(m("b.took / 1h"), "Int");
+    assert_eq!(m("max(b.bonus, 0)"), "Int?");
+}
+
+#[test]
+fn multiplication_binds_tighter_than_addition() {
+    let e = parse::parse_expr("1 + 2 * 3 - 4 / 2").map_err(|e| e.msg).unwrap();
+    assert_eq!(crate::llvm::show(&e), "((1 Add (2 Mul 3)) Sub (4 Div 2))");
+    let e = parse::parse_expr("-2d + -30s").map_err(|e| e.msg).unwrap();
+    assert_eq!(crate::llvm::show(&e), "(-172800000ms Add -30000ms)");
+}
+
+#[test]
+fn a_page_adds_numbers_instead_of_joining_them() {
+    // `+` on Ints in a hole is arithmetic (it used to be lowered as text joined)
+    let src = format!("{BUILD}\nview builds() = Build order by .created window 5 last");
+    let frag = r#"fragment p() <<<{{for b in builds()}}<p>{{b.level + 1}} {{text(b.done - b.started)}} {{grouped(b.level * 1000)}}</p>{{end}}>>>"#;
+    let decls = parse::parse_file(&format!("{BASE}\n{src}\n{frag}"), 0).map_err(|e| e.msg).unwrap();
+    let app = App { files: vec!["t.etch".into()], decls };
+    let m = check::Model::new(&app).map_err(|e| e.msg).unwrap();
+    check::check(&m).map_err(|e| e.msg).unwrap();
+    let (ll, _) = crate::llvm::module(&m, &["p"], "", "").unwrap();
+    assert!(ll.contains("@llvm.sadd.with.overflow.i64(i64"), "no addition");
+    assert!(ll.contains("@llvm.ssub.with.overflow.i64(i64"), "no subtraction");
+    assert!(ll.contains("call void @etch_time(ptr") && ll.contains("i64 3, i64"), "no duration text");
+    assert!(ll.contains("i64 4, i64"), "no grouped number");
+}

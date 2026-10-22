@@ -30,7 +30,7 @@ pub struct Error {
 
 type R<T> = Result<T, Error>;
 
-const PUNCTS: [&str; 22] = ["==", "!=", "<=", ">=", "->", "{", "}", "(", ")", "[", "]", ",", ":", ".", "=", "<", ">", "+", "-", "?", "*", "/"];
+const PUNCTS: [&str; 23] = ["==", "!=", "<=", ">=", "->", "{", "}", "(", ")", "[", "]", ",", ":", ".", "=", "<", ">", "+", "-", "?", "*", "/", "%"];
 
 impl<'a> Lexer<'a> {
     fn err<T>(&self, msg: impl Into<String>) -> R<T> {
@@ -126,7 +126,7 @@ impl<'a> Lexer<'a> {
                 let n: i64 = std::str::from_utf8(&self.s[start..self.i]).unwrap().parse().unwrap();
                 // a unit makes it a duration
                 let rest = &self.s[self.i..];
-                let unit = [("ms", 1), ("min", 60_000), ("s", 1000), ("h", 3_600_000)].iter().find(|(u, _)| {
+                let unit = [("ms", 1), ("min", 60_000), ("s", 1000), ("h", 3_600_000), ("d", 86_400_000)].iter().find(|(u, _)| {
                     rest.starts_with(u.as_bytes()) && !rest.get(u.len()).map(|c| c.is_ascii_alphanumeric() || *c == b'_').unwrap_or(false)
                 });
                 if let Some((u, k)) = unit {
@@ -619,13 +619,31 @@ impl Parser {
         Ok(Expr::Bin(op, Box::new(l), Box::new(r), s))
     }
     fn additive(&mut self) -> R<Expr> {
-        let mut l = self.postfix()?;
+        let mut l = self.multiplicative()?;
         loop {
             let s = self.span();
             let op = if self.is("+") {
                 BinOp::Add
             } else if self.is("-") {
                 BinOp::Sub
+            } else {
+                return Ok(l);
+            };
+            self.next();
+            let r = self.multiplicative()?;
+            l = Expr::Bin(op, Box::new(l), Box::new(r), s);
+        }
+    }
+    fn multiplicative(&mut self) -> R<Expr> {
+        let mut l = self.postfix()?;
+        loop {
+            let s = self.span();
+            let op = if self.is("*") {
+                BinOp::Mul
+            } else if self.is("/") {
+                BinOp::Div
+            } else if self.is("%") {
+                BinOp::Mod
             } else {
                 return Ok(l);
             };
@@ -650,6 +668,15 @@ impl Parser {
             Tok::Str(v) => Ok(Expr::Str(v, s)),
             Tok::Int(n) => Ok(Expr::Int(n, s)),
             Tok::Dur(n) => Ok(Expr::Dur(n, s)),
+            // a negative number or duration (`-5`, `-30s`); any other value negated is `0 - x`
+            Tok::Punct("-") => match self.next() {
+                Tok::Int(n) => Ok(Expr::Int(-n, s)),
+                Tok::Dur(n) => Ok(Expr::Dur(-n, s)),
+                _ => {
+                    self.i -= 1;
+                    self.err("`-` before a value takes a number or a duration; write `0 - x` for anything else")
+                }
+            },
             Tok::Punct("(") => {
                 let e = self.expr()?;
                 self.expect(")")?;
@@ -882,6 +909,17 @@ pub fn parse_file(src: &str, file: u32) -> R<Vec<Decl>> {
     }
     let _ = p.file;
     Ok(out)
+}
+
+/// Parses one expression (the tests').
+#[cfg(test)]
+pub fn parse_expr(src: &str) -> R<Expr> {
+    let mut p = parse_code(src, Span::default())?;
+    let e = p.expr()?;
+    if p.peek() != &Tok::Eof {
+        return p.err("more after the expression");
+    }
+    Ok(e)
 }
 
 /// Parses every .etch file in an app's directory, in name order.

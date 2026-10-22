@@ -293,6 +293,8 @@ struct Act<'a, 'b> {
     /// or for one read path (its start table, its path)
     touched: Vec<(char, usize, Option<(String, String)>)>,
     hashes: Vec<(usize, String)>,
+    /// the action's parameters, for the types of values it computes
+    scope: Scope,
 }
 
 impl<'a, 'b> Act<'a, 'b> {
@@ -363,6 +365,10 @@ impl<'a, 'b> Act<'a, 'b> {
                 let n = self.unhash(e)?;
                 self.value(&n)
             }
+            // arithmetic (`now + 5min`, `p.level * 2`): computed by SQLite, as `require` and `set`
+            // are, so an action follows one set of rules for numbers
+            Expr::Bin(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod, ..) => self.computed(e),
+            Expr::Call(f, _, _) if matches!(f.as_str(), "min" | "max" | "clamp" | "abs") => self.computed(e),
             Expr::Call(f, a, _) if f == "token" => {
                 let n = match a.first() {
                     Some(Expr::Int(n, _)) => *n,
@@ -374,6 +380,26 @@ impl<'a, 'b> Act<'a, 'b> {
             }
             _ => Err(format!("an action can't compute `{}` yet", show(e))),
         }
+    }
+
+    /// A number, time or duration computed in one `SELECT` (none: NULL, read back as i64::MIN).
+    fn computed(&mut self, e: &Expr) -> Result<(String, Shape), String> {
+        let mut sc = self.scope.clone();
+        for (k, (_, _, t)) in &self.lets {
+            sc = sc.with(k, t.clone());
+        }
+        // text joined with `+` would be SQLite's numeric `+`
+        if matches!(self.m.type_of(e, &sc).map(|t| t.strip_opt().clone()), Ok(Type::Text)) {
+            return Err(format!("an action can't join text (`{}`) yet", show(e)));
+        }
+        let x = inline::expr(self.m, e, &inline::Env::new(), 0, 0);
+        let sel = sql::cond_select_with(self.m, &x, &self.rows)?;
+        let st = self.stmt(&sel)?;
+        let v = self.v();
+        self.line(&format!("call i32 @sqlite3_step(ptr {st})"));
+        self.line(&format!("{v} = call i64 @etch_col_int(ptr {st}, i32 0)"));
+        self.line(&format!("call i32 @sqlite3_reset(ptr {st})"));
+        Ok((v, Shape::I64))
     }
 
     /// `hash(arg)` as its hidden argument (the runtime hashes the text off the writer).
@@ -863,7 +889,8 @@ impl<'a, 'b> Act<'a, 'b> {
                         if shape == Shape::I64 {
                             self.line(&format!("call i32 @sqlite3_bind_int64(ptr {st}, i32 {}, i64 {v})", i + 5));
                             vals.insert(f.clone(), v.clone());
-                            fixed.push((f.clone(), e.clone()));
+                            // a computed value (`now + 5min`), forwarded as the value bound
+                            fixed.push((f.clone(), if matches!(e, Expr::Bin(..) | Expr::Call(..)) { Expr::Name(format!("@i64{v}"), Span::default()) } else { e.clone() }));
                         } else {
                             self.line(&format!("call void @etch_bind_str(ptr {st}, i32 {}, ptr {v})", i + 5));
                             // the made value, by its pointer, for the forwarded record
@@ -907,7 +934,8 @@ impl<'a, 'b> Act<'a, 'b> {
                     let (p, v) = (format!("%let_{n}_{}", self.n), self.v());
                     self.line(&format!("{p} = alloca i64"));
                     self.line(&format!("call i32 @sqlite3_step(ptr {st})"));
-                    self.line(&format!("{v} = call i64 @etch_col_i64(ptr {st}, i32 0)"));
+                    // a computed number that overflowed (a REAL) is none, as in a page
+                    self.line(&format!("{v} = call i64 @etch_col_int(ptr {st}, i32 0)"));
                     self.line(&format!("call i32 @sqlite3_reset(ptr {st})"));
                     self.line(&format!("store i64 {v}, ptr {p}"));
                     if let Type::Ref(ent) = t.strip_opt() {
@@ -1034,7 +1062,9 @@ impl<'a, 'b> Act<'a, 'b> {
                     // the changed rows' columns the delta edges key by: lists' and screens' keys
                     let mut ret: Vec<String> = vec!["id".into()];
                     // a value computed from the row comes back with RETURNING: forwarded as it is
-                    let computed: Vec<String> = sets.iter().filter(|(_, v)| reads_row(v)).map(|(c, _)| c.clone()).collect();
+                    // (arithmetic too: after the UPDATE, `p.n - 1` would read the new p.n)
+                    let arith = |v: &Expr| matches!(v, Expr::Bin(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod, ..)) || matches!(v, Expr::Call(f, _, _) if matches!(f.as_str(), "min" | "max" | "clamp" | "abs"));
+                    let computed: Vec<String> = sets.iter().filter(|(_, v)| reads_row(v) || arith(v)).map(|(c, _)| c.clone()).collect();
                     for c in &computed {
                         match self.m.field_type(&ent, c).map(|t| t.strip_opt().clone()) {
                             Some(Type::Text) | Some(Type::Password) => return Err(format!("`{c}`: a text computed from its row isn't lowered yet")),
@@ -1054,7 +1084,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let sel = if delete {
                         sql::delete(self.m, &ent, filter.as_ref().ok_or("delete needs a filter")?, &ret)?
                     } else {
-                        sql::update(self.m, &ent, filter.as_ref(), &sets, &ret)?
+                        sql::update(self.m, &ent, filter.as_ref(), &sets, &ret, &self.rows)?
                     };
                     let st = self.stmt(&sel)?;
                     let (h, body, done) = (format!("uh{}", self.n), format!("ub{}", self.n), format!("ud{}", self.n));
@@ -1253,7 +1283,7 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
                 Some(Decl::Viewer { entity, .. }) => Some(("viewer".to_string(), entity.clone())),
                 _ => None,
             }).collect();
-            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![], audiences: auds.clone(), lets: HashMap::new(), verifies: vec![], allocas: String::new(), touched: vec![], hashes: vec![] };
+            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![], audiences: auds.clone(), lets: HashMap::new(), verifies: vec![], allocas: String::new(), touched: vec![], hashes: vec![], scope: Scope::of(params) };
             a.stmts(body, &Scope::of(params), &regs, &lists, screens)?;
             let mut f = String::new();
             let parts: Vec<&str> = args.iter().map(|(_, s)| if *s == Shape::Str { "%Str" } else { "i64" }).collect();

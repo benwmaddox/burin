@@ -1,0 +1,107 @@
+// Numbers and time end to end: a tiny build queue, as a browser strategy game would have. Every
+// value the page computes in its fragment is also computed by an action in SQL (`snapshot`) and
+// shown beside it; scripts/numbers-check.sh checks that the two always agree, including none (a
+// divisor of 0, an overflow, a none input).
+
+entity User {
+  name: Text max 60
+}
+
+entity Session {
+  user: User
+  token: Text max 64
+}
+
+entity Planet {
+  owner: User
+  name: Text max 40
+  metal: Int
+  rate: Int
+  level: Int
+  bonus: Int?
+  started: Time
+  took: Duration
+}
+
+// One planet's values, as SQL computed them.
+entity Calc {
+  planet: Planet
+  prod: Int?
+  per: Int?
+  rem: Int?
+  neg: Int?
+  bonus1: Int?
+  lo: Int?
+  hi: Int?
+  cl: Int?
+  ab: Int?
+  mix: Int?
+  ends: Time?
+  half: Duration?
+  mins: Int?
+  left: Duration?
+  back: Time?
+  longest: Duration?
+}
+
+entity Build {
+  planet: Planet
+  level: Int
+  done: Time
+}
+
+viewer User from cookie sid = Session.token -> .user
+
+view calcs(p: Planet) = Calc where .planet == p order by .created desc, .seq desc limit 1
+view builds(p: Planet) = Build where .planet == p order by .created desc, .seq desc limit 5
+
+screen planet(p: Planet) at "/planets/{p}"
+  require exists(Planet where .owner == viewer and it == p) else go "/"
+<<<{{top(p)}}{{for c in calcs(p)}}{{sql(c)}}{{end}}{{for b in builds(p)}}{{build(b)}}{{end}}{{bottom()}}>>>
+
+// the values, computed by the fragment's own code
+fragment top(p: Planet) <<<\
+<!doctype html><html><head><meta charset="utf-8"><title>{{p.name}}</title></head><body>
+<ul id="page"><li data-k="prod">{{p.metal * p.rate}}</li><li data-k="per">{{p.metal / p.level}}</li>\
+<li data-k="rem">{{p.metal % p.level}}</li><li data-k="neg">{{0 - p.metal}}</li><li data-k="bonus1">{{p.bonus + 1}}</li>\
+<li data-k="lo">{{min(p.metal, p.rate)}}</li><li data-k="hi">{{max(p.metal, p.rate)}}</li>\
+<li data-k="cl">{{clamp(p.metal, 0, 1000)}}</li><li data-k="ab">{{abs(0 - p.metal)}}</li>\
+<li data-k="mix">{{text(p.metal * 2 + p.rate - p.metal / 3 % 7)}}</li><li data-k="ends">{{iso(p.started + p.took)}}</li>\
+<li data-k="half">{{text(p.took / 2)}}</li><li data-k="mins">{{p.took / 1min}}</li><li data-k="left">{{text(p.took % 1h)}}</li>\
+<li data-k="back">{{iso(p.started - 2d + 90s)}}</li><li data-k="longest">{{text(max(p.took, 1h) * 3)}}</li></ul>
+<p id="metal" title="{{grouped(p.metal)}}">{{if p.metal >= p.level * 100}}can build{{else}}can't build{{end}}</p>
+<p id="next">{{text(p.took * (p.level + 1))}}</p>
+>>>
+
+// the same values, as the action computed them in SQL
+fragment sql(c: Calc) <<<\
+<ul id="sql"><li data-k="prod">{{c.prod}}</li><li data-k="per">{{c.per}}</li>\
+<li data-k="rem">{{c.rem}}</li><li data-k="neg">{{c.neg}}</li><li data-k="bonus1">{{c.bonus1}}</li>\
+<li data-k="lo">{{c.lo}}</li><li data-k="hi">{{c.hi}}</li>\
+<li data-k="cl">{{c.cl}}</li><li data-k="ab">{{c.ab}}</li>\
+<li data-k="mix">{{c.mix}}</li><li data-k="ends">{{iso(c.ends)}}</li>\
+<li data-k="half">{{text(c.half)}}</li><li data-k="mins">{{c.mins}}</li><li data-k="left">{{text(c.left)}}</li>\
+<li data-k="back">{{iso(c.back)}}</li><li data-k="longest">{{text(c.longest)}}</li></ul>
+>>>
+
+// a build: how long it takes, from when it was queued
+fragment build(b: Build) <<<<p class="build" data-level="{{b.level}}">{{text(b.done - b.created)}}</p>
+>>>
+
+fragment bottom() <<<</body></html>
+>>>
+
+// Every value of the page's top, computed in SQL.
+action snapshot(p: Planet) {
+  require p.owner == viewer else not_found
+  create Calc { planet: p, prod: p.metal * p.rate, per: p.metal / p.level, rem: p.metal % p.level, neg: 0 - p.metal, bonus1: p.bonus + 1, lo: min(p.metal, p.rate), hi: max(p.metal, p.rate), cl: clamp(p.metal, 0, 1000), ab: abs(0 - p.metal), mix: p.metal * 2 + p.rate - p.metal / 3 % 7, ends: p.started + p.took, half: p.took / 2, mins: p.took / 1min, left: p.took % 1h, back: p.started - 2d + 90s, longest: max(p.took, 1h) * 3 }
+}
+
+// Queues the next level: it costs 100 metal a level and takes `took` a level.
+action build(p: Planet) {
+  require p.owner == viewer else not_found
+  require p.metal >= p.level * 100 else invalid
+  create Build { planet: p, level: p.level + 1, done: now + p.took * (p.level + 1) }
+  set p.metal = p.metal - p.level * 100
+  set p.level = p.level + 1
+}

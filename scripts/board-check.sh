@@ -54,7 +54,7 @@ posts = re.findall(r'<li class="post" id="post-(\d+)" data-author-id="(\d+)"><b>
 me = re.search(r'<aside id="me" data-user-id="(\d+)"', b).group(1)
 print('posts shown to bob:', len(posts), '| first:', (posts[0][0],) + posts[0][2:], '| last:', (posts[-1][0],) + posts[-1][2:])
 # "mine" is marked by the page's script, from the post's author and the viewer's id
-print('bob's own posts the script marks mine:', sum(1 for p in posts if p[1] == me), 'of', sum(1 for p in posts if p[2] == 'Bob'))
+print("bob's own posts the script marks mine:", sum(1 for p in posts if p[1] == me), 'of', sum(1 for p in posts if p[2] == 'Bob'))
 print('newest first:', [int(p[0]) for p in posts] == sorted([int(p[0]) for p in posts], reverse=True))
 print("bob's panel:", re.search(r'Signed in as <b>([^<]*)</b>', b).group(1), '|', len(re.findall(r'<ul class="mine">(.*?)</ul>', b)[0].split('<li>')) - 1, 'of his posts')
 print("ada's panel:", re.search(r'Signed in as <b>([^<]*)</b>', a).group(1))

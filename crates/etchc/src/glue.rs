@@ -486,7 +486,7 @@ pub fn schema_and_columns(m: &Model) -> (String, Vec<String>) {
             // a number or flag starts at 0 (false) when a row is made without it, or a column added
             let null = match f.ty {
                 Type::Opt(_) => "",
-                Type::Int | Type::Bool => " NOT NULL DEFAULT 0",
+                Type::Int | Type::Bool | Type::Duration => " NOT NULL DEFAULT 0",
                 _ => " NOT NULL",
             };
             let check = match (f.max, f.ty.strip_opt()) {

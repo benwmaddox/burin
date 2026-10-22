@@ -134,6 +134,23 @@ impl Scope {
     }
 }
 
+/// What arithmetic on two values gives (their optionality aside), or None when it means nothing.
+/// A Time is an instant and a Duration a length of time, both in milliseconds: instants subtract
+/// to a length and take one added, but don't add to each other or scale.
+pub fn arith_type(op: &BinOp, a: &Type, b: &Type) -> Option<Type> {
+    use Type::{Duration as D, Int as I, Time as T};
+    Some(match (op, a, b) {
+        (_, I, I) => I,
+        (BinOp::Add, T, D) | (BinOp::Add, D, T) | (BinOp::Sub, T, D) => T,
+        (BinOp::Sub, T, T) => D,
+        (BinOp::Add | BinOp::Sub | BinOp::Mod, D, D) => D,
+        (BinOp::Mul, D, I) | (BinOp::Mul, I, D) | (BinOp::Div, D, I) => D,
+        // how many of one length fit in another: `elapsed / 1h`
+        (BinOp::Div, D, D) => I,
+        _ => return None,
+    })
+}
+
 fn compatible(want: &Type, got: &Type) -> bool {
     match (want, got) {
         (a, b) if a == b => true,
@@ -260,23 +277,31 @@ impl<'a> Model<'a> {
                         Type::Bool
                     }
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                        let ok = matches!((a.strip_opt(), b.strip_opt()), (Type::Int, Type::Int) | (Type::Time, Type::Time) | (Type::Text, Type::Text));
+                        let ok = matches!((a.strip_opt(), b.strip_opt()), (Type::Int, Type::Int) | (Type::Time, Type::Time) | (Type::Duration, Type::Duration) | (Type::Text, Type::Text));
                         if !ok {
                             return err(*s, format!("can't order {} and {}", a.show(), b.show()));
                         }
                         Type::Bool
                     }
-                    BinOp::Add => match (a.strip_opt(), b.strip_opt()) {
-                        (Type::Text, Type::Text) => Type::Text,
-                        (Type::Int, Type::Int) => Type::Int,
-                        (Type::Time, Type::Duration) => Type::Time,
-                        _ => return err(*s, format!("can't add {} and {}", a.show(), b.show())),
-                    },
-                    BinOp::Sub => match (a.strip_opt(), b.strip_opt()) {
-                        (Type::Int, Type::Int) => Type::Int,
-                        (Type::Time, Type::Duration) => Type::Time,
-                        _ => return err(*s, format!("can't subtract {} from {}", b.show(), a.show())),
-                    },
+                    BinOp::Add if matches!((a.strip_opt(), b.strip_opt()), (Type::Text, Type::Text)) => Type::Text,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                        let t = arith_type(op, a.strip_opt(), b.strip_opt()).ok_or_else(|| Error {
+                            span: *s,
+                            msg: match op {
+                                BinOp::Add => format!("can't add {} and {}", a.show(), b.show()),
+                                BinOp::Sub => format!("can't subtract {} from {}", b.show(), a.show()),
+                                BinOp::Mul => format!("can't multiply {} by {}", a.show(), b.show()),
+                                _ => format!("can't divide {} by {}", a.show(), b.show()),
+                            },
+                        })?;
+                        // none in, none out; and a divisor that may be 0 may give none
+                        let divisor_may_be_0 = matches!(op, BinOp::Div | BinOp::Mod) && !matches!(**r, Expr::Int(n, _) | Expr::Dur(n, _) if n != 0);
+                        if matches!(a, Type::Opt(_)) || matches!(b, Type::Opt(_)) || divisor_may_be_0 {
+                            Type::Opt(Box::new(t))
+                        } else {
+                            t
+                        }
+                    }
                 }
             }
             Expr::If(c, a, b, s) => {
@@ -350,9 +375,13 @@ impl<'a> Model<'a> {
                 arg(0, Type::Text)?;
                 Ok(Type::Text)
             }
+            // an Int's digits, or a Duration in its two largest units ("2h 5m", "45s")
             "text" => {
                 arity(1)?;
-                arg(0, Type::Int)?;
+                let t = self.type_of(&args[0], scope)?;
+                if !matches!(t.strip_opt(), Type::Int | Type::Duration) {
+                    return err(s, format!("`text` takes an Int or a Duration here, not {}", t.show()));
+                }
                 Ok(Type::Text)
             }
             "iso" | "date" | "clock" => {
@@ -403,11 +432,30 @@ impl<'a> Model<'a> {
                 arg(0, Type::Text)?;
                 Ok(Type::Password)
             }
-            "max" => {
-                arity(2)?;
+            // the smaller or larger of numbers, times or durations of one kind; `clamp(x, lo, hi)`
+            // is `max(lo, min(x, hi))`
+            "min" | "max" | "clamp" => {
+                arity(if f == "clamp" { 3 } else { 2 })?;
+                let ts = args.iter().map(|a| self.type_of(a, scope)).collect::<R<Vec<_>>>()?;
+                let t = ts[0].strip_opt().clone();
+                if !matches!(t, Type::Int | Type::Time | Type::Duration) || ts.iter().any(|x| *x.strip_opt() != t) {
+                    return err(s, format!("`{f}` takes Ints, Times or Durations, all of one kind, not {}", ts.iter().map(Type::show).collect::<Vec<_>>().join(", ")));
+                }
+                Ok(if ts.iter().any(|x| matches!(x, Type::Opt(_))) { Type::Opt(Box::new(t)) } else { t })
+            }
+            "abs" => {
+                arity(1)?;
+                let t = self.type_of(&args[0], scope)?;
+                if !matches!(t.strip_opt(), Type::Int | Type::Duration) {
+                    return err(s, format!("`abs` takes an Int or a Duration, not {}", t.show()));
+                }
+                Ok(t)
+            }
+            // an Int with its thousands grouped: 1,234,567
+            "grouped" => {
+                arity(1)?;
                 arg(0, Type::Int)?;
-                arg(1, Type::Int)?;
-                Ok(Type::Int)
+                Ok(Type::Text)
             }
             "token" => {
                 arity(1)?;

@@ -336,6 +336,9 @@ fn show_expr(e: &Expr) -> String {
                 BinOp::Ge => ">=",
                 BinOp::Add => "+",
                 BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
                 BinOp::In => "in",
             };
             format!("{} {o} {}", show_expr(l), show_expr(r))

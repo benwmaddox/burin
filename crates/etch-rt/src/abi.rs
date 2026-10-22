@@ -198,7 +198,8 @@ pub unsafe extern "C" fn etch_replace(out: *mut Vec<u8>, t: *mut Vec<u8>, f: *co
     put(buf(out), &text(t).replace(from, to), esc);
 }
 
-/// kind 0: ISO UTC; 1: the date; 2: the clock (in the server's time zone). # Safety: a live Vec.
+/// A time or number as text. kind 0: ISO UTC; 1: the date; 2: the clock (in the server's time
+/// zone); 3: a duration ("2h 5m"); 4: an Int grouped by thousands ("1,234"). # Safety: a live Vec.
 #[no_mangle]
 pub unsafe extern "C" fn etch_time(out: *mut Vec<u8>, kind: i64, ms: i64, esc: i64) {
     if ms == i64::MIN {
@@ -207,7 +208,9 @@ pub unsafe extern "C" fn etch_time(out: *mut Vec<u8>, kind: i64, ms: i64, esc: i
     let s = match kind {
         0 => time::iso_utc(ms),
         1 => time::date(ms),
-        _ => time::clock(ms),
+        2 => time::clock(ms),
+        3 => time::span(ms),
+        _ => time::grouped(ms),
     };
     put(buf(out), &s, esc);
 }
@@ -328,6 +331,17 @@ pub unsafe extern "C" fn etch_stmt(db: *mut Db, qid: i64, sql: *const u8, len: i
         db.stmts[k] = st;
     }
     db.stmts[k]
+}
+
+/// A number an action computed in SQL: none unless it is an INTEGER (SQLite turns an overflow
+/// into a REAL; a fragment's code gives none for it). # Safety: a live statement on a row.
+#[no_mangle]
+pub unsafe extern "C" fn etch_col_int(st: *mut ffi::sqlite3_stmt, i: i32) -> i64 {
+    if ffi::sqlite3_column_type(st, i) == ffi::SQLITE_INTEGER {
+        ffi::sqlite3_column_int64(st, i)
+    } else {
+        i64::MIN
+    }
 }
 
 /// # Safety: a live statement on a row.
