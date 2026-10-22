@@ -269,6 +269,7 @@ dependencies = [
  "httparse",
  "httpdate",
  "jiff",
+ "libc",
  "mio",
  "p256",
  "rusqlite",

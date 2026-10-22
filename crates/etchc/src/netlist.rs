@@ -336,6 +336,7 @@ fn show_expr(e: &Expr) -> String {
                 BinOp::Ge => ">=",
                 BinOp::Add => "+",
                 BinOp::Sub => "-",
+                BinOp::In => "in",
             };
             format!("{} {o} {}", show_expr(l), show_expr(r))
         }
@@ -667,7 +668,12 @@ fn deltas(m: &Model, registers: &[Register]) -> Vec<Delta> {
 fn collect_writes(m: &Model, body: &[Stmt], scope: &Scope, out: &mut Vec<(String, Vec<String>)>) {
     for s in body {
         match s {
-            Stmt::Create(e, _, _) => out.push((e.clone(), vec!["*".into()])),
+            Stmt::Create(e, _, _, _) => out.push((e.clone(), vec!["*".into()])),
+            Stmt::If(_, a, b, _) => {
+                collect_writes(m, a, scope, out);
+                collect_writes(m, b, scope, out);
+            }
+            Stmt::Go(..) => {}
             Stmt::Touch(e, _) => {
                 if let Ok(Type::Ref(t)) = m.type_of(e, scope) {
                     out.push((t, vec!["updated".into()]));

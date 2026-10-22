@@ -241,6 +241,16 @@ impl<'a> Model<'a> {
                         }
                         Type::Bool
                     }
+                    BinOp::In => {
+                        let ok = match b.strip_opt() {
+                            Type::List(t) => a.strip_opt() == t.strip_opt(),
+                            _ => false,
+                        };
+                        if !ok {
+                            return err(*s, format!("`in` takes a row and a list of its kind, not {} and {}", a.show(), b.show()));
+                        }
+                        Type::Bool
+                    }
                     BinOp::Eq | BinOp::Ne => {
                         // a row with an id from outside (a cookie's): by the row's id
                         let id_of_row = |x: &Type, y: &Type| matches!(x.strip_opt(), Type::Ref(_)) && matches!(y.strip_opt(), Type::Int) && matches!(&**r, Expr::Call(f, _, _) if f == "cookie");
@@ -746,7 +756,10 @@ fn check_stmts(m: &Model, body: &[Stmt], scope: &Scope, cleared: &mut Vec<(Strin
                     return err(r.cond.span(), "require takes a Bool");
                 }
             }
-            Stmt::Create(e, fs, span) => {
+            Stmt::Create(e, fs, name, span) => {
+                if let Some(n) = name {
+                    *scope = scope.with(n, Type::Ref(e.clone()));
+                }
                 if !m.entities.contains_key(e) {
                     return err(*span, format!("no entity `{e}`"));
                 }
@@ -812,6 +825,23 @@ fn check_stmts(m: &Model, body: &[Stmt], scope: &Scope, cleared: &mut Vec<(Strin
                     return err(*span, format!("sign in makes a {via_entity} from its {to_field} and {via_field} alone; {via_entity}.{} needs a value", f.name));
                 }
             }
+            Stmt::If(c, a, b, span) => {
+                if m.type_of(c, scope)? != Type::Bool {
+                    return err(*span, "if takes a Bool");
+                }
+                check_stmts(m, a, scope, cleared)?;
+                check_stmts(m, b, scope, cleared)?;
+            }
+            Stmt::Go(screen, arg, span) => {
+                let want = m.screens.iter().find_map(|d| match d {
+                    Decl::Screen { name, params, .. } if name == screen && params.len() == 1 => Some(params[0].ty.clone()),
+                    _ => None,
+                });
+                let Some(want) = want else { return err(*span, format!("go names a screen with one row parameter, not `{screen}`")) };
+                if m.type_of(arg, scope)?.strip_opt() != want.strip_opt() {
+                    return err(*span, format!("{screen} takes {}", want.show()));
+                }
+            }
             Stmt::SignOut(span) => {
                 if m.viewer.is_none() {
                     return err(*span, "sign out needs a viewer declaration");
@@ -873,7 +903,9 @@ fn expr_mentions_viewer(e: &Expr) -> bool {
 fn stmt_mentions_viewer(s: &Stmt) -> bool {
     match s {
         Stmt::Require(r) => expr_mentions_viewer(&r.cond),
-        Stmt::Create(_, fs, _) => fs.iter().any(|(_, v)| expr_mentions_viewer(v)),
+        Stmt::Create(_, fs, _, _) => fs.iter().any(|(_, v)| expr_mentions_viewer(v)),
+        Stmt::If(c, a, b, _) => expr_mentions_viewer(c) || a.iter().any(stmt_mentions_viewer) || b.iter().any(stmt_mentions_viewer),
+        Stmt::Go(_, e, _) => expr_mentions_viewer(e),
         Stmt::Touch(e, _) | Stmt::Delete(e, _) | Stmt::Let(_, e, _) | Stmt::SignIn(e, _) => expr_mentions_viewer(e),
         Stmt::Set(o, _, v, _) => expr_mentions_viewer(o) || expr_mentions_viewer(v),
         Stmt::ForEach(_, q, inner, _) => expr_mentions_viewer(&Expr::Query(Box::new(q.clone()))) || inner.iter().any(stmt_mentions_viewer),

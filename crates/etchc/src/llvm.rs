@@ -1199,6 +1199,7 @@ declare ptr @etch_stmt(ptr, i64, ptr, i64)
 declare i64 @etch_col_i64(ptr, i32)
 declare void @etch_col_str(ptr, i32, ptr, ptr)
 declare void @etch_bind_str(ptr, i32, ptr)
+declare void @etch_bind_i64(ptr, i32, i64)
 declare ptr @etch_alloc(ptr, i64)
 declare i32 @sqlite3_bind_int64(ptr, i32, i64)
 declare i32 @sqlite3_step(ptr)
@@ -1218,6 +1219,8 @@ declare void @etch_delta_find(ptr, i64, i64, i64, i64)
 declare i64 @etch_str_chars(ptr)
 declare void @etch_w_sign_in(ptr, ptr)
 declare void @etch_w_sign_out(ptr)
+declare %List @etch_w_ids(ptr, ptr)
+declare void @etch_w_go(ptr, ptr, i64, i64, ptr, i64)
 "#;
 
 /// The module for these registers, and a Rust header with the same records.

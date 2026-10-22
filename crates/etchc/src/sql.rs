@@ -198,6 +198,8 @@ impl<'a> Tx<'a> {
                     BinOp::Ge => ">=",
                     BinOp::Add => "+",
                     BinOp::Sub => "-",
+                    // a list argument is bound as a JSON array of ids
+                    BinOp::In => return Ok(format!("({a} IN (SELECT value FROM json_each({b})))")),
                 };
                 format!("({a} {o} {b})")
             }
@@ -364,6 +366,17 @@ pub fn update(m: &Model, ent: &str, filter: Option<&Expr>, sets: &[(String, Expr
     };
     let ret = if returning.is_empty() { String::new() } else { format!(" RETURNING {}", returning.iter().map(|c| if c == "id" { "id".to_string() } else { q(c) }).collect::<Vec<_>>().join(", ")) };
     Ok(Select { sql: format!("UPDATE {} AS u0 SET {}{w}{ret}", q(ent), set_sql.join(", ")), binds: tx.binds })
+}
+
+/// `SELECT u0.id FROM E AS u0 WHERE …`: the rows a for each runs over (`rows`: parameters and
+/// names that are rows, their fields read by id).
+pub fn ids(m: &Model, ent: &str, filter: Option<&Expr>, rows: &[(String, String)]) -> Result<Select, String> {
+    let mut tx = Tx { m, joins: Joins { list: vec![], sql: String::new(), next: 0 }, binds: vec![], params: rows.to_vec(), rows: vec![("u0".into(), ent.to_string())], sub: 0 };
+    let w = match filter {
+        Some(f) => format!(" WHERE {}", tx.expr(f)?),
+        None => String::new(),
+    };
+    Ok(Select { sql: format!("SELECT u0.id FROM {} AS u0{w} ORDER BY u0.id", q(ent)), binds: tx.binds })
 }
 
 /// `DELETE FROM E AS u0 WHERE … RETURNING …`: the deleted rows' columns the delta edges need.

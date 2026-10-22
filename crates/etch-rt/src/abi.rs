@@ -179,11 +179,45 @@ pub unsafe extern "C" fn etch_str_eq(a: *const u8, an: i64, b: *const u8, bn: i6
     !a.is_null() && bytes(a, an) == bytes(b, bn)
 }
 
+/// An integer parameter; none (i64::MIN) as NULL. # Safety: a live statement.
+#[no_mangle]
+pub unsafe extern "C" fn etch_bind_i64(st: *mut ffi::sqlite3_stmt, i: i32, v: i64) {
+    if v == i64::MIN {
+        ffi::sqlite3_bind_null(st, i);
+    } else {
+        ffi::sqlite3_bind_int64(st, i, v);
+    }
+}
+
 /// `sign in`: the new session's token, for the reply's cookie. # Safety: live writer and text.
 #[no_mangle]
 pub unsafe extern "C" fn etch_w_sign_in(w: *mut Writer, token: *const Str) {
     let t = &*token;
     (*w).signed_in = Some(bytes(t.ptr, t.len).to_vec());
+}
+
+/// A for each's rows: every id the statement returns (its first column), in the writer's arena,
+/// read before the body runs (the body may write the table read). # Safety: live writer, statement.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_ids(w: *mut Writer, st: *mut ffi::sqlite3_stmt) -> List {
+    let mut ids: Vec<i64> = vec![];
+    while ffi::sqlite3_step(st) == ffi::SQLITE_ROW {
+        ids.push(ffi::sqlite3_column_int64(st, 0));
+    }
+    ffi::sqlite3_reset(st);
+    let p = (*w).arena.take(ids.len() * 8) as *mut i64;
+    std::ptr::copy_nonoverlapping(ids.as_ptr(), p, ids.len());
+    List { ptr: p as *const u8, len: ids.len() as i64 }
+}
+
+/// `go screen(row)`: where the action goes (the route around the row's id). # Safety: live
+/// writer and byte ranges.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_go(w: *mut Writer, pre: *const u8, pre_n: i64, id: i64, post: *const u8, post_n: i64) {
+    let mut s = String::from_utf8_lossy(bytes(pre, pre_n)).into_owned();
+    s.push_str(&id.to_string());
+    s.push_str(&String::from_utf8_lossy(bytes(post, post_n)));
+    (*w).go = Some(s);
 }
 
 /// `sign out`: the reply clears the session's cookie. # Safety: a live writer.
@@ -363,11 +397,13 @@ pub struct Writer {
     pub signed_in: Option<Vec<u8>>,
     /// the action signed the request's session out (its cookie cleared)
     pub signed_out: bool,
+    /// where the action goes (`go`)
+    pub go: Option<String>,
 }
 
 impl Writer {
     pub fn new(seq: i64) -> Writer {
-        Writer { now: 0, seq, next_ids: HashMap::new(), arena: Arena::default(), signed_in: None, signed_out: false }
+        Writer { now: 0, seq, next_ids: HashMap::new(), arena: Arena::default(), signed_in: None, signed_out: false, go: None }
     }
     /// A new batch: its time; the arena emptied.
     pub fn begin(&mut self, now: i64) {

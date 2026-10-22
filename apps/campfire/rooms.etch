@@ -1,0 +1,162 @@
+// Rooms: making them (open, closed, direct), changing and deleting them, and how involved a
+// member is. Their settings pages are `cold`: built per request (they're rarely visited).
+
+view active_users() = User where .status == "active" and .role != "bot" order by lower(.name), .created limit 500
+
+// A user's membership of a room, if any (a settings page's checkbox).
+view membership_of(u: User, r: Room) = Membership where .user == u and .room == r limit 1
+
+// A direct room whose members are exactly the users given and the viewer.
+fn same_members(r: Room, users: list of User): Bool =
+  count(Membership where .room == r) == count(User where it in users or it == viewer)
+  and not exists(Membership where .room == r and not (.user in users or .user == viewer))
+
+// Creates a room every active user is a member of.
+action create_open_room(name: Text) {
+  require may_create_rooms(viewer) else forbidden
+  require present(name) else invalid
+  create Room { type: "open", name: name, creator: viewer } as room
+  for each u in User where .status == "active" {
+    create Membership { room: room, user: u, involvement: "mentions" }
+  }
+  go room(room)
+}
+
+// Creates a closed room for the viewer and the active users chosen.
+action create_closed_room(name: Text, users: list of User) {
+  require may_create_rooms(viewer) else forbidden
+  require present(name) else invalid
+  create Room { type: "closed", name: name, creator: viewer } as room
+  for each u in User where .status == "active" and (it in users or it == viewer) {
+    create Membership { room: room, user: u, involvement: "mentions" }
+  }
+  go room(room)
+}
+
+// Goes to the direct room with exactly these users and the viewer, made if there's none.
+action create_direct_room(users: list of User) {
+  let existing = first(Room where .type == "direct" and same_members(it, users))
+  if existing != none {
+    go room(existing)
+  } else {
+    create Room { type: "direct", creator: viewer } as room
+    for each u in User where it in users or it == viewer {
+      create Membership { room: room, user: u, involvement: "everything" }
+    }
+    go room(room)
+  }
+}
+
+// Renames a room and opens it: every active user becomes a member. Its creator and administrators only.
+action update_open_room(room: Room, name: Text) {
+  require member(viewer, room) and room.type != "direct" else not_found
+  require can_administer(viewer, room.creator) else forbidden
+  require present(name) else invalid
+  set room.name = name
+  set room.type = "open"
+  for each u in User where .status == "active" and not member(it, room) {
+    create Membership { room: room, user: u, involvement: "mentions" }
+  }
+  go room(room)
+}
+
+// Renames a room and closes it to the viewer and the users chosen. Its creator and administrators only.
+action update_closed_room(room: Room, name: Text, users: list of User) {
+  require member(viewer, room) and room.type != "direct" else not_found
+  require can_administer(viewer, room.creator) else forbidden
+  require present(name) else invalid
+  set room.name = name
+  set room.type = "closed"
+  for each u in User where .status == "active" and (it in users or it == viewer) and not member(it, room) {
+    create Membership { room: room, user: u, involvement: "mentions" }
+  }
+  for each ms in Membership where .room == room and not (.user in users or .user == viewer) { delete ms }
+  go room(room)
+}
+
+// Deletes a room with its messages. Its creator and administrators only (any member, for a direct room).
+action delete_room(room: Room) {
+  require member(viewer, room) else not_found
+  require room.type == "direct" or can_administer(viewer, room.creator) else forbidden
+  for each m in Message where .room == room {
+    for each b in Boost where .message == m { delete b }
+    delete m
+  }
+  for each ms in Membership where .room == room { delete ms }
+  delete room
+}
+
+// Which of a room's messages notify the viewer: everything, mentions, nothing, or invisible
+// (hidden from the sidebar).
+action set_involvement(room: Room, involvement: Text) {
+  require member(viewer, room) else not_found
+  require involvement == "everything" or involvement == "mentions" or involvement == "nothing" or involvement == "invisible" else invalid
+  for each ms in Membership where .room == room and .user == viewer { set ms.involvement = involvement }
+}
+
+// ---- pages
+
+screen new_room() at "/rooms/opens/new" cold
+  require may_create_rooms(viewer) else go "/"
+<<<{{new_room_page()}}>>>
+
+screen new_direct() at "/rooms/directs/new" cold
+<<<{{new_direct_page()}}>>>
+
+screen edit_room(room: Room) at "/rooms/{room}/edit" cold
+  require member(viewer, room) else go "/"
+  require room.type != "direct" else go "/"
+<<<{{edit_room_page(room)}}>>>
+
+fragment settings_head(title: Text) <<<\
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
+<title>{{title}}</title>{{for css in stylesheets}}<link rel="stylesheet" href="{{asset(css)}}">{{end}}</head>
+<body>
+<nav id="nav"><a href="/" class="btn">{{icon("arrow-left.svg")}}<span class="for-screen-reader">Back</span></a>\
+<div class="btn btn--reversed btn--faux"><h1 class="txt-medium overflow-ellipsis">{{title}}</h1></div></nav>
+<main id="main-content"><div class="panel shadow center flex flex-column gap pad">>>>
+
+fragment settings_tail() <<<\
+</div></main>
+</body></html>
+>>>
+
+fragment user_choice(u: User, checked: Bool) <<<\
+<label class="flex align-center gap"><input type="checkbox" name="users" value="{{u.id}}"{{if checked}} checked{{end}}>\
+<img aria-hidden="true" src="/avatars/User/{{u.id}}" width="32" height="32" class="avatar"><span>{{u.name}}</span></label>
+>>>
+
+fragment new_room_page() per viewer <<<\
+{{settings_head("New room")}}\
+<form method="post" action="/_do/create_open_room" class="flex flex-column gap">\
+<label class="flex align-center gap input input--actor"><input type="text" name="name" class="input" required maxlength="100" placeholder="Name the room"></label>\
+<fieldset class="flex flex-column gap borderless unpad"><legend>Who can see it? Everyone, or only those chosen (a closed room)</legend>\
+{{for u in active_users()}}{{if u != viewer}}{{user_choice(u, false)}}{{end}}{{end}}</fieldset>\
+<div class="flex gap"><button type="submit" class="btn btn--reversed">Create an open room</button>\
+<button type="submit" class="btn" formaction="/_do/create_closed_room">Create a closed room</button></div></form>\
+{{settings_tail()}}>>>
+
+fragment new_direct_page() per viewer <<<\
+{{settings_head("New ping")}}\
+<form method="post" action="/_do/create_direct_room" class="flex flex-column gap">\
+<fieldset class="flex flex-column gap borderless unpad"><legend>Ping who?</legend>\
+{{for u in active_users()}}{{if u != viewer}}{{user_choice(u, false)}}{{end}}{{end}}</fieldset>\
+<button type="submit" class="btn btn--reversed">Start</button></form>\
+{{settings_tail()}}>>>
+
+fragment edit_room_page(room: Room) <<<\
+{{settings_head("Room settings")}}\
+<form method="post" action="/_do/update_open_room" class="flex flex-column gap"><input type="hidden" name="room" value="{{room.id}}">\
+<label class="flex align-center gap input input--actor"><input type="text" name="name" class="input" required maxlength="100" value="{{room.name}}"></label>\
+<fieldset class="flex flex-column gap borderless unpad"><legend>Members (for a closed room)</legend>\
+{{for u in active_users()}}<label class="flex align-center gap"><input type="checkbox" name="users" value="{{u.id}}"{{for ms in membership_of(u, room)}} checked{{end}}>\
+<img aria-hidden="true" src="/avatars/User/{{u.id}}" width="32" height="32" class="avatar"><span>{{u.name}}</span></label>{{end}}</fieldset>\
+<div class="flex gap"><button type="submit" class="btn btn--reversed">Save as open</button>\
+<button type="submit" class="btn" formaction="/_do/update_closed_room">Save as closed</button></div></form>\
+<form method="post" action="/_do/set_involvement" class="flex align-center gap"><input type="hidden" name="room" value="{{room.id}}">\
+<select name="involvement" class="input"><option value="everything">All messages</option><option value="mentions">Mentions only</option>\
+<option value="nothing">Nothing</option><option value="invisible">Hidden</option></select>\
+<button type="submit" class="btn">Notify me</button></form>\
+<form method="post" action="/_do/delete_room" onsubmit="return confirm(&quot;Delete this room and its messages?&quot;)"><input type="hidden" name="room" value="{{room.id}}">\
+<button type="submit" class="btn">{{icon("trash.svg")}} Delete the room</button></form>\
+{{settings_tail()}}>>>

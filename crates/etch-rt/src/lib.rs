@@ -16,6 +16,18 @@ pub mod time;
 pub use http::{serve, Handler, Req};
 pub use out::{push_int, Out};
 
+/// Lowers the calling thread's scheduling priority to `nice` (Linux: per thread; no privilege
+/// needed to lower it). Elsewhere, nothing.
+pub fn lower_priority(nice: i32) {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        // with `who` 0, PRIO_PROCESS names the calling thread on Linux
+        libc::setpriority(libc::PRIO_PROCESS, 0, nice);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = nice;
+}
+
 /// The `Date` header's value for now, made at most once a second per thread.
 pub fn http_date(b: &mut Vec<u8>) {
     use std::cell::RefCell;

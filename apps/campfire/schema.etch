@@ -19,7 +19,8 @@ entity Session {
 
 entity Room {
   type: Text                             // "open" | "closed" | "direct"
-  name: Text?
+  name: Text? max 100
+  creator: User?
 }
 
 entity Membership {

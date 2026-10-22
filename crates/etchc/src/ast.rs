@@ -86,6 +86,8 @@ pub enum BinOp {
     Ge,
     Add,
     Sub,
+    /// `x in list`: a row among a list argument's rows
+    In,
 }
 
 #[derive(Clone, Debug)]
@@ -172,7 +174,8 @@ pub struct Require {
 #[derive(Clone, Debug)]
 pub enum Stmt {
     Require(Require),
-    Create(String, Vec<(String, Expr)>, Span),
+    /// `create E {…}` (`as x`: the new row, by name after)
+    Create(String, Vec<(String, Expr)>, Option<String>, Span),
     Touch(Expr, Span),
     Set(Expr, String, Expr, Span),
     ForEach(String, Query, Vec<Stmt>, Span),
@@ -184,6 +187,10 @@ pub enum Stmt {
     SignIn(Expr, Span),
     /// `sign out`: the request's session is deleted; its cookie cleared
     SignOut(Span),
+    /// `if c { … } else { … }`
+    If(Expr, Vec<Stmt>, Vec<Stmt>, Span),
+    /// `go screen(row)`: where the action goes when it's done
+    Go(String, Expr, Span),
 }
 
 #[derive(Clone, Debug)]

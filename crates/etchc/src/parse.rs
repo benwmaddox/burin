@@ -446,7 +446,8 @@ impl Parser {
                     break;
                 }
             }
-            return Ok(Stmt::Create(e, fs, span));
+            let name = if self.eat_kw("as") { Some(self.ident()?) } else { None };
+            return Ok(Stmt::Create(e, fs, name, span));
         }
         if self.eat_kw("touch") {
             return Ok(Stmt::Touch(self.expr()?, span));
@@ -458,6 +459,27 @@ impl Parser {
             let n = self.ident()?;
             self.expect("=")?;
             return Ok(Stmt::Let(n, self.expr()?, span));
+        }
+        if self.eat_kw("if") {
+            let c = self.expr()?;
+            let then = self.block()?;
+            let otherwise = if self.eat_kw("else") {
+                if self.is_kw("if") {
+                    vec![self.stmt()?]
+                } else {
+                    self.block()?
+                }
+            } else {
+                vec![]
+            };
+            return Ok(Stmt::If(c, then, otherwise, span));
+        }
+        if self.eat_kw("go") {
+            let screen = self.ident()?;
+            self.expect("(")?;
+            let arg = self.expr()?;
+            self.expect(")")?;
+            return Ok(Stmt::Go(screen, arg, span));
         }
         if self.eat_kw("sign") {
             if self.eat_kw("out") {
@@ -486,7 +508,7 @@ impl Parser {
             let body = self.block()?;
             return Ok(Stmt::ForEach(v, q, body, span));
         }
-        self.err(format!("expected a statement (require, create, set, touch, delete, let, sign in, sign out, for each), found {}", show(self.peek())))
+        self.err(format!("expected a statement (require, create, set, touch, delete, let, if, go, sign in, sign out, for each), found {}", show(self.peek())))
     }
 
     // ---- expressions, loosest first
@@ -569,6 +591,7 @@ impl Parser {
             Tok::Punct("<=") => BinOp::Le,
             Tok::Punct(">") => BinOp::Gt,
             Tok::Punct(">=") => BinOp::Ge,
+            Tok::Ident(k) if k == "in" => BinOp::In,
             _ => return Ok(l),
         };
         self.next();

@@ -49,6 +49,8 @@ pub struct ActInfo {
     /// the request's thread, then hands the writer the hash it verified (`__verified_<i>`): the
     /// writer checks only that the stored hash is still that one
     pub verifies: Vec<(usize, Expr, String)>,
+    /// arguments that are lists of rows: from repeated fields, as JSON arrays of ids
+    pub list_args: Vec<String>,
 }
 
 /// `authenticates(h, p)` replaced by `h == __verified_<i>`, in order; the replaced (h, p) pairs.
@@ -118,6 +120,8 @@ fn row_paths(e: &Expr, out: &mut Vec<Vec<String>>) {
     fn path(e: &Expr) -> Option<Vec<String>> {
         match e {
             Expr::Dot(f, _) => Some(vec![f.clone()]),
+            // `it.f` (a function's body inlined with the row as its argument)
+            Expr::Field(o, f, _) if matches!(&**o, Expr::Name(n, _) if n == "it") => Some(vec![f.clone()]),
             Expr::Field(o, f, _) => {
                 let mut p = path(o)?;
                 p.push(f.clone());
@@ -145,7 +149,9 @@ fn list_reads(m: &Model, regs: &[RegInfo]) -> Result<Vec<ListRead>, String> {
     let mut out = vec![];
     fn walk(m: &Model, ri: usize, reg: &RegInfo, s: &Schema, nested: bool, out: &mut Vec<ListRead>) -> Result<(), String> {
         for (k, slot) in s.lists.iter().enumerate() {
-            let (q, ent) = sql::resolve(m, &slot.expr, &Scope::default())?;
+            let (mut q, ent) = sql::resolve(m, &slot.expr, &Scope::default())?;
+            // the filter with its functions expanded: the fields it reads through them count
+            q.filter = q.filter.map(|x| inline::expr(m, &x, &inline::Env::new(), 0, 0));
             let root = if reg.per_viewer { "viewer".to_string() } else { reg.root.as_ref().map(|r| r.0.clone()).unwrap_or_default() };
             let mut eqs = vec![];
             if let Some(f) = &q.filter {
@@ -179,7 +185,8 @@ pub fn screen_lists(m: &Model) -> Result<Vec<ScreenList>, String> {
         if let Decl::Screen { params, body, .. } = d {
             for n in &body.nodes {
                 if let TNode::For(_, list, _, _) = n {
-                    let (q, ent) = sql::resolve(m, list, &Scope::of(params))?;
+                    let (mut q, ent) = sql::resolve(m, list, &Scope::of(params))?;
+                    q.filter = q.filter.map(|x| inline::expr(m, &x, &inline::Env::new(), 0, 0));
                     let mut eqs = vec![];
                     if let Some(f) = &q.filter {
                         eq_conjuncts(f, &mut eqs);
@@ -265,6 +272,8 @@ struct Act<'a, 'b> {
     lets: HashMap<String, (String, Expr, Type)>,
     /// the authenticates seen so far (their index is their hidden argument's)
     verifies: Vec<(usize, Expr, String)>,
+    /// the entry block's allocas
+    allocas: String,
 }
 
 impl<'a, 'b> Act<'a, 'b> {
@@ -273,7 +282,13 @@ impl<'a, 'b> Act<'a, 'b> {
         format!("%a{}", self.n)
     }
     fn line(&mut self, s: &str) {
-        let _ = writeln!(self.b, "  {s}");
+        for l in s.split('\n') {
+            if l.trim_start().contains(" = alloca ") {
+                let _ = writeln!(self.allocas, "  {}", l.trim_start());
+            } else {
+                let _ = writeln!(self.b, "  {}", l.trim_start());
+            }
+        }
     }
     fn note(&mut self, s: String) {
         if !self.edges.contains(&s) {
@@ -367,7 +382,8 @@ impl<'a, 'b> Act<'a, 'b> {
     fn bind(&mut self, st: &str, i: usize, e: &Expr) -> Result<(), String> {
         let (v, shape) = self.value(e)?;
         if shape == Shape::I64 {
-            self.line(&format!("call i32 @sqlite3_bind_int64(ptr {st}, i32 {i}, i64 {v})"));
+            // none (i64::MIN) is bound as NULL
+            self.line(&format!("call void @etch_bind_i64(ptr {st}, i32 {i}, i64 {v})"));
         } else {
             self.line(&format!("call void @etch_bind_str(ptr {st}, i32 {i}, ptr {v})"));
         }
@@ -643,6 +659,17 @@ impl<'a, 'b> Act<'a, 'b> {
                 }
             }
         }
+        if removed {
+            for (si, d) in self.m.screens.iter().enumerate() {
+                if let Decl::Screen { params, .. } = d {
+                    if matches!(params.first().map(|p| p.ty.strip_opt()), Some(Type::Ref(e)) if e == ent) {
+                        let id = vals.get("id").cloned().ok_or("the deleted row's id")?;
+                        self.delta(13, si, &id, "0");
+                        self.note(format!("delete {ent} → screen {si} at it: dropped (no read)"));
+                    }
+                }
+            }
+        }
         // the screens' lists of this entity
         for (si, s) in screens.iter().enumerate() {
             if s.entity != ent {
@@ -712,7 +739,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let _ = writeln!(self.b, "  br i1 {ok}, label %{pass}, label %{fail}\n{pass}:");
                     self.fails.push((fail, code));
                 }
-                Stmt::Create(ent, fields, _) => {
+                Stmt::Create(ent, fields, name, _) => {
                     for (f, v) in fields {
                         self.check_max(ent, f, v)?;
                     }
@@ -750,6 +777,14 @@ impl<'a, 'b> Act<'a, 'b> {
                     }
                     self.line(&format!("call void @etch_exec(ptr {st})"));
                     self.edges(ent, &["*".into()], &vals, &[], regs, lists, screens, Some((&id, &seq, &fixed)), false)?;
+                    if let Some(n) = name {
+                        let p = format!("%let_{n}_{}", self.n);
+                        self.n += 1;
+                        self.line(&format!("{p} = alloca i64"));
+                        self.line(&format!("store i64 {id}, ptr {p}"));
+                        self.rows.push((n.clone(), ent.clone()));
+                        self.lets.insert(n.clone(), (p, Expr::None(Span::default()), Type::Ref(ent.clone())));
+                    }
                 }
                 Stmt::Touch(e, _) => {
                     let ent = match self.m.type_of(e, scope).map_err(|x| x.msg)? {
@@ -774,7 +809,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let x = inline::expr(self.m, e, &inline::Env::new(), 0, 0);
                     let sel = sql::cond_select_with(self.m, &x, &self.rows)?;
                     let st = self.stmt(&sel)?;
-                    let (p, v) = (format!("%let_{n}"), self.v());
+                    let (p, v) = (format!("%let_{n}_{}", self.n), self.v());
                     self.line(&format!("{p} = alloca i64"));
                     self.line(&format!("call i32 @sqlite3_step(ptr {st})"));
                     self.line(&format!("{v} = call i64 @etch_col_i64(ptr {st}, i32 0)"));
@@ -789,8 +824,39 @@ impl<'a, 'b> Act<'a, 'b> {
                     let Some(Decl::Viewer { via_entity, via_field, to_field, .. }) = self.m.viewer else { return Err("sign in needs a viewer".into()) };
                     let (tok, _) = self.value(&Expr::Call("token".into(), vec![Expr::Int(32, *span)], *span))?;
                     let fields = vec![(to_field.clone(), e.clone()), (via_field.clone(), Expr::Name(format!("@ptr{tok}"), *span))];
-                    self.stmts(&[Stmt::Create(via_entity.clone(), fields, *span)], scope, regs, lists, screens)?;
+                    self.stmts(&[Stmt::Create(via_entity.clone(), fields, None, *span)], scope, regs, lists, screens)?;
                     self.line(&format!("call void @etch_w_sign_in(ptr %w, ptr {tok})"));
+                }
+                Stmt::If(c, a, b, _) => {
+                    let cond = inline::expr(self.m, c, &inline::Env::new(), 0, 0);
+                    let sel = sql::cond_select_with(self.m, &cond, &self.rows)?;
+                    let st = self.stmt(&sel)?;
+                    let (x, ok) = (self.v(), self.v());
+                    self.line(&format!("call i32 @sqlite3_step(ptr {st})"));
+                    self.line(&format!("{x} = call i64 @etch_col_i64(ptr {st}, i32 0)"));
+                    self.line(&format!("call i32 @sqlite3_reset(ptr {st})"));
+                    self.line(&format!("{ok} = icmp eq i64 {x}, 1"));
+                    let (lt, lf, le) = (format!("ift{}", self.n), format!("iff{}", self.n), format!("ife{}", self.n));
+                    self.n += 1;
+                    let _ = writeln!(self.b, "  br i1 {ok}, label %{lt}, label %{lf}\n{lt}:");
+                    // names made in a branch stay in it
+                    let (lets, rows) = (self.lets.clone(), self.rows.clone());
+                    self.stmts(a, scope, regs, lists, screens)?;
+                    (self.lets, self.rows) = (lets.clone(), rows.clone());
+                    let _ = writeln!(self.b, "  br label %{le}\n{lf}:");
+                    self.stmts(b, scope, regs, lists, screens)?;
+                    (self.lets, self.rows) = (lets, rows);
+                    let _ = writeln!(self.b, "  br label %{le}\n{le}:");
+                }
+                Stmt::Go(screen, arg, _) => {
+                    let (route, param) = self.m.screens.iter().find_map(|d| match d {
+                        Decl::Screen { name, route, params, .. } if name == screen => Some((route.clone(), params[0].name.clone())),
+                        _ => None,
+                    }).ok_or("go's screen")?;
+                    let (pre, post) = route.split_once(&format!("{{{param}}}")).ok_or("go's route")?;
+                    let (gp, gs) = (self.md.str_const_pub(pre.as_bytes()), self.md.str_const_pub(post.as_bytes()));
+                    let (id, _) = self.value(arg)?;
+                    self.line(&format!("call void @etch_w_go(ptr %w, ptr {gp}, i64 {}, i64 {id}, ptr {gs}, i64 {})", pre.len(), post.len()));
                 }
                 Stmt::SignOut(span) => {
                     let Some(Decl::Viewer { via_entity, via_field, .. }) = self.m.viewer else { return Err("sign out needs a viewer".into()) };
@@ -814,6 +880,39 @@ impl<'a, 'b> Act<'a, 'b> {
                         _ => Stmt::Delete(Expr::Name(row.clone(), *span), *span),
                     };
                     self.stmts(&[Stmt::ForEach(row, q, vec![inner], *span)], scope, regs, lists, screens)?;
+                }
+                Stmt::ForEach(var, q, inner, _) if !inner.iter().all(|s| matches!(s, Stmt::Set(Expr::Name(o, _), ..) if o == var)) && !(inner.len() == 1 && matches!(&inner[0], Stmt::Delete(Expr::Name(o, _), _) if o == var)) => {
+                    // row by row: the rows' ids first (in the writer's arena), then the body for each
+                    let ent = match &q.source {
+                        Source::Entity(e) => e.clone(),
+                        _ => return Err("for each over a view isn't lowered yet".into()),
+                    };
+                    let filter = q.filter.as_ref().map(|f| inline::expr(self.m, f, &inline::Env::new(), 0, 0));
+                    let sel = sql::ids(self.m, &ent, filter.as_ref(), &self.rows)?;
+                    let st = self.stmt(&sel)?;
+                    let (ids, p, n) = (self.v(), self.v(), self.v());
+                    self.line(&format!("{ids} = call %List @etch_w_ids(ptr %w, ptr {st})"));
+                    self.line(&format!("{p} = extractvalue %List {ids}, 0"));
+                    self.line(&format!("{n} = extractvalue %List {ids}, 1"));
+                    let k = self.n;
+                    self.n += 1;
+                    let (slot, ix) = (format!("%let_{var}_{k}"), format!("%ix{k}"));
+                    self.line(&format!("{slot} = alloca i64"));
+                    self.line(&format!("{ix} = alloca i64"));
+                    self.line(&format!("store i64 0, ptr {ix}"));
+                    let (h, body, done) = (format!("fh{k}"), format!("fb{k}"), format!("fd{k}"));
+                    let (i, more, at, id) = (self.v(), self.v(), self.v(), self.v());
+                    let _ = writeln!(self.b, "  br label %{h}\n{h}:\n  {i} = load i64, ptr {ix}\n  {more} = icmp slt i64 {i}, {n}\n  br i1 {more}, label %{body}, label %{done}\n{body}:");
+                    self.line(&format!("{at} = getelementptr inbounds i64, ptr {p}, i64 {i}"));
+                    self.line(&format!("{id} = load i64, ptr {at}"));
+                    self.line(&format!("store i64 {id}, ptr {slot}"));
+                    let (lets, rows) = (self.lets.clone(), self.rows.clone());
+                    self.lets.insert(var.clone(), (slot, Expr::None(Span::default()), Type::Ref(ent.clone())));
+                    self.rows.push((var.clone(), ent.clone()));
+                    self.stmts(inner, &scope.with(var, Type::Ref(ent.clone())), regs, lists, screens)?;
+                    (self.lets, self.rows) = (lets, rows);
+                    let (i2, nx) = (self.v(), self.v());
+                    let _ = writeln!(self.b, "  {i2} = load i64, ptr {ix}\n  {nx} = add i64 {i2}, 1\n  store i64 {nx}, ptr {ix}\n  br label %{h}\n{done}:");
                 }
                 Stmt::ForEach(var, q, inner, _) => {
                     let ent = match &q.source {
@@ -878,8 +977,12 @@ impl<'a, 'b> Act<'a, 'b> {
 fn creates_of(body: &[Stmt], out: &mut Vec<String>) {
     for s in body {
         match s {
-            Stmt::Create(e, _, _) => out.push(e.clone()),
+            Stmt::Create(e, _, _, _) => out.push(e.clone()),
             Stmt::ForEach(_, _, inner, _) => creates_of(inner, out),
+            Stmt::If(_, a, b, _) => {
+                creates_of(a, out);
+                creates_of(b, out);
+            }
             _ => {}
         }
     }
@@ -941,7 +1044,8 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
     let auds = audiences(m);
     for d in &m.actions {
         if let Decl::Action { name, params, body, public, .. } = d {
-            let mut args: Vec<(String, Shape)> = params.iter().map(|p| (p.name.clone(), if matches!(p.ty.strip_opt(), Type::Text) { Shape::Str } else { Shape::I64 })).collect();
+            let mut args: Vec<(String, Shape)> = params.iter().map(|p| (p.name.clone(), if matches!(p.ty.strip_opt(), Type::Text | Type::List(_)) { Shape::Str } else { Shape::I64 })).collect();
+            let list_args: Vec<String> = params.iter().filter(|p| matches!(p.ty.strip_opt(), Type::List(_))).map(|p| p.name.clone()).collect();
             // hidden arguments the runtime fills (never from the form): the request's session
             // token (sign out), each verified password hash
             fn hidden(body: &[Stmt], out: &mut Vec<String>, n: &mut usize) {
@@ -957,6 +1061,10 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
                             }
                         }
                         Stmt::ForEach(_, _, inner, _) => hidden(inner, out, n),
+                        Stmt::If(_, a, b, _) => {
+                            hidden(a, out, n);
+                            hidden(b, out, n);
+                        }
                         _ => {}
                     }
                 }
@@ -970,13 +1078,14 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
                 Some(Decl::Viewer { entity, .. }) => Some(("viewer".to_string(), entity.clone())),
                 _ => None,
             }).collect();
-            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![], audiences: auds.clone(), lets: HashMap::new(), verifies: vec![] };
+            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![], audiences: auds.clone(), lets: HashMap::new(), verifies: vec![], allocas: String::new() };
             a.stmts(body, &Scope::of(params), &regs, &lists, screens)?;
             let mut f = String::new();
             let parts: Vec<&str> = args.iter().map(|(_, s)| if *s == Shape::Str { "%Str" } else { "i64" }).collect();
             let _ = writeln!(f, "%Args_{name} = type {{ {} }}", parts.join(", "));
             let _ = writeln!(f, "define i32 @etch_act_{name}(ptr noalias %ctx, ptr noalias %db, ptr noalias %w, i64 %viewer, ptr noalias %vrec, ptr noalias %args, ptr noalias %d) {{\nentry:");
             let _ = writeln!(f, "  %now = call i64 @etch_w_now(ptr %w)");
+            f.push_str(&a.allocas);
             f.push_str(&a.b.replace("%Args,", &format!("%Args_{name},")));
             let _ = writeln!(f, "  ret i32 0");
             for (l, code) in &a.fails {
@@ -995,7 +1104,7 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
                     all_patches.push(p);
                 }
             }
-            infos.push(ActInfo { name: name.clone(), args, outcomes, edges, public: *public, verifies });
+            infos.push(ActInfo { name: name.clone(), args, outcomes, edges, public: *public, verifies, list_args });
         }
     }
     for p in &all_patches {

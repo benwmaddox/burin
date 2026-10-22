@@ -68,6 +68,11 @@ pub unsafe trait Glue: Send + Sync + 'static {
     /// An action's password checks, on the request's thread: each adds its hidden field (the
     /// hash it verified, or nothing).
     fn preflight(name: &str, c: &Connection, viewer: i64, form: &mut Vec<(String, String)>);
+    /// Screens rendered per request, for a viewer (settings pages: `cold`).
+    fn cold(s: usize) -> bool;
+    /// A screen's guards in order, for a viewer: Ok, or the first unmet one's answer (a redirect,
+    /// or None: not found).
+    fn guards(c: &Connection, s: usize, key: i64, viewer: i64) -> Result<(), Option<String>>;
     /// Where "/" goes for a viewer (the request's cookies, as ids).
     fn home(c: &Connection, viewer: i64, cookie: &dyn Fn(&str) -> Option<i64>) -> Option<String>;
     /// A register's record size, and its loader, variant key and builder.
@@ -239,6 +244,8 @@ pub enum Cmd {
 pub struct Done {
     pub to: String,
     pub cookie: Option<Vec<u8>>,
+    /// where the action said to go (`go`)
+    pub go: Option<String>,
 }
 
 #[derive(Default)]
@@ -347,8 +354,8 @@ impl<G: Glue> App<G> {
             return false;
         }
         let (s, key) = match G::route(req.path) {
-            Some(r) => r,
-            None => return false,
+            Some(r) if !G::cold(r.0) => r,
+            _ => return false,
         };
         let token = match req.cookie(self.session_cookie) {
             Some(t) => t,
@@ -507,7 +514,7 @@ impl<G: Glue> App<G> {
                 }
                 let back = self.back(req);
                 return match rx.recv() {
-                    Ok(Ok(Done { to, cookie: Some(token) })) => {
+                    Ok(Ok(Done { to, cookie: Some(token), .. })) => {
                         let name = String::from_utf8_lossy(self.session_cookie);
                         let (to, c) = if token.is_empty() {
                             ("/session/new".to_string(), format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"))
@@ -517,7 +524,8 @@ impl<G: Glue> App<G> {
                         };
                         redirect_with(out, &to, Some("ok"), &[("Set-Cookie", &c)])
                     }
-                    Ok(Ok(Done { to, cookie: None })) => redirect(out, &back.unwrap_or(to), Some("ok")),
+                    Ok(Ok(Done { go: Some(to), cookie: None, .. })) => redirect(out, &to, Some("ok")),
+                    Ok(Ok(Done { to, cookie: None, go: None })) => redirect(out, &back.unwrap_or(to), Some("ok")),
                     Ok(Err(e)) => redirect(out, &back.unwrap_or_else(|| "/".into()), Some(e)),
                     Err(_) => respond(out, 500, "text/plain", &[], b"writer stopped"),
                 };
@@ -545,6 +553,26 @@ impl<G: Glue> App<G> {
                         b.extend_from_slice(&body);
                     }),
                     None => respond(out, 500, "text/plain", &[], b"the page couldn't be built"),
+                };
+            }
+            if let Some((s, key)) = G::route(path).filter(|(s, _)| G::cold(*s)) {
+                let viewer = match viewer {
+                    Some(v) => v,
+                    None => return redirect(out, "/session/new", None),
+                };
+                return match self.with_reader(|c| self.cold_page(c, s, key, viewer)) {
+                    Ok((body, headers)) => out.push_own(|b| {
+                        b.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: ");
+                        push_int(b, body.len() as u64);
+                        b.extend_from_slice(b"\r\n");
+                        b.extend_from_slice(&headers);
+                        b.extend_from_slice(b"Date: ");
+                        http_date(b);
+                        b.extend_from_slice(b"\r\n\r\n");
+                        b.extend_from_slice(&body);
+                    }),
+                    Err(Some(to)) => redirect(out, &to, None),
+                    Err(None) => respond(out, 404, "text/plain", &[], b"not found"),
                 };
             }
             if let Some((s, key)) = G::route(path) {
@@ -596,6 +624,38 @@ impl<G: Glue> App<G> {
         self.with_reader(|c| G::session(c, &t))
     }
 
+    /// A cold screen for a viewer, built from SQLite after its guards (in order).
+    fn cold_page(&self, c: &Connection, s: usize, key: i64, viewer: i64) -> Result<(Vec<u8>, Vec<u8>), Option<String>> {
+        G::guards(c, s, key, viewer)?;
+        let v = load_viewer::<G>(c, &self.ctx, viewer);
+        let vs = [v.ptr()];
+        let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
+        for (kind, k) in G::screen_regs(s, key) {
+            let rec = load::<G>(c, &self.ctx, kind, k).ok_or(None)?;
+            snap.regs[kind].insert(k, Arc::new(build::<G>(&self.ctx, kind, rec.ptr(), &vs)));
+        }
+        for kind in G::viewer_regs(s) {
+            let rec = load::<G>(c, &self.ctx, kind, viewer).ok_or(None)?;
+            snap.regs[kind].insert(viewer, Arc::new(build::<G>(&self.ctx, kind, rec.ptr(), &vs)));
+        }
+        for (list, items) in G::screen_lists(c, s, key) {
+            let kind = G::list_item(list);
+            for id in &items {
+                if let Some(rec) = load::<G>(c, &self.ctx, kind, *id) {
+                    snap.regs[kind].insert(*id, Arc::new(build::<G>(&self.ctx, kind, rec.ptr(), &vs)));
+                }
+            }
+            snap.lists[list].insert(key, Arc::new(items));
+        }
+        let (_, headers) = G::screen(c, s, key).ok_or(None)?;
+        let mut page = Vec::with_capacity(65536);
+        if G::assemble(&snap, s, key, viewer, 0, &mut |seg| page.extend_from_slice(&seg.raw)) {
+            Ok((page, headers))
+        } else {
+            Err(None)
+        }
+    }
+
     /// A public screen, built from SQLite (no viewer: each register's variant for nobody).
     fn public_page(&self, c: &Connection, s: usize) -> Option<(Vec<u8>, Vec<u8>)> {
         let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
@@ -637,6 +697,8 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 Err(_) => break,
             }
         }
+        let t0 = std::time::Instant::now();
+        let n_cmds = batch.len();
         let cur = snap.load_full();
         let mut replies = vec![];
         let mut deltas = Deltas::default();
@@ -653,12 +715,14 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                         (None, true) => Some(vec![]),
                         _ => None,
                     };
-                    replies.push((reply, r.map(|_| Done { to: G::after_act(&name, &form), cookie })));
+                    let go = w.go.take();
+                    replies.push((reply, r.map(|_| Done { to: G::after_act(&name, &form), cookie, go })));
                 }
                 Cmd::Warm { screen, key, viewer } => warm.push((screen, key, viewer)),
             }
         }
         tx.commit().expect("commit");
+        let t_commit = t0.elapsed();
         let mut next = cur.next();
         let mut reload: HashSet<(usize, i64)> = HashSet::new();
         let mut dirty: HashSet<(usize, i64)> = HashSet::new();
@@ -727,6 +791,13 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 3 => {
                     shared.insert((a, key));
                 }
+                // every kept instance of a shared register (a nested list changed)
+                4 => {
+                    shared.extend(next.regs[a].keys().map(|k| (a, *k)));
+                }
+                // a new row's register: no screen keeps it yet (a list that shows it adds it,
+                // ops 2 and 7; a screen built later reads it)
+                1 => {}
                 // a row left a screen list: the list again
                 5 => {
                     relist.insert((a, key));
@@ -744,6 +815,15 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                         let t = t.into_bytes().into_boxed_slice();
                         next.sessions.insert(t.clone(), u);
                         tokens.insert(key, t);
+                    }
+                }
+                // a deleted row's screen instance (and its lists)
+                13 => {
+                    next.screens[a].remove(&key);
+                    for l in 0..G::LISTS {
+                        if G::list_screen(l) == a {
+                            next.lists[l].remove(&key);
+                        }
                     }
                 }
                 // a session row deleted
@@ -881,6 +961,11 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             }
         }
         snap.store(Arc::new(next));
+        // a slow batch, logged with where its time went (the bench keeps the server's log)
+        let took = t0.elapsed();
+        if took.as_millis() >= 20 {
+            eprintln!("slow batch: {} ms ({} ms to commit), {n_cmds} commands, {} deltas", took.as_millis(), t_commit.as_millis(), deltas.list.len());
+        }
         stats.batches.fetch_add(1, Ordering::Relaxed);
         stats.acts.fetch_add(replies.iter().filter(|r: &&(SyncSender<_>, Result<Done, &str>)| r.1.is_ok()).count() as u64, Ordering::Relaxed);
         for (to, r) in replies {
@@ -997,6 +1082,18 @@ fn unescape(s: &[u8]) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&o).into_owned()
+}
+
+/// A list argument: every value of its field (or `__arg_<name>`), each a row's id (a `#` or `@`
+/// mark dropped), as a JSON array (`[1,2]`); values that aren't ids are left out.
+pub fn field_ids(form: &[(String, String)], name: &str) -> String {
+    let ids: Vec<String> = form
+        .iter()
+        .filter(|(k, _)| k == name || k.strip_prefix("__arg_") == Some(name))
+        .filter_map(|(_, v)| v.trim_start_matches(['#', '@']).parse::<i64>().ok())
+        .map(|i| i.to_string())
+        .collect();
+    format!("[{}]", ids.join(","))
 }
 
 /// A form field's value: an action's argument by its name, or as `__arg_<name>` (the pages'

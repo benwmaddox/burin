@@ -69,6 +69,11 @@ struct Conn {
     writing: bool,
 }
 
+/// The read workers' nice value. The writer stays at 0: when both want a CPU, the writer gets
+/// about nine times a reader's share (CFS weights 1024 against 110); reads still use every
+/// cycle the writer doesn't.
+pub const READER_NICE: i32 = 10;
+
 /// Serves `handler` on `addr` with `workers` threads; doesn't return unless binding fails.
 pub fn serve<H: Handler>(addr: SocketAddr, workers: usize, handler: Arc<H>) -> io::Result<()> {
     let mut threads = vec![];
@@ -76,6 +81,8 @@ pub fn serve<H: Handler>(addr: SocketAddr, workers: usize, handler: Arc<H>) -> i
         let listener = bind(addr)?;
         let h = handler.clone();
         threads.push(std::thread::Builder::new().name(format!("etch-w{w}")).spawn(move || {
+            // readers yield to the writer: a write is never kept waiting behind reads
+            crate::lower_priority(READER_NICE);
             if let Err(e) = run(w, listener, h) {
                 eprintln!("worker {w}: {e}");
             }

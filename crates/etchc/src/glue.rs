@@ -119,8 +119,12 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     let _ = writeln!(s, "    fn route(path: &[u8]) -> Option<(usize, i64)> {{");
     for (si, d) in screen_decls.iter().enumerate() {
         if let Decl::Screen { route, params, public: false, .. } = d {
+            if params.is_empty() {
+                let _ = writeln!(s, "        if path == b{route:?} {{ return Some(({si}, 0)); }}");
+                continue;
+            }
             if params.len() != 1 {
-                return Err("a screen has one row parameter (for now)".into());
+                return Err("a screen has one row parameter, or none (for now)".into());
             }
             let ph = format!("{{{}}}", params[0].name);
             let (pre, post) = route.split_once(&ph).ok_or("the route doesn't name its parameter")?;
@@ -169,19 +173,24 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     let mut vregs_fn = String::new();
     let mut asm_fn = String::new();
     let mut refuse_fn = String::new();
+    let mut guards_fn = String::new();
+    let mut colds: Vec<String> = vec![];
     let mut consts: Vec<String> = vec![];
     for (si, d) in screen_decls.iter().enumerate() {
-        let (params, requires, cookies, body, public) = match d {
-            Decl::Screen { params, requires, cookies, body, public, .. } => (params, requires, cookies, body, *public),
+        let (params, requires, cookies, body, public, cold) = match d {
+            Decl::Screen { params, requires, cookies, body, public, cold, .. } => (params, requires, cookies, body, *public, *cold),
             _ => continue,
         };
+        // per request (public or cold): no audience, the guards checked in order each time
+        let per_request = public || cold;
         let p = &params.first().map(|x| x.name.clone()).unwrap_or_default();
         let pent = match params.first().map(|x| x.ty.strip_opt()) {
             Some(Type::Ref(e)) => e.clone(),
-            None if public => String::new(),
+            None if per_request => String::new(),
             _ => return Err("a screen's parameter is a row".into()),
         };
-        let pmap = vec![(p.clone(), pent.clone())];
+        // the parameter and the viewer: rows whose fields a guard reads by id
+        let pmap = vec![(p.clone(), pent.clone()), ("viewer".to_string(), viewer.0.clone())];
         // the guards: the audience (a viewer's membership), the write-time ones, and all of them
         // in order (for the cold path's answer)
         let mut audience = None;
@@ -192,6 +201,9 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
             let sel = sql::cond_select_with(m, &cond, &pmap)?;
             all.push((sel.sql.clone(), binds_rs(&sel, p)?, r.otherwise.clone()));
             let on_viewer = sel.binds.iter().any(|sql::Bind::Path(e)| matches!(e, Expr::Name(n, _) if n == "viewer"));
+            if per_request {
+                continue;
+            }
             if !on_viewer {
                 guards.push((sel.sql.clone(), binds_rs(&sel, p)?));
                 continue;
@@ -225,7 +237,7 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
         }
         let (asql, abinds) = match audience {
             Some(a) => a,
-            None if public => (String::new(), String::new()),
+            None if per_request => (String::new(), String::new()),
             None => return Err("a precomputed screen needs a guard naming its audience (member(viewer, …))".into()),
         };
         let mut headers = String::from("Content-Type: text/html; charset=utf-8\\r\\n");
@@ -251,10 +263,22 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
         for (sql_text, b) in &guards {
             let _ = write!(screen_fn, "            let ok: i64 = c.prepare_cached(r##\"{sql_text}\"##).ok()?.query_row({b}, |r| r.get(0)).ok()?;\n            if ok != 1 {{ return None; }}\n");
         }
-        if public {
+        if per_request {
             let _ = write!(screen_fn, "            let _ = c;\n            Some((vec![], format!(\"{headers}\").into_bytes()))\n        }}\n");
         } else {
             let _ = write!(screen_fn, "            let mut st = c.prepare_cached(r##\"{asql}\"##).ok()?;\n            let audience: Vec<i64> = st.query_map({abinds}, |r| r.get(0)).ok()?.flatten().collect();\n            Some((audience, format!(\"{headers}\").into_bytes()))\n        }}\n");
+        }
+        let _ = write!(guards_fn, "        {si} => {{\n");
+        for (sql_text, b, otherwise) in &all {
+            let ans = match otherwise {
+                Else::Go(to) => format!("Some({to:?}.to_string())"),
+                _ => "None".into(),
+            };
+            let _ = write!(guards_fn, "            let ok: i64 = c.prepare_cached(r##\"{sql_text}\"##).ok().and_then(|mut st| st.query_row({b}, |r| r.get(0)).ok()).unwrap_or(0);\n            if ok != 1 {{ return Err({ans}); }}\n");
+        }
+        let _ = write!(guards_fn, "            Ok(())\n        }}\n");
+        if cold {
+            colds.push(si.to_string());
         }
         let _ = write!(refuse_fn, "        {si} => {{\n");
         for (sql_text, b, otherwise) in &all {
@@ -318,6 +342,8 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     }
     let _ = writeln!(s, "    fn screen(c: &rusqlite::Connection, s: usize, key: i64) -> Option<(Vec<i64>, Vec<u8>)> {{\n        match s {{\n{screen_fn}        _ => None,\n        }}\n    }}");
     let _ = writeln!(s, "    fn refuse(c: &rusqlite::Connection, s: usize, key: i64, viewer: i64) -> Option<String> {{\n        match s {{\n{refuse_fn}        _ => None,\n        }}\n    }}");
+    let _ = writeln!(s, "    fn guards(c: &rusqlite::Connection, s: usize, key: i64, viewer: i64) -> Result<(), Option<String>> {{\n        let _ = (c, key, viewer);\n        match s {{\n{guards_fn}        _ => Err(None),\n        }}\n    }}");
+    let _ = writeln!(s, "    fn cold(s: usize) -> bool {{ matches!(s, {}) }}", if colds.is_empty() { "usize::MAX".to_string() } else { colds.join(" | ") });
     let _ = writeln!(s, "    fn screen_regs(s: usize, key: i64) -> Vec<(usize, i64)> {{ let _ = key; match s {{\n{regs_fn}        _ => vec![] }} }}");
     let _ = writeln!(s, "    fn viewer_regs(s: usize) -> Vec<usize> {{ match s {{\n{vregs_fn}        _ => vec![] }} }}");
     let _ = writeln!(s, "    fn screen_lists(c: &rusqlite::Connection, s: usize, key: i64) -> Vec<(usize, Vec<i64>)> {{\n        match s {{\n{lists_fn}        _ => vec![],\n        }}\n    }}");
@@ -333,6 +359,10 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
                 crate::llvm::Shape::I64 => {
                     let _ = writeln!(s, "                let {n}: i64 = etch_rt::app::field(form, {n:?}).and_then(|v| v.parse().ok()).ok_or(\"invalid\")?;");
                     fields.push(n.clone());
+                }
+                crate::llvm::Shape::Str if a.list_args.contains(n) => {
+                    let _ = writeln!(s, "                let {n}_s = etch_rt::app::field_ids(form, {n:?});");
+                    fields.push(format!("{n}: Str::of(&{n}_s)"));
                 }
                 crate::llvm::Shape::Str => {
                     let _ = writeln!(s, "                let {n}_s = etch_rt::app::field(form, {n:?}).unwrap_or(\"\");");
