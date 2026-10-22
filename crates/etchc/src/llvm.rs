@@ -2,16 +2,20 @@
 //!
 //! For each register (a fragment kept in the snapshot) the compiler emits:
 //! - its **input record**: a flat C struct with exactly the values its template uses (paths such
-//!   as `m.creator.name`), then a (pointer, count) per list it loops over; the runtime fills it;
+//!   as `m.creator.name`, and scalars such as `first(Account).restrict_room_creation`), then a
+//!   (pointer, count) per list it reads; lists nest (a list per item of a list);
+//! - `etch_load_<f>(ctx, db, key, rec, arena) -> i1`: fills the record from SQLite: one SELECT for
+//!   the record, one per list (per item, for a nested list), items in arrays of the lists' bounds;
 //! - `etch_bits_<f>(in, viewer) -> i64`: its variant key: each viewer-dependent condition's bit,
 //!   shifted in, in template order (in loops, one per item). The compiler proves the key fits 64
-//!   bits from the lists' bounds, and refuses a fragment whose key wouldn't;
-//! - `etch_build_<f>(ctx, in, viewer, out, tmps)`: its bytes for that viewer: appends of constant
-//!   ranges (escaped and merged at compile time), escaped holes, a branch per condition, a loop per
-//!   list of rows; constant lists are unrolled. Temporary buffers are a fixed set, counted here.
+//!   bits from the lists' bounds and refuses a fragment whose key wouldn't. A `per viewer` register
+//!   is keyed by the viewer instead, and has no variant key;
+//! - `etch_build_<f>(ctx, in, viewer, out, tmps, splits)`: its bytes: appends of constant ranges
+//!   (escaped and merged at compile time), escaped holes, a branch per condition, a loop per list.
+//!   In a `per viewer` register, a hole that depends on a parameter is a **splice**: the builder
+//!   marks the place (`splits`), and the hole is its own small register, keyed by the parameter.
 //!
-//! Each function is generated twice: the first pass only settles the record's layout.
-//! The runtime's helpers (etch-rt's `abi`) are linked under cross-language LTO and inline.
+//! Each builder is generated twice: the first pass only settles the record's layout.
 
 use crate::ast::*;
 use crate::check::{Model, Scope};
@@ -34,13 +38,22 @@ fn shape_of(t: &Type) -> Shape {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ListSlot {
+    pub key: String,
+    pub var: String,
+    pub expr: Expr,
+    pub items: Schema,
+}
+
 /// The record a register (or a list's items) is built from.
 #[derive(Default, Debug, Clone)]
 pub struct Schema {
     /// (path, shape): `m.creator.name`; a reference's id is the path to the reference
     pub fields: Vec<(String, Shape)>,
-    /// (the list, its loop variable, its items' record)
-    pub lists: Vec<(String, String, Schema)>,
+    /// fields that are values of other queries (`first(Account).f`): (field index, expression)
+    pub scalars: Vec<(usize, Expr)>,
+    pub lists: Vec<ListSlot>,
 }
 
 impl Schema {
@@ -51,24 +64,24 @@ impl Schema {
         self.fields.push((path.to_string(), s));
         self.fields.len() - 1
     }
-    fn list(&mut self, key: &str, var: &str) -> usize {
-        if let Some(i) = self.lists.iter().position(|(k, _, _)| k == key) {
+    fn list(&mut self, key: &str, var: &str, expr: &Expr) -> usize {
+        if let Some(i) = self.lists.iter().position(|l| l.key == key) {
             return i;
         }
-        self.lists.push((key.to_string(), var.to_string(), Schema::default()));
+        self.lists.push(ListSlot { key: key.to_string(), var: var.to_string(), expr: expr.clone(), items: Schema::default() });
         self.lists.len() - 1
     }
     fn at(&self, path: &[usize]) -> &Schema {
         let mut s = self;
         for &k in path {
-            s = &s.lists[k].2;
+            s = &s.lists[k].items;
         }
         s
     }
     fn at_mut(&mut self, path: &[usize]) -> &mut Schema {
         let mut s = self;
         for &k in path {
-            s = &mut s.lists[k].2;
+            s = &mut s.lists[k].items;
         }
         s
     }
@@ -78,10 +91,11 @@ fn type_name(frag: &str, path: &[usize]) -> String {
     format!("%In_{frag}{}", path.iter().map(|k| format!("_{k}")).collect::<String>())
 }
 
-/// A path from a root (a parameter, a loop variable, `viewer`) through fields.
+/// A path from a root (a parameter, a loop variable, `viewer`, `it`) through fields.
 fn path_of(e: &Expr) -> Option<(String, Vec<String>)> {
     match e {
         Expr::Name(n, _) => Some((n.clone(), vec![])),
+        Expr::Dot(f, _) => Some(("it".into(), if f == "id" { vec![] } else { vec![f.clone()] })),
         Expr::Field(o, f, _) => {
             let (r, mut p) = path_of(o)?;
             if f != "id" {
@@ -93,21 +107,69 @@ fn path_of(e: &Expr) -> Option<(String, Vec<String>)> {
     }
 }
 
-fn show(e: &Expr) -> String {
+/// An expression printed in full (a list's identity: the same text is the same list).
+pub fn show(e: &Expr) -> String {
     match e {
         Expr::Name(n, _) => n.clone(),
+        Expr::Dot(f, _) => format!(".{f}"),
         Expr::Field(o, f, _) => format!("{}.{f}", show(o)),
         Expr::Call(f, a, _) => format!("{f}({})", a.iter().map(show).collect::<Vec<_>>().join(", ")),
         Expr::Str(s, _) => format!("{s:?}"),
         Expr::Int(n, _) => n.to_string(),
-        _ => "…".into(),
+        Expr::Bool(b, _) => b.to_string(),
+        Expr::None(_) => "none".into(),
+        Expr::Dur(n, _) => format!("{n}ms"),
+        Expr::Not(x, _) => format!("not {}", show(x)),
+        Expr::Bin(op, l, r, _) => format!("({} {op:?} {})", show(l), show(r)),
+        Expr::If(c, a, b, _) => format!("if {} {{{}}} else {{{}}}", show(c), show(a), show(b)),
+        Expr::List(i, _) => format!("[{}]", i.iter().map(show).collect::<Vec<_>>().join(", ")),
+        Expr::Record(fs, _) => format!("{{{}}}", fs.iter().map(|(k, v)| format!("{k}: {}", show(v))).collect::<Vec<_>>().join(", ")),
+        Expr::Comp(f, x, q, _) => format!("{f}({} for {})", show(x), show(&Expr::Query(q.clone()))),
+        Expr::Query(q) => {
+            let mut s = match &q.source {
+                Source::Entity(e) => e.clone(),
+                Source::Expr(e) => show(e),
+            };
+            if let Some(f) = &q.filter {
+                s += &format!(" where {}", show(f));
+            }
+            for (k, d) in &q.order {
+                s += &format!(" order {}{}", show(k), if *d { " desc" } else { "" });
+            }
+            if let Some(l) = &q.limit {
+                s += &format!(" limit {}", show(l));
+            }
+            if let Some(w) = &q.window_last {
+                s += &format!(" window {}", show(w));
+            }
+            s
+        }
     }
 }
 
-/// Where a root's values live while building.
+/// A list expression as a list: a query with no clauses is its source.
+fn as_list(q: &Query) -> Expr {
+    match &q.source {
+        Source::Expr(e) if q.filter.is_none() && q.order.is_empty() && q.limit.is_none() && q.window_last.is_none() => e.clone(),
+        _ => Expr::Query(Box::new(q.clone())),
+    }
+}
+
+/// The paths a list's query binds from outside it (its arguments): they must be in the record.
+fn list_args(e: &Expr) -> Vec<Expr> {
+    match e {
+        Expr::Call(_, args, _) => args.clone(),
+        Expr::Query(q) => match &q.source {
+            Source::Expr(inner) => list_args(inner),
+            Source::Entity(_) => vec![],
+        },
+        _ => vec![],
+    }
+}
+
 #[derive(Clone)]
 enum Root {
-    /// the record at this pointer (an SSA value), at this place in the register's schema
+    /// the record at this pointer, at this place in the register's schema
     Rec { ptr: String, at: Vec<usize> },
     /// a constant record (a constant list's item, unrolled)
     Const(Expr),
@@ -140,14 +202,26 @@ fn ll_bytes(b: &[u8]) -> String {
     s
 }
 
-/// Module-wide state: constant strings, and the viewer's record (shared by every register).
+/// A register, as generated.
+#[derive(Clone)]
+pub struct RegInfo {
+    pub name: String,
+    pub schema: Schema,
+    pub tmps: usize,
+    pub bits: usize,
+    pub per_viewer: bool,
+    /// the parameter whose row the record is (None for a register keyed by the viewer)
+    pub root: Option<(String, String)>,
+    /// for a `per viewer` register: its splices' registers, in order
+    pub splices: Vec<String>,
+}
+
 pub struct Module {
     pub globals: String,
     strs: HashMap<Vec<u8>, String>,
     pub viewer: Schema,
     pub funcs: String,
-    /// per register: (name, schema, temporaries, most variant bits)
-    pub registers: Vec<(String, Schema, usize, usize)>,
+    pub registers: Vec<RegInfo>,
 }
 
 impl Module {
@@ -170,16 +244,25 @@ struct Gen<'a, 'b> {
     n: usize,
     pending: Vec<u8>,
     schema: Schema,
-    /// the types of the roots in scope (for type_of)
     scope: Scope,
     tmps: usize,
     depth: usize,
-    /// generating the bits function: conditions only, no bytes
     bits: bool,
-    /// most bits the key can have (from the lists' bounds)
     max_bits: usize,
-    /// the product of the bounds of the loops we are in
     mult: usize,
+    per_viewer: bool,
+    /// a `per viewer` register's parameters: holes on them are splices
+    splice_params: Vec<String>,
+    /// the splices' expressions, in order
+    splices: Vec<Expr>,
+}
+
+struct Loop {
+    idx: String,
+    i: String,
+    head: String,
+    done: String,
+    saved: (Scope, usize),
 }
 
 impl<'a, 'b> Gen<'a, 'b> {
@@ -211,6 +294,10 @@ impl<'a, 'b> Gen<'a, 'b> {
     fn tmp(&mut self) -> String {
         let k = self.depth;
         self.depth += 1;
+        if self.bits {
+            // the variant key's function writes no text: no buffers
+            return "%none".into();
+        }
         self.tmps = self.tmps.max(self.depth);
         let (p, t) = (self.v(), self.v());
         self.line(&format!("{p} = getelementptr ptr, ptr %tmps, i64 {k}"));
@@ -221,7 +308,6 @@ impl<'a, 'b> Gen<'a, 'b> {
     fn untmp(&mut self) {
         self.depth -= 1;
     }
-
     fn gep_load(&mut self, ptr: &str, ty: &str, i: usize, shape: Shape) -> String {
         let (p, v) = (self.v(), self.v());
         self.line(&format!("{p} = getelementptr inbounds {ty}, ptr {ptr}, i32 0, i32 {i}"));
@@ -232,7 +318,7 @@ impl<'a, 'b> Gen<'a, 'b> {
     /// A path's value: i64, or a %Str.
     fn load(&mut self, roots: &HashMap<String, Root>, e: &Expr) -> Result<(String, Shape), String> {
         let (root, path) = path_of(e).ok_or_else(|| format!("can't lower `{}` in a fragment yet", show(e)))?;
-        let ty = self.m.type_of(e, &self.scope).map_err(|x| x.msg)?;
+        let ty = self.m.type_of(e, &self.scope).map_err(|x| format!("{}: {}", show(e), x.msg))?;
         let shape = shape_of(&ty);
         let key = std::iter::once(root.clone()).chain(path.iter().cloned()).collect::<Vec<_>>().join(".");
         if root == "viewer" {
@@ -279,11 +365,102 @@ impl<'a, 'b> Gen<'a, 'b> {
         }
     }
 
-    fn value(&mut self, roots: &HashMap<String, Root>, e: &Expr) -> Result<(String, Shape), String> {
-        if let Expr::Int(n, _) = e {
-            return Ok((n.to_string(), Shape::I64));
+    /// The list `list` (a view call or query) in the record of the root its arguments name (or
+    /// the register's own record): (that record's pointer, its place, the list's index).
+    fn list_slot(&mut self, roots: &HashMap<String, Root>, list: &Expr, var: &str) -> Result<(String, Vec<usize>, usize), String> {
+        let mut parent = ("%in".to_string(), vec![]);
+        for a in list_args(list) {
+            if let Some((r, _)) = path_of(&a) {
+                if let Some(Root::Rec { ptr, at }) = roots.get(&r) {
+                    if at.len() >= parent.1.len() {
+                        parent = (ptr.clone(), at.clone());
+                    }
+                }
+                // the argument's value is a field of its record (the loader binds it)
+                if r != "viewer" && roots.contains_key(&r) {
+                    let saved = self.body.len();
+                    self.load(roots, &a)?;
+                    self.body.truncate(saved); // only its place in the record is needed here
+                }
+            }
         }
-        self.load(roots, e)
+        let key = show(list);
+        let li = self.schema.at_mut(&parent.1).list(&key, var, list);
+        Ok((parent.0, parent.1, li))
+    }
+
+    /// Opens a loop over a list's items: the item record's pointer is bound to `var`.
+    fn open_loop(&mut self, roots: &HashMap<String, Root>, list: &Expr, var: &str) -> Result<(HashMap<String, Root>, Loop), String> {
+        let (parent, at, li) = self.list_slot(roots, list, var)?;
+        let slot = self.schema.at(&at).fields.len() + li;
+        let mut item_at = at.clone();
+        item_at.push(li);
+        let (lp, l, items, count) = (self.v(), self.v(), self.v(), self.v());
+        self.line(&format!("{lp} = getelementptr inbounds {}, ptr {parent}, i32 0, i32 {slot}", type_name(&self.frag, &at)));
+        self.line(&format!("{l} = load %List, ptr {lp}"));
+        self.line(&format!("{items} = extractvalue %List {l}, 0"));
+        self.line(&format!("{count} = extractvalue %List {l}, 1"));
+        let idx = format!("%i{}", self.n + 1);
+        self.n += 1;
+        self.line(&format!("{idx} = alloca i64"));
+        self.line(&format!("store i64 0, ptr {idx}"));
+        let (head, item, done) = (self.label("loop"), self.label("item"), self.label("done"));
+        self.line(&format!("br label %{head}"));
+        self.block(&head);
+        let (i, more) = (self.v(), self.v());
+        self.line(&format!("{i} = load i64, ptr {idx}"));
+        self.line(&format!("{more} = icmp slt i64 {i}, {count}"));
+        self.line(&format!("br i1 {more}, label %{item}, label %{done}"));
+        self.block(&item);
+        let ip = self.v();
+        self.line(&format!("{ip} = getelementptr inbounds {}, ptr {items}, i64 {i}", type_name(&self.frag, &item_at)));
+        let mut inner = roots.clone();
+        inner.insert(var.to_string(), Root::Rec { ptr: ip, at: item_at });
+        let ty = match self.m.type_of(list, &self.scope).map_err(|x| x.msg)? {
+            Type::List(t) => *t,
+            t => return Err(format!("not a list: {}", t.show())),
+        };
+        let saved = (self.scope.clone(), self.mult);
+        self.scope = self.scope.with(var, ty);
+        self.mult *= self.m.bound_of(list, &saved.0).ok_or_else(|| format!("an unbounded list: {}", show(list)))? as usize;
+        Ok((inner, Loop { idx, i, head, done, saved }))
+    }
+
+    fn close_loop(&mut self, l: Loop) {
+        let nx = self.v();
+        self.line(&format!("{nx} = add i64 {}, 1", l.i));
+        self.line(&format!("store i64 {nx}, ptr {}", l.idx));
+        self.line(&format!("br label %{}", l.head));
+        self.block(&l.done);
+        (self.scope, self.mult) = l.saved;
+    }
+
+    fn value(&mut self, roots: &HashMap<String, Root>, e: &Expr) -> Result<(String, Shape), String> {
+        match e {
+            Expr::Int(n, _) => Ok((n.to_string(), Shape::I64)),
+            Expr::Call(f, a, _) if f == "count" => {
+                let (parent, at, li) = self.list_slot(roots, &a[0], "it")?;
+                let slot = self.schema.at(&at).fields.len() + li;
+                let (lp, l, n) = (self.v(), self.v(), self.v());
+                self.line(&format!("{lp} = getelementptr inbounds {}, ptr {parent}, i32 0, i32 {slot}", type_name(&self.frag, &at)));
+                self.line(&format!("{l} = load %List, ptr {lp}"));
+                self.line(&format!("{n} = extractvalue %List {l}, 1"));
+                Ok((n, Shape::I64))
+            }
+            Expr::Field(o, _, _) if matches!(&**o, Expr::Call(f, _, _) if f == "first") => {
+                // a value of another query: a scalar field of the register's own record
+                let key = show(e);
+                let ty = self.m.type_of(e, &self.scope).map_err(|x| x.msg)?;
+                let shape = shape_of(&ty);
+                let i = self.schema.field(&key, shape);
+                if !self.schema.scalars.iter().any(|(k, _)| *k == i) {
+                    self.schema.scalars.push((i, e.clone()));
+                }
+                let ty = type_name(&self.frag, &[]);
+                Ok((self.gep_load("%in", &ty, i, shape), shape))
+            }
+            _ => self.load(roots, e),
+        }
     }
 
     /// Text written to `out`, escaped for HTML when `esc`.
@@ -299,19 +476,31 @@ impl<'a, 'b> Gen<'a, 'b> {
             return self.text(roots, r, out, esc);
         }
         self.flush(out);
-        if self.bits {
-            // bits come only from conditions; text is skipped, but its paths still settle the
-            // record's layout in the first pass
+        if let Expr::If(c, a, b, _) = e {
+            let cv = self.cond(roots, c)?;
+            let (lt, lf, le) = (self.label("t"), self.label("f"), self.label("e"));
+            self.line(&format!("br i1 {cv}, label %{lt}, label %{lf}"));
+            self.block(&lt);
+            self.text(roots, a, out, esc)?;
+            self.flush(out);
+            self.line(&format!("br label %{le}"));
+            self.block(&lf);
+            self.text(roots, b, out, esc)?;
+            self.flush(out);
+            self.line(&format!("br label %{le}"));
+            self.block(&le);
             return Ok(());
         }
         let e1 = esc as i64;
         // a helper that takes its argument as text in a temporary buffer
-        let mut via_tmp = |g: &mut Gen, arg: &Expr, call: &dyn Fn(&str) -> String| -> Result<(), String> {
+        let via_tmp = |g: &mut Gen, arg: &Expr, call: &dyn Fn(&str) -> String| -> Result<(), String> {
             let t = g.tmp();
             g.text(roots, arg, &t, false)?;
             g.flush(&t);
             let c = call(&t);
-            g.line(&c);
+            if !g.bits {
+                g.line(&c);
+            }
             g.untmp();
             Ok(())
         };
@@ -319,7 +508,9 @@ impl<'a, 'b> Gen<'a, 'b> {
             Expr::Call(f, args, _) => match f.as_str() {
                 "text" => {
                     let (v, _) = self.value(roots, &args[0])?;
-                    self.line(&format!("call void @etch_int(ptr {out}, i64 {v})"));
+                    if !self.bits {
+                        self.line(&format!("call void @etch_int(ptr {out}, i64 {v})"));
+                    }
                 }
                 "json" | "quote" => via_tmp(self, &args[0], &|t| format!("call void @etch_json(ptr {out}, ptr {t}, i64 {e1})"))?,
                 "sign" => via_tmp(self, &args[0], &|t| format!("call void @etch_sign(ptr %ctx, ptr {out}, ptr {t}, i64 {e1})"))?,
@@ -341,16 +532,41 @@ impl<'a, 'b> Gen<'a, 'b> {
                 "iso" | "date" | "clock" => {
                     let k = ["iso", "date", "clock"].iter().position(|x| x == f).unwrap();
                     let (v, _) = self.value(roots, &args[0])?;
-                    self.line(&format!("call void @etch_time(ptr {out}, i64 {k}, i64 {v}, i64 {e1})"));
+                    if !self.bits {
+                        self.line(&format!("call void @etch_time(ptr {out}, i64 {k}, i64 {v}, i64 {e1})"));
+                    }
+                }
+                "sentence" => {
+                    // the list's items, each written then ended with a NUL (text has none), then joined
+                    let (x, qy) = match &args[0] {
+                        Expr::Comp(c, x, qy, _) if c == "list" => (x, qy),
+                        _ => return Err("sentence takes list(… for …)".into()),
+                    };
+                    let t = self.tmp();
+                    let list = as_list(qy);
+                    let (inner, l) = self.open_loop(roots, &list, "it")?;
+                    self.text(&inner, x, &t, false)?;
+                    self.pending.push(0);
+                    self.flush(&t);
+                    self.close_loop(l);
+                    if !self.bits {
+                        self.line(&format!("call void @etch_sentence(ptr {out}, ptr {t}, i64 {e1})"));
+                    }
+                    self.untmp();
                 }
                 _ => return Err(format!("`{f}` can't be lowered in a fragment yet")),
             },
             Expr::Field(o, f, _) if matches!(&**o, Expr::Name(n, _) if n == "config") => {
                 let k = self.m.app.decls.iter().filter_map(|d| if let Decl::Config { name, .. } = d { Some(name) } else { None }).position(|n| n == f).unwrap();
-                self.line(&format!("call void @etch_config(ptr %ctx, ptr {out}, i64 {k}, i64 {e1})"));
+                if !self.bits {
+                    self.line(&format!("call void @etch_config(ptr %ctx, ptr {out}, i64 {k}, i64 {e1})"));
+                }
             }
             _ => {
                 let (v, shape) = self.value(roots, e)?;
+                if self.bits {
+                    return Ok(());
+                }
                 match shape {
                     Shape::I64 => self.line(&format!("call void @etch_int(ptr {out}, i64 {v})")),
                     Shape::Str => {
@@ -379,6 +595,19 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let (a, b) = (self.cond(roots, l)?, self.cond(roots, r)?);
                 let v = self.v();
                 self.line(&format!("{v} = {} i1 {a}, {b}", if *op == BinOp::And { "and" } else { "or" }));
+                Ok(v)
+            }
+            Expr::Bin(op @ (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), l, r, _) => {
+                let pred = match op {
+                    BinOp::Lt => "slt",
+                    BinOp::Le => "sle",
+                    BinOp::Gt => "sgt",
+                    _ => "sge",
+                };
+                let (a, _) = self.value(roots, l)?;
+                let (b, _) = self.value(roots, r)?;
+                let v = self.v();
+                self.line(&format!("{v} = icmp {pred} i64 {a}, {b}"));
                 Ok(v)
             }
             Expr::Bin(op @ (BinOp::Eq | BinOp::Ne), l, r, _) => {
@@ -418,7 +647,13 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.line(&format!("{v} = icmp {pred} i64 {a}, {b}"));
                 Ok(v)
             }
-            _ => Err(format!("this condition can't be lowered yet: {}", show(e))),
+            // a Bool value: true when not 0
+            _ => {
+                let (x, _) = self.value(roots, e)?;
+                let v = self.v();
+                self.line(&format!("{v} = icmp ne i64 {x}, 0"));
+                Ok(v)
+            }
         }
     }
 
@@ -428,6 +663,17 @@ impl<'a, 'b> Gen<'a, 'b> {
             Expr::Field(o, _, _) | Expr::Not(o, _) => Self::on_viewer(o),
             Expr::Bin(_, l, r, _) => Self::on_viewer(l) || Self::on_viewer(r),
             Expr::Call(_, a, _) => a.iter().any(Self::on_viewer),
+            _ => false,
+        }
+    }
+
+    fn mentions(e: &Expr, names: &[String]) -> bool {
+        match e {
+            Expr::Name(n, _) => names.contains(n),
+            Expr::Field(o, _, _) | Expr::Not(o, _) => Self::mentions(o, names),
+            Expr::Bin(_, l, r, _) => Self::mentions(l, names) || Self::mentions(r, names),
+            Expr::Call(_, a, _) => a.iter().any(|x| Self::mentions(x, names)),
+            Expr::If(c, a, b, _) => Self::mentions(c, names) || Self::mentions(a, names) || Self::mentions(b, names),
             _ => false,
         }
     }
@@ -450,13 +696,22 @@ impl<'a, 'b> Gen<'a, 'b> {
                             continue;
                         }
                     }
-                    let t = self.m.type_of(e, &self.scope).map_err(|x| x.msg)?;
+                    if self.per_viewer && Self::mentions(e, &self.splice_params) {
+                        // a splice: its place is marked; it's its own register, keyed by the parameter
+                        self.flush(out);
+                        if !self.bits {
+                            self.line(&format!("call void @etch_split(ptr %splits, ptr {out})"));
+                            self.splices.push(e.clone());
+                        }
+                        continue;
+                    }
+                    let t = self.m.type_of(e, &self.scope).map_err(|x| format!("{}: {}", show(e), x.msg))?;
                     self.text(roots, e, out, t.strip_opt() != &Type::Html)?;
                 }
                 TNode::If(c, a, b) => {
                     self.flush(out);
                     let cv = self.cond(roots, c)?;
-                    if self.bits && Self::on_viewer(c) {
+                    if self.bits && !self.per_viewer && Self::on_viewer(c) {
                         self.max_bits += self.mult;
                         let (k, z, s, o) = (self.v(), self.v(), self.v(), self.v());
                         self.line(&format!("{k} = load i64, ptr %key"));
@@ -493,69 +748,15 @@ impl<'a, 'b> Gen<'a, 'b> {
                             continue;
                         }
                     }
-                    // a list of rows: its array in the record of the root its arguments name
                     self.flush(out);
-                    let (parent, at) = self.list_parent(roots, list);
-                    let key = show(list);
-                    let li = self.schema.at_mut(&at).list(&key, v);
-                    let slot = self.schema.at(&at).fields.len() + li;
-                    let mut item_at = at.clone();
-                    item_at.push(li);
-                    let (lp, l, items, count) = (self.v(), self.v(), self.v(), self.v());
-                    self.line(&format!("{lp} = getelementptr inbounds {}, ptr {parent}, i32 0, i32 {slot}", type_name(&self.frag, &at)));
-                    self.line(&format!("{l} = load %List, ptr {lp}"));
-                    self.line(&format!("{items} = extractvalue %List {l}, 0"));
-                    self.line(&format!("{count} = extractvalue %List {l}, 1"));
-                    // the index lives in a stack slot (mem2reg makes it a register)
-                    let idx = format!("%i{}", self.n + 1);
-                    self.n += 1;
-                    self.line(&format!("{idx} = alloca i64"));
-                    self.line(&format!("store i64 0, ptr {idx}"));
-                    let (head, item, done) = (self.label("loop"), self.label("item"), self.label("done"));
-                    self.line(&format!("br label %{head}"));
-                    self.block(&head);
-                    let (i, more) = (self.v(), self.v());
-                    self.line(&format!("{i} = load i64, ptr {idx}"));
-                    self.line(&format!("{more} = icmp slt i64 {i}, {count}"));
-                    self.line(&format!("br i1 {more}, label %{item}, label %{done}"));
-                    self.block(&item);
-                    let ip = self.v();
-                    self.line(&format!("{ip} = getelementptr inbounds {}, ptr {items}, i64 {i}", type_name(&self.frag, &item_at)));
-                    let mut inner = roots.clone();
-                    inner.insert(v.clone(), Root::Rec { ptr: ip, at: item_at });
-                    let ty = match self.m.type_of(list, &self.scope).map_err(|x| x.msg)? {
-                        Type::List(t) => *t,
-                        t => return Err(format!("not a list: {}", t.show())),
-                    };
-                    let saved = (self.scope.clone(), self.mult);
-                    self.scope = self.scope.with(v, ty);
-                    self.mult *= self.m.bound_of(list, &saved.0).ok_or("an unbounded list")? as usize;
+                    let (inner, l) = self.open_loop(roots, list, v)?;
                     self.nodes(&inner, body, out)?;
                     self.flush(out);
-                    (self.scope, self.mult) = saved;
-                    let nx = self.v();
-                    self.line(&format!("{nx} = add i64 {i}, 1"));
-                    self.line(&format!("store i64 {nx}, ptr {idx}"));
-                    self.line(&format!("br label %{head}"));
-                    self.block(&done);
+                    self.close_loop(l);
                 }
             }
         }
         Ok(())
-    }
-
-    /// The record a list hangs off: the record of the root its arguments name.
-    fn list_parent(&self, roots: &HashMap<String, Root>, list: &Expr) -> (String, Vec<usize>) {
-        if let Expr::Call(_, args, _) = list {
-            for a in args {
-                if let Some((r, _)) = path_of(a) {
-                    if let Some(Root::Rec { ptr, at }) = roots.get(&r) {
-                        return (ptr.clone(), at.clone());
-                    }
-                }
-            }
-        }
-        ("%in".to_string(), vec![])
     }
 }
 
@@ -564,24 +765,24 @@ fn types(frag: &str, s: &Schema, at: &mut Vec<usize>, out: &mut String) {
     let mut parts: Vec<&str> = s.fields.iter().map(|(_, sh)| if *sh == Shape::Str { "%Str" } else { "i64" }).collect();
     parts.extend(s.lists.iter().map(|_| "%List"));
     let _ = writeln!(out, "{} = type {{ {} }}", type_name(frag, at), parts.join(", "));
-    for (k, (_, _, inner)) in s.lists.iter().enumerate() {
+    for (k, l) in s.lists.iter().enumerate() {
         at.push(k);
-        types(frag, inner, at, out);
+        types(frag, &l.items, at, out);
         at.pop();
     }
 }
 
-/// One register's two functions.
-fn register(m: &Model, md: &mut Module, name: &str) -> Result<(), String> {
-    let (params, body) = match m.fragments.get(name) {
-        Some(Decl::Fragment { params, body, .. }) => (params, body),
-        _ => return Err(format!("no fragment {name}")),
+/// One register's functions: its variant key and its builder (its loader comes after, from the
+/// settled record). Its splices are registers too.
+fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[TNode], per_viewer: bool) -> Result<(), String> {
+    let roots: HashMap<String, Root> = if per_viewer {
+        HashMap::new()
+    } else {
+        params.iter().map(|p| (p.name.clone(), Root::Rec { ptr: "%in".into(), at: vec![] })).collect()
     };
-    let nodes = inline::nodes(m, &body.nodes, &HashMap::new());
-    let roots: HashMap<String, Root> = params.iter().map(|p| (p.name.clone(), Root::Rec { ptr: "%in".into(), at: vec![] })).collect();
     let mut schema = Schema::default();
     let mut out = (String::new(), String::new(), 0usize, 0usize);
-    // pass 1 settles the record's layout (fields and lists in first-use order); pass 2 emits
+    let mut splices = vec![];
     for pass in 0..2 {
         for bits in [true, false] {
             let mut g = Gen {
@@ -598,14 +799,17 @@ fn register(m: &Model, md: &mut Module, name: &str) -> Result<(), String> {
                 bits,
                 max_bits: 0,
                 mult: 1,
+                per_viewer,
+                splice_params: if per_viewer { params.iter().map(|p| p.name.clone()).collect() } else { vec![] },
+                splices: vec![],
             };
             if bits {
                 g.line("%key = alloca i64");
                 g.line("store i64 0, ptr %key");
             }
-            g.nodes(&roots, &nodes, "%out")?;
+            g.nodes(&roots, nodes, "%out")?;
             g.flush("%out");
-            let (b, sch, tmps, maxb) = (g.body, g.schema, g.tmps, g.max_bits);
+            let (b, sch, tmps, maxb, sp) = (g.body, g.schema, g.tmps, g.max_bits, g.splices);
             if pass == 0 {
                 schema = sch;
                 continue;
@@ -616,6 +820,7 @@ fn register(m: &Model, md: &mut Module, name: &str) -> Result<(), String> {
             } else {
                 out.1 = b;
                 out.2 = tmps;
+                splices = sp;
             }
         }
     }
@@ -626,107 +831,88 @@ fn register(m: &Model, md: &mut Module, name: &str) -> Result<(), String> {
     types(name, &schema, &mut vec![], &mut f);
     let _ = writeln!(f, "\n; {name}: its variant key ({} bits at most)", out.3);
     let _ = writeln!(f, "define i64 @etch_bits_{name}(ptr noalias %in, ptr noalias %viewer) {{\nentry:\n{}  %r = load i64, ptr %key\n  ret i64 %r\n}}\n", out.0);
-    let _ = writeln!(f, "; {name}: its bytes for a viewer ({} temporary buffers)", out.2);
-    let _ = writeln!(f, "define void @etch_build_{name}(ptr noalias %ctx, ptr noalias %in, ptr noalias %viewer, ptr noalias %out, ptr noalias %tmps) {{\nentry:\n{}  ret void\n}}\n", out.1);
+    let _ = writeln!(f, "; {name}: its bytes ({} temporary buffers)", out.2);
+    let _ = writeln!(f, "define void @etch_build_{name}(ptr noalias %ctx, ptr noalias %in, ptr noalias %viewer, ptr noalias %out, ptr noalias %tmps, ptr noalias %splits) {{\nentry:\n{}  ret void\n}}\n", out.1);
     md.funcs.push_str(&f);
-    md.registers.push((name.to_string(), schema, out.2, out.3));
+    let root = if per_viewer {
+        None
+    } else {
+        match params.first().map(|p| (p.name.clone(), p.ty.strip_opt().clone())) {
+            Some((r, Type::Ref(e))) if params.len() == 1 => Some((r, e)),
+            _ => return Err(format!("fragment {name}: a register needs one row parameter, or `per viewer`")),
+        }
+    };
+    let mut names = vec![];
+    for (i, e) in splices.iter().enumerate() {
+        // the splice's own register: the hole alone, keyed by the parameter it reads
+        let sname = format!("{name}__s{i}");
+        let used: Vec<Param> = params.iter().filter(|p| Gen::mentions(e, std::slice::from_ref(&p.name))).cloned().collect();
+        register(m, md, &sname, &used, &[TNode::Hole(e.clone())], false)?;
+        names.push(sname);
+    }
+    md.registers.push(RegInfo { name: name.to_string(), schema, tmps: out.2, bits: out.3, per_viewer, root, splices: names });
     Ok(())
 }
 
-/// `etch_load_<f>(ctx, db, key, rec, arena) -> i1`: fills the register's record from SQLite (its
-/// row by id, then each list with its own query, items in an array of the list's bound, allocated
-/// once from the arena). False when the row is gone.
-fn loader(m: &Model, md: &mut Module, name: &str, schema: &Schema, qid: &mut usize) -> Result<String, String> {
-    let params = match m.fragments.get(name) {
-        Some(Decl::Fragment { params, .. }) => params,
-        _ => return Err(format!("no fragment {name}")),
-    };
-    let (root, ent) = match params.first().map(|p| (p.name.clone(), p.ty.strip_opt().clone())) {
-        Some((r, Type::Ref(e))) if params.len() == 1 => (r, e),
-        _ => return Err(format!("fragment {name}: a register's loader needs one row parameter")),
-    };
-    let mut b = String::new();
-    let mut n = 0usize;
-    let mut v = || {
-        n += 1;
-        format!("%l{n}")
-    };
-    let ty = type_name(name, &[]);
-    let _ = writeln!(b, "define i1 @etch_load_{name}(ptr noalias %ctx, ptr noalias %db, i64 %key, ptr noalias %rec, ptr noalias %arena) {{\nentry:");
-    // the record's own fields: its row's id, or a SELECT by id
-    let only_id = schema.fields.iter().all(|(p, _)| p == &root);
-    if only_id {
-        for (i, _) in schema.fields.iter().enumerate() {
-            let p = v();
-            let _ = writeln!(b, "  {p} = getelementptr inbounds {ty}, ptr %rec, i32 0, i32 {i}\n  store i64 %key, ptr {p}");
-        }
-    } else {
-        let paths: Vec<String> = schema.fields.iter().map(|(p, _)| p.clone()).collect();
-        let sel = crate::sql::row_select(m, &ent, &root, &paths)?;
-        let g = md.str_const(sel.sql.as_bytes());
-        *qid += 1;
-        let (st, rc, ok) = (v(), v(), v());
-        let _ = writeln!(b, "  ; {}", sel.sql);
-        let _ = writeln!(b, "  {st} = call ptr @etch_stmt(ptr %db, i64 {qid}, ptr {g}, i64 {})", sel.sql.len());
-        let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr {st}, i32 1, i64 %key)");
-        let _ = writeln!(b, "  {rc} = call i32 @sqlite3_step(ptr {st})\n  {ok} = icmp eq i32 {rc}, 100\n  br i1 {ok}, label %row, label %gone");
-        let _ = writeln!(b, "gone:\n  call i32 @sqlite3_reset(ptr {st})\n  ret i1 false\nrow:");
-        for (i, (_, sh)) in schema.fields.iter().enumerate() {
-            let p = v();
-            let _ = writeln!(b, "  {p} = getelementptr inbounds {ty}, ptr %rec, i32 0, i32 {i}");
-            match sh {
-                Shape::I64 => {
-                    let x = v();
-                    let _ = writeln!(b, "  {x} = call i64 @etch_col_i64(ptr {st}, i32 {i})\n  store i64 {x}, ptr {p}");
-                }
-                Shape::Str => {
-                    let _ = writeln!(b, "  call void @etch_col_str(ptr {st}, i32 {i}, ptr %arena, ptr {p})");
-                }
-            }
-        }
-        let _ = writeln!(b, "  call i32 @sqlite3_reset(ptr {st})");
-    }
-    // each list: its query, bound to the root (its key) or to constants
+/// The loader's code for a record's lists: each list's query, bound to the key or to fields of
+/// the record it hangs off; items fill an array of the list's bound; nested lists per item.
+fn emit_lists(m: &Model, md: &mut Module, b: &mut String, n: &mut usize, qid: &mut usize, reg: &RegInfo, rec: &str, at: &[usize]) -> Result<(), String> {
+    let schema = reg.schema.at(at).clone();
     let nf = schema.fields.len();
-    for (k, (list_src, var, items)) in schema.lists.iter().enumerate() {
-        let list_expr = list_expr_of(m, name, list_src).ok_or_else(|| format!("can't find the list {list_src} in {name}"))?;
-        let paths: Vec<String> = items.fields.iter().map(|(p, _)| p.clone()).collect();
-        let scope = Scope::of(params);
-        let sel = crate::sql::list_select(m, &list_expr, var, &paths, &scope)?;
-        if !items.lists.is_empty() {
-            return Err(format!("{name}: a list inside a list's items isn't lowered yet"));
-        }
-        let bound = m.bound_of(&list_expr, &scope).ok_or("an unbounded list")?;
-        let ity = type_name(name, &[k]);
+    for (k, slot) in schema.lists.iter().enumerate() {
+        let mut v = || {
+            *n += 1;
+            format!("%l{}", *n)
+        };
+        let paths: Vec<String> = slot.items.fields.iter().map(|(p, _)| p.clone()).collect();
+        let scope = Scope::default();
+        let sel = crate::sql::list_select(m, &slot.expr, &paths, &scope)?;
+        let bound = m.bound_of(&slot.expr, &scope).ok_or_else(|| format!("an unbounded list: {}", slot.key))?;
+        let mut item_at = at.to_vec();
+        item_at.push(k);
+        let ity = type_name(&reg.name, &item_at);
+        let pty = type_name(&reg.name, at);
         let g = md.str_const(sel.sql.as_bytes());
         *qid += 1;
-        let (st, size, arr) = (v(), v(), v());
+        let (st, size, sz, arr) = (v(), v(), v(), v());
         let _ = writeln!(b, "  ; {}", sel.sql);
         let _ = writeln!(b, "  {st} = call ptr @etch_stmt(ptr %db, i64 {qid}, ptr {g}, i64 {})", sel.sql.len());
         for (bi, bind) in sel.binds.iter().enumerate() {
-            match bind {
-                crate::sql::Bind::Path(Expr::Name(r, _)) if *r == root => {
-                    let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr {st}, i32 {}, i64 %key)", bi + 1);
+            let crate::sql::Bind::Path(e) = bind;
+            let (root, path) = path_of(e).ok_or("a query's parameter isn't a path")?;
+            let is_key = (path.is_empty() && reg.root.as_ref().map(|(r, _)| *r == root).unwrap_or(false)) || (root == "viewer" && path.is_empty() && reg.per_viewer);
+            if is_key {
+                let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr {st}, i32 {}, i64 %key)", bi + 1);
+                continue;
+            }
+            // a field of the record the list hangs off
+            let key = std::iter::once(root).chain(path).collect::<Vec<_>>().join(".");
+            let fi = schema.fields.iter().position(|(p, _)| *p == key).ok_or_else(|| format!("{}: the query's parameter {key} isn't in the record", reg.name))?;
+            let (p, x) = (v(), v());
+            let _ = writeln!(b, "  {p} = getelementptr inbounds {pty}, ptr {rec}, i32 0, i32 {fi}");
+            match schema.fields[fi].1 {
+                Shape::I64 => {
+                    let _ = writeln!(b, "  {x} = load i64, ptr {p}\n  call i32 @sqlite3_bind_int64(ptr {st}, i32 {}, i64 {x})", bi + 1);
                 }
-                other => return Err(format!("{name}: this query's parameter isn't lowered yet: {other:?}")),
+                Shape::Str => {
+                    let _ = writeln!(b, "  call void @etch_bind_str(ptr {st}, i32 {}, ptr {p})", bi + 1);
+                }
             }
         }
         // the array, sized by the list's bound: allocated once
-        let _ = writeln!(b, "  {size} = getelementptr {ity}, ptr null, i64 {bound}");
-        let sz = v();
-        let _ = writeln!(b, "  {sz} = ptrtoint ptr {size} to i64\n  {arr} = call ptr @etch_alloc(ptr %arena, i64 {sz})");
-        let idx = format!("%li{k}");
-        let _ = writeln!(b, "  {idx} = alloca i64\n  store i64 0, ptr {idx}\n  br label %lhead{k}");
-        let (rc, ok, i, full, it) = (v(), v(), v(), v(), v());
-        let _ = writeln!(b, "lhead{k}:\n  {i} = load i64, ptr {idx}\n  {full} = icmp sge i64 {i}, {bound}\n  br i1 {full}, label %ldone{k}, label %lstep{k}");
-        let _ = writeln!(b, "lstep{k}:\n  {rc} = call i32 @sqlite3_step(ptr {st})\n  {ok} = icmp eq i32 {rc}, 100\n  br i1 {ok}, label %litem{k}, label %ldone{k}");
-        let _ = writeln!(b, "litem{k}:\n  {it} = getelementptr inbounds {ity}, ptr {arr}, i64 {i}");
-        for (fi, (_, sh)) in items.fields.iter().enumerate() {
-            let p = v();
+        let _ = writeln!(b, "  {size} = getelementptr {ity}, ptr null, i64 {bound}\n  {sz} = ptrtoint ptr {size} to i64\n  {arr} = call ptr @etch_alloc(ptr %arena, i64 {sz})");
+        let idx = v();
+        let (head, step, item, done) = (format!("lh{idx}").replace('%', ""), format!("ls{idx}").replace('%', ""), format!("li{idx}").replace('%', ""), format!("ld{idx}").replace('%', ""));
+        let (rc, ok, i, full, it, nx, cnt, l1, l2, lp) = (v(), v(), v(), v(), v(), v(), v(), v(), v(), v());
+        let _ = writeln!(b, "  {idx} = alloca i64\n  store i64 0, ptr {idx}\n  br label %{head}");
+        let _ = writeln!(b, "{head}:\n  {i} = load i64, ptr {idx}\n  {full} = icmp sge i64 {i}, {bound}\n  br i1 {full}, label %{done}, label %{step}");
+        let _ = writeln!(b, "{step}:\n  {rc} = call i32 @sqlite3_step(ptr {st})\n  {ok} = icmp eq i32 {rc}, 100\n  br i1 {ok}, label %{item}, label %{done}");
+        let _ = writeln!(b, "{item}:\n  {it} = getelementptr inbounds {ity}, ptr {arr}, i64 {i}");
+        for (fi, (_, sh)) in slot.items.fields.iter().enumerate() {
+            let (p, x) = (v(), v());
             let _ = writeln!(b, "  {p} = getelementptr inbounds {ity}, ptr {it}, i32 0, i32 {fi}");
             match sh {
                 Shape::I64 => {
-                    let x = v();
                     let _ = writeln!(b, "  {x} = call i64 @etch_col_i64(ptr {st}, i32 {fi})\n  store i64 {x}, ptr {p}");
                 }
                 Shape::Str => {
@@ -734,46 +920,80 @@ fn loader(m: &Model, md: &mut Module, name: &str, schema: &Schema, qid: &mut usi
                 }
             }
         }
-        let nx = v();
-        let _ = writeln!(b, "  {nx} = add i64 {i}, 1\n  store i64 {nx}, ptr {idx}\n  br label %lhead{k}");
-        let (lp, cnt, l1, l2) = (v(), v(), v(), v());
-        let _ = writeln!(b, "ldone{k}:\n  call i32 @sqlite3_reset(ptr {st})\n  {cnt} = load i64, ptr {idx}");
+        let _ = writeln!(b, "  {nx} = add i64 {i}, 1\n  store i64 {nx}, ptr {idx}\n  br label %{head}");
+        let _ = writeln!(b, "{done}:\n  call i32 @sqlite3_reset(ptr {st})\n  {cnt} = load i64, ptr {idx}");
         let _ = writeln!(b, "  {l1} = insertvalue %List undef, ptr {arr}, 0\n  {l2} = insertvalue %List {l1}, i64 {cnt}, 1");
-        let _ = writeln!(b, "  {lp} = getelementptr inbounds {ty}, ptr %rec, i32 0, i32 {}\n  store %List {l2}, ptr {lp}", nf + k);
+        let _ = writeln!(b, "  {lp} = getelementptr inbounds {pty}, ptr {rec}, i32 0, i32 {}\n  store %List {l2}, ptr {lp}", nf + k);
+        // nested lists: per item, after the statement is reset (each has its own statement)
+        if !slot.items.lists.is_empty() {
+            let (j, jj, more, ip) = (v(), v(), v(), v());
+            let (nh, nb, nd) = (format!("nh{}", *n), format!("nb{}", *n), format!("nd{}", *n));
+            let _ = writeln!(b, "  {j} = alloca i64\n  store i64 0, ptr {j}\n  br label %{nh}");
+            let _ = writeln!(b, "{nh}:\n  {jj} = load i64, ptr {j}\n  {more} = icmp slt i64 {jj}, {cnt}\n  br i1 {more}, label %{nb}, label %{nd}");
+            let _ = writeln!(b, "{nb}:\n  {ip} = getelementptr inbounds {ity}, ptr {arr}, i64 {jj}");
+            emit_lists(m, md, b, n, qid, reg, &ip, &item_at)?;
+            let nx2 = format!("%l{}", {
+                *n += 1;
+                *n
+            });
+            let _ = writeln!(b, "  {nx2} = add i64 {jj}, 1\n  store i64 {nx2}, ptr {j}\n  br label %{nh}");
+            let _ = writeln!(b, "{nd}:");
+        }
     }
+    Ok(())
+}
+
+/// `etch_load_<f>(ctx, db, key, rec, arena) -> i1`: fills the register's record from SQLite. False
+/// when its row is gone.
+fn loader(m: &Model, md: &mut Module, reg: &RegInfo, qid: &mut usize) -> Result<String, String> {
+    let mut b = String::new();
+    let mut n = 0usize;
+    let ty = type_name(&reg.name, &[]);
+    let _ = writeln!(b, "define i1 @etch_load_{}(ptr noalias %ctx, ptr noalias %db, i64 %key, ptr noalias %rec, ptr noalias %arena) {{\nentry:", reg.name);
+    let schema = &reg.schema;
+    let root_name = reg.root.as_ref().map(|(r, _)| r.clone()).unwrap_or_default();
+    let only_key = schema.scalars.is_empty() && schema.fields.iter().all(|(p, _)| *p == root_name);
+    if only_key {
+        for (i, _) in schema.fields.iter().enumerate() {
+            let _ = writeln!(b, "  %k{i} = getelementptr inbounds {ty}, ptr %rec, i32 0, i32 {i}\n  store i64 %key, ptr %k{i}");
+        }
+    } else {
+        let paths: Vec<String> = schema.fields.iter().map(|(p, _)| p.clone()).collect();
+        let ent = reg.root.as_ref().map(|(_, e)| e.as_str());
+        let sel = crate::sql::row_select(m, ent, &root_name, &paths, &schema.scalars)?;
+        let g = md.str_const(sel.sql.as_bytes());
+        *qid += 1;
+        let _ = writeln!(b, "  ; {}", sel.sql);
+        let _ = writeln!(b, "  %st = call ptr @etch_stmt(ptr %db, i64 {qid}, ptr {g}, i64 {})", sel.sql.len());
+        if ent.is_some() {
+            let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr %st, i32 1, i64 %key)");
+        }
+        let _ = writeln!(b, "  %rc = call i32 @sqlite3_step(ptr %st)\n  %ok = icmp eq i32 %rc, 100\n  br i1 %ok, label %row, label %gone");
+        let _ = writeln!(b, "gone:\n  call i32 @sqlite3_reset(ptr %st)\n  ret i1 false\nrow:");
+        for (i, (_, sh)) in schema.fields.iter().enumerate() {
+            let _ = writeln!(b, "  %f{i} = getelementptr inbounds {ty}, ptr %rec, i32 0, i32 {i}");
+            match sh {
+                Shape::I64 => {
+                    let _ = writeln!(b, "  %x{i} = call i64 @etch_col_i64(ptr %st, i32 {i})\n  store i64 %x{i}, ptr %f{i}");
+                }
+                Shape::Str => {
+                    let _ = writeln!(b, "  call void @etch_col_str(ptr %st, i32 {i}, ptr %arena, ptr %f{i})");
+                }
+            }
+        }
+        let _ = writeln!(b, "  call i32 @sqlite3_reset(ptr %st)");
+    }
+    emit_lists(m, md, &mut b, &mut n, qid, reg, "%rec", &[])?;
     let _ = writeln!(b, "  ret i1 true\n}}\n");
     Ok(b)
 }
 
-/// The list expression a schema's list came from (its text is the key): found again in the
-/// fragment's inlined template.
-fn list_expr_of(m: &Model, frag: &str, key: &str) -> Option<Expr> {
-    let body = match m.fragments.get(frag) {
-        Some(Decl::Fragment { body, .. }) => body,
-        _ => return None,
-    };
-    fn find(ns: &[TNode], key: &str) -> Option<Expr> {
-        for n in ns {
-            match n {
-                TNode::For(_, l, _, body) => {
-                    if show(l) == key {
-                        return Some(l.clone());
-                    }
-                    if let Some(e) = find(body, key) {
-                        return Some(e);
-                    }
-                }
-                TNode::If(_, a, b) => {
-                    if let Some(e) = find(a, key).or_else(|| find(b, key)) {
-                        return Some(e);
-                    }
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-    find(&inline::nodes(m, &body.nodes, &HashMap::new()), key)
+/// The viewer's record: `etch_load_viewer(ctx, db, key, rec, arena) -> i1`.
+fn viewer_loader(m: &Model, md: &mut Module, qid: &mut usize) -> Result<String, String> {
+    let ent = m.viewer_entity().ok_or("no viewer declaration")?.to_string();
+    let reg = RegInfo { name: "viewer".into(), schema: md.viewer.clone(), tmps: 0, bits: 0, per_viewer: false, root: Some(("viewer".into(), ent)), splices: vec![] };
+    let s = loader(m, md, &reg, qid)?;
+    Ok(s.replace("%In_viewer", "%Viewer"))
 }
 
 const DECLS: &str = r#"%Str = type { ptr, i64 }
@@ -789,6 +1009,8 @@ declare void @etch_asset(ptr, ptr, ptr, i64)
 declare void @etch_first_word(ptr, ptr, i64)
 declare void @etch_initials(ptr, ptr, i64)
 declare void @etch_lower(ptr, ptr, i64)
+declare void @etch_sentence(ptr, ptr, i64)
+declare void @etch_split(ptr, ptr)
 declare void @etch_replace(ptr, ptr, ptr, i64, ptr, i64, i64)
 declare void @etch_time(ptr, i64, i64, i64)
 declare void @etch_config(ptr, ptr, i64, i64)
@@ -796,6 +1018,7 @@ declare i1 @etch_str_eq(ptr, i64, ptr, i64)
 declare ptr @etch_stmt(ptr, i64, ptr, i64)
 declare i64 @etch_col_i64(ptr, i32)
 declare void @etch_col_str(ptr, i32, ptr, ptr)
+declare void @etch_bind_str(ptr, i32, ptr)
 declare ptr @etch_alloc(ptr, i64)
 declare i32 @sqlite3_bind_int64(ptr, i32, i64)
 declare i32 @sqlite3_step(ptr)
@@ -807,15 +1030,21 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
     let mut md = Module { globals: String::new(), strs: HashMap::new(), viewer: Schema::default(), funcs: String::new(), registers: vec![] };
     md.viewer.field("viewer", Shape::I64);
     for r in registers {
-        register(m, &mut md, r)?;
+        let (params, body, per_viewer) = match m.fragments.get(*r) {
+            Some(Decl::Fragment { params, body, per_viewer, .. }) => (params, body, *per_viewer),
+            _ => return Err(format!("no fragment {r}")),
+        };
+        let nodes = inline::nodes(m, &body.nodes, &HashMap::new());
+        register(m, &mut md, r, params, &nodes, per_viewer)?;
     }
-    // each register's loader, now that its record's layout is settled
     let mut qid = 0usize;
     let regs = md.registers.clone();
-    for (name, schema, _, _) in &regs {
-        let f = loader(m, &mut md, name, schema, &mut qid)?;
+    for reg in &regs {
+        let f = loader(m, &mut md, reg, &mut qid)?;
         md.funcs.push_str(&f);
     }
+    let vl = viewer_loader(m, &mut md, &mut qid)?;
+    md.funcs.push_str(&vl);
     let mut ll = String::new();
     let _ = writeln!(ll, "; generated by etchc from the app's spec: do not edit\n{datalayout}\n{triple}\n");
     ll.push_str(DECLS);
@@ -830,7 +1059,7 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
 }
 
 fn rust_name(path: &str) -> String {
-    path.replace('.', "_")
+    path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect::<String>().trim_matches('_').replace("__", "_")
 }
 
 /// `#[repr(C)]` structs matching the records, and the generated functions' declarations.
@@ -839,31 +1068,33 @@ fn rust_header(md: &Module) -> String {
     fn rec(s: &mut String, name: &str, sch: &Schema, at: &mut Vec<usize>) {
         let ty = format!("In_{name}{}", at.iter().map(|k| format!("_{k}")).collect::<String>());
         let _ = writeln!(s, "#[repr(C)]\n#[derive(Clone, Copy)]\npub struct {} {{", if name.is_empty() { "Viewer".to_string() } else { ty.clone() });
-        for (p, sh) in &sch.fields {
-            let _ = writeln!(s, "    pub {}: {},", rust_name(p), if *sh == Shape::Str { "Str" } else { "i64" });
+        for (i, (p, sh)) in sch.fields.iter().enumerate() {
+            let _ = writeln!(s, "    /// {p}\n    pub f{i}_{}: {},", rust_name(p), if *sh == Shape::Str { "Str" } else { "i64" });
         }
-        for (k, (l, _, _)) in sch.lists.iter().enumerate() {
-            let _ = writeln!(s, "    /// {l}\n    pub list{k}: List,");
+        for (k, l) in sch.lists.iter().enumerate() {
+            let _ = writeln!(s, "    /// {}\n    pub list{k}: List,", l.key);
         }
         let _ = writeln!(s, "}}\n");
-        for (k, (_, _, inner)) in sch.lists.iter().enumerate() {
+        for (k, l) in sch.lists.iter().enumerate() {
             at.push(k);
-            rec(s, name, inner, at);
+            rec(s, name, &l.items, at);
             at.pop();
         }
     }
     rec(&mut s, "", &md.viewer, &mut vec![]);
     let _ = writeln!(s, "extern \"C\" {{");
-    for (name, _, _, _) in &md.registers {
-        let _ = writeln!(s, "    pub fn etch_bits_{name}(input: *const In_{name}, viewer: *const Viewer) -> i64;");
+    let _ = writeln!(s, "    pub fn etch_load_viewer(ctx: *const etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, rec: *mut Viewer, arena: *mut etch_rt::abi::Arena) -> bool;");
+    for r in &md.registers {
+        let name = &r.name;
         let _ = writeln!(s, "    pub fn etch_load_{name}(ctx: *const etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, rec: *mut In_{name}, arena: *mut etch_rt::abi::Arena) -> bool;");
-        let _ = writeln!(s, "    pub fn etch_build_{name}(ctx: *const etch_rt::abi::Ctx, input: *const In_{name}, viewer: *const Viewer, out: *mut Vec<u8>, tmps: *const *mut Vec<u8>);");
+        let _ = writeln!(s, "    pub fn etch_bits_{name}(input: *const In_{name}, viewer: *const Viewer) -> i64;");
+        let _ = writeln!(s, "    pub fn etch_build_{name}(ctx: *const etch_rt::abi::Ctx, input: *const In_{name}, viewer: *const Viewer, out: *mut Vec<u8>, tmps: *const *mut Vec<u8>, splits: *mut Vec<usize>);");
     }
     let _ = writeln!(s, "}}\n");
-    for (name, sch, tmps, bits) in &md.registers {
-        let _ = writeln!(s, "/// {name}: {tmps} temporary buffers, a variant key of at most {bits} bits");
-        let _ = writeln!(s, "pub const TMPS_{}: usize = {tmps};", name.to_uppercase());
-        rec(&mut s, name, sch, &mut vec![]);
+    for r in &md.registers {
+        let _ = writeln!(s, "/// {}: {} temporary buffers, a variant key of at most {} bits{}", r.name, r.tmps, r.bits, if r.per_viewer { ", keyed by the viewer" } else { "" });
+        let _ = writeln!(s, "pub const TMPS_{}: usize = {};", r.name.to_uppercase(), r.tmps);
+        rec(&mut s, &r.name, &r.schema, &mut vec![]);
     }
     s
 }

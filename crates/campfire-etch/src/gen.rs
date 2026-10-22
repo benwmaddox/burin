@@ -5,10 +5,11 @@
 #![allow(clippy::all, non_camel_case_types, dead_code)]
 include!(env!("ETCH_GEN_RS"));
 
-use crate::db::{Id, User};
+use crate::db::Id;
 use etch_rt::abi::{Arena, Ctx, Db};
 use rusqlite::Connection;
 use std::cell::RefCell;
+use std::mem::MaybeUninit;
 
 thread_local! {
     /// this thread's prepared statements, for the connection they were prepared on
@@ -33,73 +34,105 @@ fn with<T>(c: &Connection, f: impl FnOnce(*mut Db, *mut Arena) -> T) -> T {
     })
 }
 
-pub fn viewer(u: &User) -> Viewer {
-    Viewer { viewer: u.id, viewer_role: Str::of(&u.role) }
-}
-
 fn tmps(n: usize) -> (Vec<Vec<u8>>, Vec<*mut Vec<u8>>) {
     let mut bufs: Vec<Vec<u8>> = (0..n.max(1)).map(|_| Vec::with_capacity(256)).collect();
     let ptrs = bufs.iter_mut().map(|b| b as *mut Vec<u8>).collect();
     (bufs, ptrs)
 }
 
-/// A message's variants for these viewers: its record loaded once (etch_load_message), then a
-/// variant per distinct key (etch_bits_message), built by etch_build_message. None if it's gone.
-pub fn message_variants(c: &Connection, ctx: &Ctx, id: Id, viewers: &[Viewer]) -> Option<(Vec<Vec<u8>>, Vec<u8>)> {
-    with(c, |db, arena| {
-        let mut rec = std::mem::MaybeUninit::<In_message>::zeroed();
-        if !unsafe { etch_load_message(ctx, db, id, rec.as_mut_ptr(), arena) } {
-            return None;
-        }
-        let rec = unsafe { rec.assume_init() };
+/// The viewers' records (etch_load_viewer), for building their variants.
+unsafe fn viewers(ctx: &Ctx, db: *mut Db, arena: *mut Arena, ids: &[Id]) -> Vec<Viewer> {
+    ids.iter()
+        .map(|id| {
+            let mut v = MaybeUninit::<Viewer>::zeroed();
+            etch_load_viewer(ctx, db, *id, v.as_mut_ptr(), arena);
+            v.assume_init()
+        })
+        .collect()
+}
+
+/// Messages' variants for these viewers: each record loaded once (etch_load_message), then a
+/// variant per distinct key (etch_bits_message), built by etch_build_message. None for one gone.
+pub fn messages(c: &Connection, ctx: &Ctx, ids: &[Id], audience: &[Id]) -> Vec<Option<(Vec<Vec<u8>>, Vec<u8>)>> {
+    with(c, |db, arena| unsafe {
+        let vs = viewers(ctx, db, arena, audience);
         let (_bufs, ptrs) = tmps(TMPS_MESSAGE);
-        let mut keys: Vec<i64> = vec![];
-        let mut variants = vec![];
-        let mut by = Vec::with_capacity(viewers.len());
-        for v in viewers {
-            let k = unsafe { etch_bits_message(&rec, v) };
-            let i = match keys.iter().position(|x| *x == k) {
-                Some(i) => i,
-                None => {
-                    keys.push(k);
-                    let mut out = Vec::with_capacity(9000);
-                    unsafe { etch_build_message(ctx, &rec, v, &mut out, ptrs.as_ptr()) };
-                    variants.push(out);
-                    keys.len() - 1
+        let mut splits = vec![];
+        ids.iter()
+            .map(|id| {
+                let mut rec = MaybeUninit::<In_message>::zeroed();
+                if !etch_load_message(ctx, db, *id, rec.as_mut_ptr(), arena) {
+                    return None;
                 }
-            };
-            by.push(i as u8);
-        }
-        Some((variants, by))
+                let rec = rec.assume_init();
+                let mut keys: Vec<i64> = vec![];
+                let mut variants = vec![];
+                let mut by = Vec::with_capacity(vs.len());
+                for v in &vs {
+                    let k = etch_bits_message(&rec, v);
+                    let i = match keys.iter().position(|x| *x == k) {
+                        Some(i) => i,
+                        None => {
+                            keys.push(k);
+                            let mut out = Vec::with_capacity(9000);
+                            etch_build_message(ctx, &rec, v, &mut out, ptrs.as_ptr(), &mut splits);
+                            variants.push(out);
+                            keys.len() - 1
+                        }
+                    };
+                    by.push(i as u8);
+                }
+                Some((variants, by))
+            })
+            .collect()
     })
 }
 
-pub fn room_head(c: &Connection, ctx: &Ctx, room: Id) -> Option<Vec<u8>> {
-    with(c, |db, arena| {
-        let mut rec = std::mem::MaybeUninit::<In_room_head>::zeroed();
-        if !unsafe { etch_load_room_head(ctx, db, room, rec.as_mut_ptr(), arena) } {
-            return None;
+/// A register keyed by a row with no variants (the room's head and tail, splices).
+macro_rules! plain {
+    ($f:ident, $rec:ident, $load:ident, $build:ident, $tmps:ident) => {
+        pub fn $f(c: &Connection, ctx: &Ctx, key: Id) -> Option<Vec<u8>> {
+            with(c, |db, arena| unsafe {
+                let mut rec = MaybeUninit::<$rec>::zeroed();
+                if !$load(ctx, db, key, rec.as_mut_ptr(), arena) {
+                    return None;
+                }
+                let rec = rec.assume_init();
+                let v = MaybeUninit::<Viewer>::zeroed().assume_init();
+                let mut out = Vec::with_capacity(4096);
+                let (_bufs, ptrs) = tmps($tmps);
+                let mut splits = vec![];
+                $build(ctx, &rec, &v, &mut out, ptrs.as_ptr(), &mut splits);
+                Some(out)
+            })
         }
-        let rec = unsafe { rec.assume_init() };
-        let v = Viewer { viewer: 0, viewer_role: Str::NONE };
-        let mut out = Vec::with_capacity(4096);
-        let (_bufs, ptrs) = tmps(TMPS_ROOM_HEAD);
-        unsafe { etch_build_room_head(ctx, &rec, &v, &mut out, ptrs.as_ptr()) };
-        Some(out)
-    })
+    };
 }
 
-pub fn room_tail(c: &Connection, ctx: &Ctx, room: Id) -> Option<Vec<u8>> {
-    with(c, |db, arena| {
-        let mut rec = std::mem::MaybeUninit::<In_room_tail>::zeroed();
-        if !unsafe { etch_load_room_tail(ctx, db, room, rec.as_mut_ptr(), arena) } {
+plain!(room_head, In_room_head, etch_load_room_head, etch_build_room_head, TMPS_ROOM_HEAD);
+plain!(room_tail, In_room_tail, etch_load_room_tail, etch_build_room_tail, TMPS_ROOM_TAIL);
+plain!(sidebar_splice0, In_sidebar__s0, etch_load_sidebar__s0, etch_build_sidebar__s0, TMPS_SIDEBAR__S0);
+
+/// The viewer's sidebar (keyed by the viewer), in pieces between its splices.
+pub fn sidebar(c: &Connection, ctx: &Ctx, viewer: Id) -> Option<Vec<Vec<u8>>> {
+    with(c, |db, arena| unsafe {
+        let v = viewers(ctx, db, arena, &[viewer]).remove(0);
+        let mut rec = MaybeUninit::<In_sidebar>::zeroed();
+        if !etch_load_sidebar(ctx, db, viewer, rec.as_mut_ptr(), arena) {
             return None;
         }
-        let rec = unsafe { rec.assume_init() };
-        let v = Viewer { viewer: 0, viewer_role: Str::NONE };
-        let mut out = Vec::with_capacity(4096);
-        let (_bufs, ptrs) = tmps(TMPS_ROOM_TAIL);
-        unsafe { etch_build_room_tail(ctx, &rec, &v, &mut out, ptrs.as_ptr()) };
-        Some(out)
+        let rec = rec.assume_init();
+        let mut out = Vec::with_capacity(8192);
+        let (_bufs, ptrs) = tmps(TMPS_SIDEBAR);
+        let mut splits = vec![];
+        etch_build_sidebar(ctx, &rec, &v, &mut out, ptrs.as_ptr(), &mut splits);
+        let mut pieces = vec![];
+        let mut at = 0;
+        for s in splits {
+            pieces.push(out[at..s].to_vec());
+            at = s;
+        }
+        pieces.push(out[at..].to_vec());
+        Some(pieces)
     })
 }

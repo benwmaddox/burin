@@ -285,3 +285,34 @@ impl Arena {
         self.used = 0;
     }
 }
+
+/// Marks a splice's place in a per-viewer register's bytes. # Safety: live Vecs.
+#[no_mangle]
+pub unsafe extern "C" fn etch_split(splits: *mut Vec<usize>, out: *mut Vec<u8>) {
+    (*splits).push((*out).len());
+}
+
+/// "a", "a and b", "a, b, and c", from items each ended by a NUL. # Safety: live Vecs.
+#[no_mangle]
+pub unsafe extern "C" fn etch_sentence(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+    let all = text(t);
+    let items: Vec<&str> = if all.is_empty() { vec![] } else { all.strip_suffix('\0').unwrap_or(all).split('\0').collect() };
+    let s = match items.len() {
+        0 => String::new(),
+        1 => items[0].to_string(),
+        2 => format!("{} and {}", items[0], items[1]),
+        n => format!("{}, and {}", items[..n - 1].join(", "), items[n - 1]),
+    };
+    put(buf(out), &s, esc);
+}
+
+/// Binds a text field's value (none: NULL). # Safety: live statement; `s` a live Str.
+#[no_mangle]
+pub unsafe extern "C" fn etch_bind_str(st: *mut ffi::sqlite3_stmt, i: i32, s: *const Str) {
+    let s = &*s;
+    if s.ptr.is_null() {
+        ffi::sqlite3_bind_null(st, i);
+    } else {
+        ffi::sqlite3_bind_text(st, i, s.ptr as *const _, s.len as i32, ffi::SQLITE_TRANSIENT());
+    }
+}

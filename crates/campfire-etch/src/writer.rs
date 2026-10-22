@@ -96,7 +96,7 @@ pub fn run(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Recei
             let rid = m.room;
             touched_rooms.insert(rid);
             if let Some(view) = next.rooms.get(&rid).cloned() {
-                let frag = match state::build_msg(&c, &ctx, m.id, &view.members, &next.users) {
+                let frag = match state::build_msgs(&c, &ctx, &[m.id], &view.members).pop() {
                     Some(f) => Arc::new(f),
                     None => continue,
                 };

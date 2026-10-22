@@ -16,7 +16,7 @@ CARGO_TARGET_DIR=$HOME/etch-target-etchc taskset -c 0-7 cargo +1.99.0 build -q -
 echo 'pub fn f() {}' > $GEN/dl.rs; rustc --crate-type=lib --emit=llvm-ir -o $GEN/dl.ll $GEN/dl.rs
 export ETCH_DATALAYOUT=$(grep '^target datalayout' $GEN/dl.ll | sed 's/.*= "\(.*\)"/\1/')
 export ETCH_TRIPLE=$(grep '^target triple' $GEN/dl.ll | sed 's/.*= "\(.*\)"/\1/')
-$HOME/etch-target-etchc/release/etchc emit apps/campfire $GEN message,room_head,room_tail
+$HOME/etch-target-etchc/release/etchc emit apps/campfire $GEN message,room_head,room_tail,sidebar
 $BIN/opt -passes=verify -disable-output $GEN/app.ll
 $BIN/llvm-as $GEN/app.ll -o $GEN/app.bc
 rm -f $GEN/libetchapp.a; $BIN/llvm-ar rcs $GEN/libetchapp.a $GEN/app.bc

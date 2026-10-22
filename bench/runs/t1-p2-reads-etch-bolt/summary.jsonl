@@ -1,0 +1,2 @@
+{"conns":32,"ok":753907,"errors":0,"invalid":null,"rps":37695.3,"cpu_ms_per_req":0.097,"server_util":0.92,"client_util":1,"p50":null,"p99":null}
+{"conns":64,"ok":739245,"errors":0,"invalid":null,"rps":36943.8,"cpu_ms_per_req":0.102,"server_util":0.94,"client_util":1.03,"p50":null,"p99":null}
