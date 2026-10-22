@@ -23,7 +23,11 @@ pub struct Piece {
 
 impl Piece {
     pub fn new(raw: &[u8]) -> Piece {
-        let mut e = DeflateEncoder::new(Vec::with_capacity(raw.len() / 3 + 64), Compression::best());
+        Piece::at(raw, Compression::best())
+    }
+    /// Compressed at `level` (a list's block: big, rebuilt per write, so a faster level).
+    pub fn at(raw: &[u8], level: Compression) -> Piece {
+        let mut e = DeflateEncoder::new(Vec::with_capacity(raw.len() / 3 + 64), level);
         e.write_all(raw).expect("compress");
         e.flush().expect("flush"); // a sync flush: ends on a byte boundary
         let deflate = e.get_ref().clone();

@@ -361,7 +361,7 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
                     if md.registers[k].per_viewer {
                         return Err(format!("a screen's list shows cached fragments: {} is rendered per request", md.registers[k].name));
                     }
-                    let _ = writeln!(asm, "                let Some(items) = snap.lists[{li}].get(&key) else {{ return false }};\n                for id in items.iter() {{\n                    let Some(r) = snap.reg({k}, *id) else {{ return false }};\n                    emit(etch_rt::store::Part::Seg(&r.seg));\n                }}");
+                    let _ = writeln!(asm, "                let Some(items) = snap.lists[{li}].get(&key) else {{ return false }};\n                if let Some(b) = snap.block({li}, key, {k}) {{\n                    emit(etch_rt::store::Part::Seg(b));\n                }} else {{\n                    for id in items.iter() {{\n                        let Some(r) = snap.reg({k}, *id) else {{ return false }};\n                        emit(etch_rt::store::Part::Seg(&r.seg));\n                    }}\n                }}");
                 }
                 _ => return Err("a screen's template holds fragments, loops of a fragment, and text".into()),
             }

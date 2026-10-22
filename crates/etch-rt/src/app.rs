@@ -152,7 +152,9 @@ fn build_raw<G: Glue>(ctx: &Ctx, kind: usize, rec: *const u8) -> Vec<u8> {
 
 /// A cached register's value from its record: one piece, compressed once.
 pub fn build<G: Glue>(ctx: &Ctx, kind: usize, rec: *const u8) -> Reg {
-    Reg::one(build_raw::<G>(ctx, kind, rec))
+    let raw = build_raw::<G>(ctx, kind, rec);
+    // a list's item is sent inside its list's block: not compressed on its own
+    if (0..G::LISTS).any(|l| G::list_item(l) == kind) { Reg::plain(raw) } else { Reg::one(raw) }
 }
 
 /// Builds a screen instance into `snap` from SQLite: its audience and headers, the cached
@@ -202,9 +204,10 @@ struct GzOut<'o> {
 
 impl<'a> Sink<'a> for GzOut<'_> {
     fn seg(&mut self, s: &'a Seg) {
+        let Some(gz) = &s.gz else { return self.bytes(&s.raw) };
         // Safety: the response holds the snapshot the piece is from
-        unsafe { self.out.push_borrowed(&s.gz.deflate) };
-        self.crc.add(&s.gz);
+        unsafe { self.out.push_borrowed(&gz.deflate) };
+        self.crc.add(gz);
     }
     fn bytes(&mut self, b: &[u8]) {
         for chunk in b.chunks(65535) {
@@ -390,6 +393,9 @@ pub struct Stats {
     pub cleared: AtomicU64,
     /// screen instances whose audience changed
     pub audiences: AtomicU64,
+    /// list blocks made, and the writer's microseconds compressing them
+    pub blocks: AtomicU64,
+    pub block_us: AtomicU64,
     /// kept pages the scrubber compared with a fresh build, and the ones it found different (and
     /// rebuilt): a missed edge
     pub scrubbed: AtomicU64,
@@ -620,8 +626,8 @@ impl<G: Glue> App<G> {
             let st = &self.stats;
             let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
             let s = format!(
-                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"rendered":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"kept":{},"version":{}}}"#,
-                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.rendered), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced),
+                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"rendered":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"blocks":{},"block_us":{},"kept":{},"version":{}}}"#,
+                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.rendered), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced), g(&st.blocks), g(&st.block_us),
                 self.snap.load().regs.iter().map(|r| r.len()).sum::<usize>(), self.snap.load().version
             );
             return respond(out, 200, "application/json", &[], s.as_bytes());
@@ -1051,6 +1057,12 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     next.regs[kind].insert(key, Arc::new(build::<G>(&ctx, kind, rec.ptr())));
                 }
             }
+        }
+        let tb = std::time::Instant::now();
+        let made = next.refresh_blocks(G::list_item);
+        if made > 0 {
+            stats.blocks.fetch_add(made as u64, Ordering::Relaxed);
+            stats.block_us.fetch_add(tb.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
         snap.store(Arc::new(next));
         stats.published.store(stats.commits.load(Ordering::SeqCst), Ordering::SeqCst);

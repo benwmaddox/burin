@@ -12,14 +12,27 @@ use std::sync::Arc;
 /// A piece of a page, as it is and precompressed (built once, at write time).
 pub struct Seg {
     pub raw: Vec<u8>,
-    pub gz: Piece,
+    /// absent for a list's item: sent inside its list's block, compressed as one
+    pub gz: Option<Piece>,
 }
 
 impl Seg {
     pub fn new(raw: Vec<u8>) -> Seg {
-        let gz = Piece::new(&raw);
+        let gz = Some(Piece::new(&raw));
         Seg { raw, gz }
     }
+    pub fn plain(raw: Vec<u8>) -> Seg {
+        Seg { raw, gz: None }
+    }
+}
+
+/// A list instance's items as one piece, compressed together (the window of a room's messages:
+/// shared text compresses far better as one stream than item by item). It notes the list and the
+/// items it was made from, so a stale block is never served: it's checked against the snapshot.
+pub struct Block {
+    pub list: Arc<Vec<i64>>,
+    pub items: Vec<Arc<Reg>>,
+    pub seg: Seg,
 }
 
 /// A cached register's value: one piece, the same for everyone (a cached fragment never reads
@@ -31,6 +44,9 @@ pub struct Reg {
 impl Reg {
     pub fn one(raw: Vec<u8>) -> Reg {
         Reg { seg: Seg::new(raw) }
+    }
+    pub fn plain(raw: Vec<u8>) -> Reg {
+        Reg { seg: Seg::plain(raw) }
     }
 }
 
@@ -58,17 +74,59 @@ pub struct Snap {
     pub lists: Vec<HashMap<i64, Arc<Vec<i64>>>>,
     /// by screen, by key: the instance's audience and headers (absent: not precomputed)
     pub screens: Vec<HashMap<i64, Arc<Screen>>>,
+    /// by screen list, by key: the items as one compressed piece (absent or stale: item by item)
+    pub blocks: Vec<HashMap<i64, Arc<Block>>>,
 }
 
 impl Snap {
     pub fn new(regs: usize, lists: usize, screens: usize) -> Snap {
-        Snap { version: 0, sessions: HashMap::new(), regs: vec![HashMap::new(); regs], lists: vec![HashMap::new(); lists], screens: vec![HashMap::new(); screens] }
+        Snap { version: 0, sessions: HashMap::new(), regs: vec![HashMap::new(); regs], lists: vec![HashMap::new(); lists], screens: vec![HashMap::new(); screens], blocks: vec![HashMap::new(); lists] }
     }
     /// The next snapshot: everything shared, the version moved on.
     pub fn next(&self) -> Snap {
         let mut s = self.clone();
         s.version += 1;
         s
+    }
+    /// A list instance's block, when it was made from the items the snapshot has now.
+    #[inline]
+    pub fn block(&self, list: usize, key: i64, kind: usize) -> Option<&Seg> {
+        let b = self.blocks[list].get(&key)?;
+        let items = self.lists[list].get(&key)?;
+        if !Arc::ptr_eq(&b.list, items) && b.list != *items {
+            return None;
+        }
+        for (id, r) in items.iter().zip(&b.items) {
+            if !self.regs[kind].get(id).is_some_and(|x| Arc::ptr_eq(x, r)) {
+                return None;
+            }
+        }
+        Some(&b.seg)
+    }
+    /// Blocks for the lists whose blocks are missing or stale (the writer, before it publishes):
+    /// how many were made. `item` is a list's item kind.
+    pub fn refresh_blocks(&mut self, item: impl Fn(usize) -> usize) -> usize {
+        let mut made = 0;
+        for l in 0..self.lists.len() {
+            let kind = item(l);
+            self.blocks[l].retain(|k, _| self.lists[l].contains_key(k));
+            let stale: Vec<i64> = self.lists[l].keys().copied().filter(|k| self.block(l, *k, kind).is_none()).collect();
+            for key in stale {
+                let list = self.lists[l][&key].clone();
+                let Some(items) = list.iter().map(|id| self.regs[kind].get(id).cloned()).collect::<Option<Vec<_>>>() else {
+                    self.blocks[l].remove(&key);
+                    continue;
+                };
+                let mut raw = Vec::with_capacity(items.iter().map(|r| r.seg.raw.len()).sum());
+                for r in &items {
+                    raw.extend_from_slice(&r.seg.raw);
+                }
+                let gz = Some(Piece::at(&raw, flate2::Compression::new(6)));
+                self.blocks[l].insert(key, Arc::new(Block { list, items, seg: Seg { raw, gz } }));
+                made += 1;
+            }
+        }
+        made
     }
     #[inline]
     pub fn reg(&self, kind: usize, key: i64) -> Option<&Reg> {
