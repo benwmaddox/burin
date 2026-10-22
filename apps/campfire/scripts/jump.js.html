@@ -1,0 +1,1 @@
+<script>(function(b){var l=document.querySelector(".messages");if(!l||!window.IntersectionObserver)return;var o=new IntersectionObserver(function(e){b.hidden=e[0].isIntersecting});var w=function(){o.disconnect();if(l.lastElementChild)o.observe(l.lastElementChild)};w();new MutationObserver(w).observe(l,{childList:true})})(document.currentScript.previousElementSibling)</script>

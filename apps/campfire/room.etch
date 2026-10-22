@@ -1,0 +1,141 @@
+// The room page (crudspec's room_screen, byte for byte without crudspec's live-update markers).
+// Templates are exact bytes between <<< and >>>; a line ending in \ joins the next one (its
+// leading spaces dropped). Holes are {{ expr }}; {{if}}…{{else}}…{{end}} and {{for x in list}}…{{end}}.
+// A hole is escaped for where it is: text and attribute values as HTML; inside on…= attributes
+// only json(…) values are allowed.
+
+const reactions = [
+  { char: "👍", title: "Thumbs up" },
+  { char: "👏", title: "Clapping" },
+  { char: "👋", title: "Waving hand" },
+  { char: "💪", title: "Muscle" },
+  { char: "❤️", title: "Red heart" },
+  { char: "😂", title: "Face with tears of joy" },
+  { char: "🎉", title: "Party popper" },
+  { char: "🔥", title: "Fire" },
+]
+
+const stylesheets = ["_reset.css", "actiontext.css", "animation.css", "autocomplete.css", "avatars.css", "base.css",
+  "boosts.css", "buttons.css", "code.css", "colorize.css", "colors.css", "composer.css", "embeds.css", "filters.css",
+  "flash.css", "inputs.css", "layout.css", "lightbox.css", "messages.css", "nav.css", "panels.css", "separators.css",
+  "sidebar.css", "signup.css", "spinner.css", "utilities.css"]
+
+fn original_room(): Room = first(Room order by .created, .seq)
+
+screen room(room: Room) at "/rooms/{room}"
+  require member(viewer, room) else go "/"
+  require room.type != "direct" else unsupported                       // phase 2: the title depends on the viewer
+  require not (room == original_room() and count(Message where .room == room) <= 40) else unsupported   // phase 2: the invitation
+  cookie last_room = text(room.id)
+<<<{{room_head(room)}}{{for m in room_messages(room)}}{{message(m)}}{{end}}{{room_tail(room)}}{{sidebar(room)}}{{page_end()}}>>>
+
+fragment icon(name: Text) <<<<img src="{{asset(name)}}" width="20" height="20" aria-hidden="true" class="colorize--black">>>>
+
+fragment room_head(room: Room) <<<\
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
+<title>{{room.name}}</title>{{for css in stylesheets}}<link rel="stylesheet" href="{{asset(css)}}">{{end}}\
+<link rel="alternate" type="text/markdown" href="/llms.txt" title="For AI agents"></head>
+<body class="sidebar">
+<a href="#main-content" class="skip-navigation btn">Skip to main content</a>
+<nav id="nav"><div class="btn btn--reversed btn--faux room--current"><h1 class="room__contents txt-medium overflow-ellipsis">{{room.name}}</h1></div>\
+<a href="/rooms/{{room.id}}/edit" class="btn">{{icon("menu-dots-horizontal.svg")}}<span class="for-screen-reader">Settings for this room</span></a>\
+<button type="button" class="btn" hidden data-push-subscribe="/_do/subscribe_push" data-push-params="endpoint,p256dh_key,auth_key" data-push-key="{{config.vapid_public}}">\
+{{icon("notification-bell-alert.svg")}}<span data-push-label class="for-screen-reader">Notification settings for this room</span></button></nav>
+
+<main id="main-content"><section class="message-area" id="message-area"><div class="messages" data-live-list>>>>
+
+fragment message(m: Message) <<<\
+<div id="message_{{m.client_id}}" class="message message--formatted{{if m.creator == viewer}} message--me{{end}}" data-mentioned="false" \
+data-message-id="{{m.id}}" data-user-id="{{m.creator.id}}"><div class="message__day-separator">\
+<time class="message__timestamp" datetime="{{iso(m.created)}}">{{date(m.created)}}</time></div>\
+<div class="avatar message__avatar"><a href="/users/{{m.creator.id}}" class="btn avatar" title="{{m.creator.name}}">\
+<img aria-hidden="true" src="/avatars/User/{{m.creator.id}}" width="48" height="48"></a></div>\
+<div class="message__body"><div class="message__body-content"><div class="message__meta"><div class="message__heading">\
+<div class="message__author"><strong class="" title="">{{m.creator.name}}</strong></div>\
+<a href="/rooms/{{m.room.id}}?at={{m.id}}" class="message__permalink"><time class="message__timestamp" datetime="{{iso(m.created)}}">{{clock(m.created)}}</time></a></div>\
+<div class="message__actions"><details class="position-relative"><summary class="btn message__action-btn message__options-btn">\
+{{icon("menu-dots-horizontal.svg")}}<span class="for-screen-reader">Message options</span></summary>\
+<div class="message__actions-menu border shadow"><div class="quick-boosts">\
+{{for r in reactions}}<form method="post" action="/_do/boost" class="flex-inline" ><input type="hidden" name="__arg_message" value="#{{m.id}}">\
+<input type="hidden" name="__arg_content" value="{{r.char}}"><input type="hidden" name="__h" value="{{plain_token(m.room)}}">\
+<button type="submit" class="btn">{{r.char}}<span class="for-screen-reader">{{r.title}}</span></button></form>{{end}}\
+<details class="position-relative"><summary class="message__action-btn">{{icon("boost.svg")}}<span class="for-screen-reader">New boost</span></summary>\
+<div class="message__actions-menu border shadow"><form method="post" action="/_do/boost" enctype="multipart/form-data" class="boost__form flex align-center gap" id="">\
+<input type="hidden" name="__arg_message" value="#{{m.id}}"><input type="hidden" name="__h" value="{{plain_token(m.room)}}">\
+<fieldset  class="flex flex-column gap borderless unpad"><label class="flex align-center gap input input--actor">\
+<input type="text" name="content" class="input" required maxlength="16" value=""></label>\
+<button type="submit" class="btn btn--reversed center">{{icon("check.svg")}}<span class="for-screen-reader">Submit</span></button></fieldset></form></div></details></div>\
+<div class="flex align-center gap">\
+<button type="button" class="btn" onclick="const t=document.querySelector('#composer textarea');if(t){t.value=\
+{{json("> " + replace(m.body, "\n", "\n> ") + "\n\n")}}+t.value;t.focus()}">{{icon("reply.svg")}}<span class="for-screen-reader">Reply</span></button>\
+<button type="button" class="btn" onclick="navigator.clipboard.writeText({{json("http://" + config.host + "/rooms/" + text(m.room.id) + "?at=" + text(m.id))}})">\
+{{icon("link.svg")}}<span class="for-screen-reader">Copy link</span></button>\
+{{if can_administer(viewer, m.creator)}}<details class="position-relative"><summary class="message__action-btn">{{icon("pencil.svg")}}<span class="for-screen-reader">Edit</span></summary>\
+<div class="message__actions-menu border shadow"><form method="post" action="/_do/edit_message" enctype="multipart/form-data" class="flex flex-column gap" id="">\
+<input type="hidden" name="__arg_message" value="#{{m.id}}"><input type="hidden" name="__h" value="{{edit_token(m)}}">\
+<fieldset  class="flex flex-column gap borderless unpad"><label class="flex align-center gap input input--actor">\
+<textarea name="body" class="input" rows="1" data-richtext   onkeydown="if(event.key==='Enter'&&!event.shiftKey&&!this.dataset.picking){event.preventDefault();this.form.requestSubmit()}">{{m.body}}</textarea></label>\
+<button type="submit" class="btn btn--reversed center">{{icon("check.svg")}}<span class="for-screen-reader">Save</span></button></fieldset></form>\
+<form method="post" action="/_do/delete_message" class="flex-inline" onsubmit="return confirm(&quot;Are you sure?&quot;)">\
+<input type="hidden" name="__arg_message" value="#{{m.id}}"><input type="hidden" name="__h" value="{{plain_token(m.room)}}">\
+<button type="submit" class="btn">{{icon("trash.svg")}}<span class="for-screen-reader">Delete</span></button></form></div></details>{{end}}\
+</div></div></details></div></div>\
+<div id="presentation_message_{{m.id}}" class="message__presentation" dir="auto">{{autolink(m.body)}}</div>\
+<div class="boosts flex flex-wrap align-center gap full-width"><div class="" data-live-list>\
+{{for b in boosts(m)}}<div class="boost"><figure class="avatar "><img src="/avatars/User/{{b.booster.id}}" alt="{{b.booster.name + " boosted " + b.content}}"></figure>\
+<span class="">{{b.content}}</span>\
+{{if b.booster == viewer}}<form method="post" action="/_do/unboost" class="flex-inline" ><input type="hidden" name="__arg_boost" value="#{{b.id}}">\
+<input type="hidden" name="__h" value="{{plain_token(m.room)}}"><button type="submit" class="btn">{{icon("minus.svg")}}\
+<span class="for-screen-reader">Delete this boost</span></button></form>{{end}}</div>{{end}}\
+</div></div></div></div></div>>>>
+
+fragment room_tail(room: Room) <<<\
+</div><button type="button" class="message-area__return-to-latest btn" hidden onclick="document.querySelector('.messages')?.lastElementChild?.scrollIntoView({behavior:'smooth'})">\
+<img src="{{asset("arrow-down.svg")}}" width="20" height="20" aria-hidden="true"><span class="for-screen-reader">Jump to newest message</span></button>\
+{{include("scripts/jump.js.html")}}{{include("scripts/format.js.html")}}</section>\
+<footer id="footer"><div class="composer flex align-end gap position-relative"><a href="/searches" class="btn flex-item-no-shrink composer__context-btn">\
+{{icon("search.svg")}}<span class="for-screen-reader">Search</span></a>\
+<form method="post" action="/_do/post_message" enctype="multipart/form-data" class="margin-block flex-item-grow contain" id="composer">\
+<input type="hidden" name="__arg_room" value="#{{room.id}}"><input type="hidden" name="__h" value="{{composer_token(room)}}">\
+<fieldset  style="display: contents"><div class="flex composer__input input input--actor fill-white min-width">{{icon("messages-outlined.svg")}}\
+<label class="flex-item-grow min-width"><textarea name="body" class="input" rows="1" data-richtext data-mentions-src="/_pick?ctx={{picker_token(room)}}" \
+data-unfurl-src="/_view/unfurl_link?link=" onkeydown="if(event.key==='Enter'&&!event.shiftKey&&!this.dataset.picking){event.preventDefault();this.form.requestSubmit()}"></textarea>\
+<input type="hidden" name="body__embeds" value="[]"><div class="embed-previews"></div><input type="hidden" name="body__mentions" value="">\
+<input type="hidden" name="body__mentions_entity" value="User">\
+<div class="mention-picker" hidden style="position:absolute;bottom:100%;background:var(--color-bg,#fff);border:1px solid #ccc;border-radius:.5em;padding:.25em;z-index:10"></div>\
+<span class="for-screen-reader">Write a message</span></label><label class="btn btn--borderless txt-small flex-item-no-shrink input--file">\
+<img src="{{asset("attachment.svg")}}" width="24" height="24" aria-hidden="true" class="colorize--black"><input type="file" name="attachment"  >\
+<span class="for-screen-reader">Attach a file</span></label><button type="submit" class="btn btn--reversed center">{{icon("arrow-up.svg")}}\
+<span class="for-screen-reader">Send Message</span></button></div></fieldset></form>\
+<div class="typing-indicator gap txt-small align-center flex-inline" data-signal="typing:{{room.id}}" data-indicator data-active-class="typing-indicator--active" aria-live="polite">\
+<div class="typing-indicator__author spinner"></div></div></div></footer></main>
+>>>
+
+// per viewer: what it shows depends on who is asking, not only through Bools; the compiler keys
+// it by the viewer and reports its memory per viewer
+fragment sidebar(page_room: Room) per viewer <<<\
+<aside id="sidebar"><div class="sidebar__container overflow-y overflow-hide-scrollbar"><div class="directs gap overflow-x overflow-hide-scrollbar">\
+<a href="/rooms/directs/new" class="direct direct__new"><div class="avatar avatar--icon">{{icon("messages-add.svg")}}</div>\
+<div class="direct__author flex max-width min-width border-radius pad-inline-half"><span class="for-screen-reader">New</span><span class="txt-small overflow-clip">Ping</span></div></a>\
+<div class="" data-live-list>\
+{{for ms in sidebar_directs()}}<a href="/rooms/{{ms.room.id}}" class="direct{{if ms.unread_since != none}} unread{{end}}"><div class="avatar__group">\
+{{for o in others(ms.room) limit 4}}<span class="avatar"><img src="/avatars/User/{{o.user.id}}" alt=""></span>{{end}}</div>\
+<div class="direct__author flex align-center gap max-width min-width border-radius txt-small"><span class="txt-nowrap overflow-ellipsis">{{direct_label(ms.room)}}</span></div></a>{{end}}\
+</div><div class="" data-live-list>\
+{{for u in direct_placeholders()}}<form method="post" action="/_do/create_direct_room" class="flex-inline" ><input type="hidden" name="__arg_users" value="@{{u.id}}">\
+<input type="hidden" name="__h" value="{{plain_token(page_room)}}"><button type="submit" class="direct borderless fill-transparent unpad"><div class="avatar">\
+<img aria-hidden="true" src="/avatars/User/{{u.id}}" width="48" height="48"></div>\
+<div class="direct__author flex align-center gap max-width min-width border-radius txt-small"><div class="txt-nowrap overflow-ellipsis">\
+<span class="for-screen-reader">Start a ping with</span><span class="">{{first_word(u.name)}}</span></div></div></button></form>{{end}}\
+</div></div><div class="rooms position-relative flex flex-column gap"><div class="" data-live-list>\
+{{for ms in sidebar_open()}}<a href="/rooms/{{ms.room.id}}" class="align-center gap room btn txt-nowrap{{if ms.unread_since != none}} unread{{end}}">\
+<span class="overflow-ellipsis">{{ms.room.name}}</span></a>{{end}}</div>\
+{{if may_create_rooms(viewer)}}<a href="/rooms/opens/new" class="rooms__new-btn btn room align-center gap txt-reversed" title="New Chat Room">{{icon("add.svg")}}</a>{{end}}\
+</div></div><div class="flex align-end sidebar__tools gap justify-end"><a href="/users/me/profile" class="btn avatar flex-item-no-shrink sidebar__tool">\
+<img aria-hidden="true" src="/avatars/User/{{viewer.id}}" width="48" height="48"><span class="for-screen-reader">My Settings</span></a>\
+<a href="/account/edit" class="btn align-center gap txt-reversed sidebar__tool">{{icon("settings.svg")}}<span class="for-screen-reader">Account Settings</span></a></div></aside>
+>>>
+
+fragment page_end() <<<\
+<a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="{{asset("campfire-icon.png")}}" alt="Campfire logo"></a>
+</body></html>>>>

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/etch-rt", "crates/campfire-hand"]
+members = ["crates/etch-rt", "crates/campfire-hand", "crates/etchc"]
 
 [workspace.package]
 edition = "2021"
@@ -12,3 +12,11 @@ lto = "thin"
 codegen-units = 16
 debug = 1
 panic = "abort"
+
+# The "tape-out" build: whole-program LTO, one codegen unit; scripts/tapeout.sh adds this CPU's
+# instructions, profile-guided optimization and BOLT's code layout. The release profile stays the
+# fast edit loop.
+[profile.tapeout]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

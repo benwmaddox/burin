@@ -1,0 +1,50 @@
+// Campfire's data, as the tables crudspec's Campfire keeps (etch reads the same SQLite file).
+// Phase 1 covers the room page and posting a message: only the fields those read or write.
+
+config host: Text                        // the address links are made with (start time)
+config vapid_public: Text                // the web-push public key (start time)
+
+entity User {
+  name: Text
+  role: Text                             // "member" | "administrator"
+  status: Text                           // "active" | "deactivated"
+}
+
+entity Session {
+  user: User
+  token: Text
+}
+
+entity Room {
+  type: Text                             // "open" | "closed" | "direct"
+  name: Text?
+}
+
+entity Membership {
+  room: Room
+  user: User
+  involvement: Text                      // "mentions" | "everything" | "nothing" | "invisible"
+  unread_since: Time?
+  connected_at: Time?
+}
+
+entity Message {
+  room: Room
+  creator: User
+  body: Text max 10000
+  client_id: Text
+}
+
+entity Boost {
+  message: Message
+  booster: User
+  content: Text max 16
+}
+
+entity Account {
+  logo: Text?
+  restrict_room_creation: Bool
+}
+
+// Who is asking: the session cookie's token, through Session, to its user.
+viewer User from cookie session_token = Session.token -> .user

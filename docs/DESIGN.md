@@ -157,6 +157,23 @@ and generated code that decodes each row straight into a fixed struct, with no b
 - **Area is a budget.** Precomputing spends memory to save CPU. The budget is explicit, and the
   compiler reports what each fragment kind can cost.
 
+## The language leans toward efficient apps
+
+etch is for many apps; Campfire is the first. The compiler and runtime know nothing about any one
+app. The language is shaped so that the efficient design is the default and the short thing to
+write, and anything that would cost the read path is either refused or written explicitly (and
+then shown in the compile report). The checker enforces these rules:
+
+| Rule | What it buys | What you write when you need the exception |
+| --- | --- | --- |
+| **Every list a page shows is bounded**: a view used by a screen has `limit N` or `window N`; text fields have `max N` | worst-case page size and memory per register known at compile time; fixed buffers | nothing: unbounded lists can't be shown (page them) |
+| **What a page shows per viewer is a `Bool` or an enum** (a variant bit) | one prebuilt variant per kind of viewer, chosen at read time without branching | a fragment keyed by the viewer (the sidebar): the report names its memory cost per viewer |
+| **No clock, randomness or request data in templates** | fragments stay valid until a write changes them | `cold` on the screen: rendered per request, outside the fast path |
+| **A screen's read stage must be clean** (lookups, variant choice and concatenation only) | the fast path: no queries, formatting, escaping or allocation per request | `cold` on the screen; otherwise the build fails and names the node that forced it |
+| **Actions are the only writes, with statically known write sets** | the compiler derives which registers each action changes; no cache invalidation to get wrong | nothing: there is no other way to write |
+| **Queries name their order and go through indexes** | write-time rebuilds are index lookups; incremental appends where the order is proved monotone | nothing: a scan of a table on a hot rebuild is reported as an error |
+| **Holes are escaped for where they are**, at write time | safety without per-request work; `on…=` holes take only `json(…)` | `raw(…)` for `Html` values (autolink's output), which the checker types |
+
 ## Lessons kept from crudspec and AgentLang
 
 - **The whole app is one program, checked as a whole** (crudspec): names, types, permissions,
@@ -184,9 +201,12 @@ datapath before trusting a tool to generate it. Write the runtime crate, then by
 the compiler should generate for the room page and `post_message`. Measure it against the
 targets. If it misses them, the compiler isn't worth building, and that is the result.
 
-**Phase 1b: the compiler.** A Rust compiler for a crudspec-like syntax, covering what the room
-page and `post_message` need. It must generate code equivalent to 1a's (the same page bytes and
-the same measurements).
+**Phase 1b: the compiler.** A Rust compiler that turns an app's spec into the dataflow IR of
+`docs/IR.md` and lowers it straight to LLVM IR, linked with the runtime under cross-language
+LTO (the owner's choice, 22 Oct 2026). Campfire's room page and `post_message` come first; it
+must produce the same page bytes as 1a, and match or beat 1a's measurements. Built as a series
+of swaps, each checked against the golden pages. Before it counts as done, a second, small app
+compiles without changes to the compiler.
 
 **Phase 2** (only if phase 1 passes): the rest of Campfire, live updates (the writer already
 knows what changed), the agent API, migrations, and an LSP.

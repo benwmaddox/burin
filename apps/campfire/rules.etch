@@ -1,0 +1,47 @@
+// Campfire's rules for the room page and posting. Every entity has id, seq, created and updated.
+
+fn member(u: User, r: Room): Bool = exists(Membership where .room == r and .user == u)
+fn can_administer(u: User, creator: User): Bool = u.role == "administrator" or u == creator
+fn visible(m: Membership): Bool = m.involvement != "invisible"
+fn may_create_rooms(u: User): Bool = not first(Account).restrict_room_creation or u.role == "administrator"
+
+// The room's last 40 messages, oldest first.
+view room_messages(room: Room) = Message where .room == room order by .created, .seq window 40 last
+
+// A message's boosts, in the order they were made.
+view boosts(m: Message) = Boost where .message == m order by .created, .seq limit 50
+
+// The viewer's rooms, as the sidebar lists them.
+view sidebar_rooms() = Membership where .user == viewer and visible(it) order by lower(.room.name), .created, .seq limit 200
+view sidebar_open() = sidebar_rooms() where .room.type != "direct"
+view sidebar_directs() = sidebar_rooms() where .room.type == "direct" order by .room.updated desc
+
+// A direct room's other members: by membership, and by when the users joined Campfire.
+view others(r: Room) = Membership where .room == r and .user != viewer order by .created, .seq limit 200
+view others_by_user(r: Room) = Membership where .room == r and .user != viewer order by .user.created, .user.seq limit 200
+
+// People the viewer could start a direct room with: active, not already in one with them.
+fn in_direct_with(u: User, me: User): Bool =
+  exists(Membership where .user == u and .room.type == "direct" and member(me, .room))
+view direct_placeholders() =
+  User where .status == "active" and it != viewer and not in_direct_with(it, viewer)
+  order by .created, .seq
+  limit max(0, 20 - count_distinct(.user for Membership where .room.type == "direct" and member(viewer, .room)))
+
+fn direct_label(r: Room): Text =
+  if count(others(r)) > 1 { sentence(list(initials(.user.name) for others(r))) }
+  else if count(others(r)) == 1 { first_word(sentence(list(.user.name for others_by_user(r)))) }
+  else { first_word(viewer.name) }
+
+// Posts a message to a room the viewer is in.
+action post_message(room: Room, body: Text) {
+  require member(viewer, room) else not_found
+  require present(body) else invalid
+  create Message { room: room, creator: viewer, body: body, client_id: token(36) }
+  touch room
+  // unread for the members who aren't connected (crudspec's trigger on create Message)
+  for each ms in Membership where .room == room and .user != viewer and visible(it)
+                              and (.connected_at == none or .connected_at < now - 60s) {
+    set ms.unread_since = now
+  }
+}

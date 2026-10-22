@@ -22,6 +22,13 @@ fn main() {
     let port: u16 = arg("--port").map(|p| p.parse().expect("--port N")).unwrap_or(3000);
     let host = arg("--host").unwrap_or_else(|| format!("127.0.0.1:{port}"));
     let workers: usize = arg("--workers").map(|w| w.parse().expect("--workers N")).unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+    // --exit-after SECS: exit cleanly (profiling builds write their profiles at exit)
+    if let Some(secs) = arg("--exit-after").and_then(|s| s.parse::<u64>().ok()) {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            std::process::exit(0);
+        });
+    }
     let verify = args.iter().any(|a| a == "--verify") || std::env::var("ETCH_VERIFY").as_deref() == Ok("1");
     let start = std::time::Instant::now();
 
