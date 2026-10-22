@@ -1168,8 +1168,19 @@ fn loader(m: &Model, md: &mut Module, reg: &RegInfo, qid: &mut usize) -> Result<
         *qid += 1;
         let _ = writeln!(b, "  ; {}", sel.sql);
         let _ = writeln!(b, "  %st = call ptr @etch_stmt(ptr %db, i64 {qid}, ptr {g}, i64 {})", sel.sql.len());
+        // the scalars' parameters first (the row itself, or the viewer), then the row's id
+        for (bi, bind) in sel.binds.iter().enumerate() {
+            let crate::sql::Bind::Path(e) = bind;
+            let (root, path) = path_of(e).ok_or("a scalar's parameter isn't a path")?;
+            let x = match (root.as_str(), path.is_empty()) {
+                (r, true) if r == root_name => "%key",
+                ("viewer", true) => "%viewer",
+                _ => return Err(format!("{}: a scalar's parameter {} isn't the row or the viewer", reg.name, show(e))),
+            };
+            let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr %st, i32 {}, i64 {x})", bi + 1);
+        }
         if ent.is_some() {
-            let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr %st, i32 1, i64 %key)");
+            let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr %st, i32 {}, i64 %key)", sel.binds.len() + 1);
         }
         let _ = writeln!(b, "  %rc = call i32 @sqlite3_step(ptr %st)\n  %ok = icmp eq i32 %rc, 100\n  br i1 %ok, label %row, label %gone");
         let _ = writeln!(b, "gone:\n  call i32 @sqlite3_reset(ptr %st)\n  ret i1 false\nrow:");

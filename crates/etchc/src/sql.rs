@@ -525,9 +525,8 @@ pub fn update(m: &Model, ent: &str, filter: Option<&Expr>, sets: &[(String, Expr
     let mut tx = Tx { m, joins: Joins { list: vec![], sql: String::new(), next: 0 }, binds: vec![], params: vec![], rows: vec![("u0".into(), ent.to_string())], sub: 0 };
     let mut set_sql = vec![];
     for (c, v) in sets {
-        let saved = std::mem::take(&mut tx.rows);
+        // a value may read the row's own fields (`.n + 1`); anything else is bound
         let x = tx.expr(v)?;
-        tx.rows = saved;
         set_sql.push(format!("{} = {x}", q(c)));
     }
     let w = match filter {

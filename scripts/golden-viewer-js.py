@@ -4,7 +4,7 @@
 #   python3 scripts/golden-viewer-js.py <new page> <old golden page>
 import re, sys
 new, old = open(sys.argv[1], encoding='utf-8').read(), open(sys.argv[2], encoding='utf-8').read()
-me = re.search(r'<aside id="sidebar" data-user-id="(\d+)" data-role="([^"]*)">', new)
+me = re.search(r'<aside id="sidebar" data-user-id="(\d+)" data-role="([^"]*)"(?: data-read-room="\d+")?>', new)
 uid, admin = me.group(1), me.group(2) == 'administrator'
 page = new.replace(me.group(0), '<aside id="sidebar">')
 page = page.replace(open('/mnt/d/code/etch/apps/campfire/scripts/viewer.js.html', encoding='utf-8').read(), '')

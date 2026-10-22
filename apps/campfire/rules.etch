@@ -38,13 +38,27 @@ action post_message(room: Room, body: Text) {
   require member(viewer, room) else not_found
   require present(body) else invalid
   create Message { room: room, creator: viewer, body: body, client_id: token(36) }
+  // one count on the room, not a write per member: the others see it unread (posted > seen)
   touch room
-  // unread for the members who aren't connected
-  for each ms in Membership where .room == room and .user != viewer and visible(it)
-                              and (.connected_at == none or .connected_at < now - 60s) {
-    set ms.unread_since = now
+  for each r in Room where it == room {
+    set r.posted = r.posted + 1
+  }
+  for each ms in Membership where .room == room and .user == viewer {
+    set ms.seen = ms.room.posted
   }
 }
+
+// The viewer has read a room (the room page asks, when it was unread for them).
+action read_room(room: Room) {
+  require member(viewer, room) else not_found
+  for each ms in Membership where .room == room and .user == viewer and .seen != .room.posted {
+    set ms.seen = ms.room.posted
+  }
+}
+
+// Whether a room has posts the viewer hasn't read.
+fn unread(ms: Membership): Bool = ms.room.posted > ms.seen
+fn unread_here(r: Room): Bool = first(Membership where .room == r and .user == viewer).seen < r.posted
 
 // Changes a message's text: its author and administrators only.
 action edit_message(message: Message, body: Text) {

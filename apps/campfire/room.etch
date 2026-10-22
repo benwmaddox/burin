@@ -124,11 +124,11 @@ data-unfurl-src="/_view/unfurl_link?link=" onkeydown="if(event.key==='Enter'&&!e
 // per viewer: rendered for each request (never kept); it merges the cached pieces it calls. It
 // carries the viewer's id and role for the page's script (scripts/viewer.js.html)
 fragment sidebar(page_room: Room) per viewer <<<\
-<aside id="sidebar" data-user-id="{{viewer.id}}" data-role="{{viewer.role}}"><div class="sidebar__container overflow-y overflow-hide-scrollbar"><div class="directs gap overflow-x overflow-hide-scrollbar">\
+<aside id="sidebar" data-user-id="{{viewer.id}}" data-role="{{viewer.role}}"{{if unread_here(page_room)}} data-read-room="{{page_room.id}}"{{end}}><div class="sidebar__container overflow-y overflow-hide-scrollbar"><div class="directs gap overflow-x overflow-hide-scrollbar">\
 <a href="/rooms/directs/new" class="direct direct__new"><div class="avatar avatar--icon">{{icon("messages-add.svg")}}</div>\
 <div class="direct__author flex max-width min-width border-radius pad-inline-half"><span class="for-screen-reader">New</span><span class="txt-small overflow-clip">Ping</span></div></a>\
 <div class="" data-live-list>\
-{{for ms in sidebar_directs()}}<a href="/rooms/{{ms.room.id}}" class="direct{{if ms.unread_since != none}} unread{{end}}"><div class="avatar__group">\
+{{for ms in sidebar_directs()}}<a href="/rooms/{{ms.room.id}}" class="direct{{if unread(ms) and ms.room != page_room}} unread{{end}}"><div class="avatar__group">\
 {{for o in others(ms.room) limit 4}}<span class="avatar"><img src="/avatars/User/{{o.user.id}}" alt=""></span>{{end}}</div>\
 <div class="direct__author flex align-center gap max-width min-width border-radius txt-small"><span class="txt-nowrap overflow-ellipsis">{{direct_label(ms.room)}}</span></div></a>{{end}}\
 </div><div class="" data-live-list>\
@@ -138,7 +138,7 @@ fragment sidebar(page_room: Room) per viewer <<<\
 <div class="direct__author flex align-center gap max-width min-width border-radius txt-small"><div class="txt-nowrap overflow-ellipsis">\
 <span class="for-screen-reader">Start a ping with</span><span class="">{{first_word(u.name)}}</span></div></div></button></form>{{end}}\
 </div></div><div class="rooms position-relative flex flex-column gap"><div class="" data-live-list>\
-{{for ms in sidebar_open()}}<a href="/rooms/{{ms.room.id}}" class="align-center gap room btn txt-nowrap{{if ms.unread_since != none}} unread{{end}}">\
+{{for ms in sidebar_open()}}<a href="/rooms/{{ms.room.id}}" class="align-center gap room btn txt-nowrap{{if unread(ms) and ms.room != page_room}} unread{{end}}">\
 <span class="overflow-ellipsis">{{ms.room.name}}</span></a>{{end}}</div>\
 {{if may_create_rooms(viewer)}}<a href="/rooms/opens/new" class="rooms__new-btn btn room align-center gap txt-reversed" title="New Chat Room">{{icon("add.svg")}}</a>{{end}}\
 </div></div><div class="flex align-end sidebar__tools gap justify-end"><a href="/users/me/profile" class="btn avatar flex-item-no-shrink sidebar__tool">\

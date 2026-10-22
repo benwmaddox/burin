@@ -459,7 +459,9 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
         }
     }
     let _ = writeln!(s, "    fn after_act(_name: &str, _form: &[(String, String)]) -> String {{ \"/\".to_string() }}");
-    let _ = writeln!(s, "    fn schema() -> &'static str {{ r##\"{}\"## }}", schema(m));
+    let (schema_sql, adds) = schema_and_columns(m);
+    let _ = writeln!(s, "    fn schema() -> &'static str {{ r##\"{}\"## }}", schema_sql);
+    let _ = writeln!(s, "    fn columns() -> &'static [(&'static str, &'static str, &'static str)] {{ &[{}] }}", adds.join(", "));
     let _ = writeln!(s, "}}\n");
     // the screens' constant text, made once
     let _ = writeln!(s, "fn consts() -> &'static [etch_rt::store::Seg] {{\n    static C: std::sync::OnceLock<Vec<etch_rt::store::Seg>> = std::sync::OnceLock::new();\n    C.get_or_init(|| vec![{}])\n}}", consts.iter().map(|c| format!("etch_rt::store::Seg::new({c:?}.as_bytes().to_vec())")).collect::<Vec<_>>().join(", "));
@@ -467,8 +469,11 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
 }
 
 /// The tables an app's entities are kept in (created if missing; an existing table is left as it is).
-pub fn schema(m: &Model) -> String {
+/// The schema, and each field's column as (table, column, the ALTER that adds it): a database
+/// made before a field was added gets its column when the app starts.
+pub fn schema_and_columns(m: &Model) -> (String, Vec<String>) {
     let mut s = String::new();
+    let mut adds = vec![];
     let mut ents: Vec<&&Entity> = m.entities.values().collect();
     ents.sort_by(|a, b| a.name.cmp(&b.name));
     for e in ents {
@@ -478,12 +483,18 @@ pub fn schema(m: &Model) -> String {
                 Type::Text | Type::Password => "TEXT",
                 _ => "INTEGER",
             };
-            let null = if matches!(f.ty, Type::Opt(_)) { "" } else { " NOT NULL" };
+            // a number or flag starts at 0 (false) when a row is made without it, or a column added
+            let null = match f.ty {
+                Type::Opt(_) => "",
+                Type::Int | Type::Bool => " NOT NULL DEFAULT 0",
+                _ => " NOT NULL",
+            };
             let check = match (f.max, f.ty.strip_opt()) {
                 (Some(n), Type::Text) => format!(" CHECK (length(\"{}\") <= {n})", f.name),
                 _ => String::new(),
             };
             cols.push(format!("\"{}\" {ty}{null}{check}", f.name));
+            adds.push(format!("(\"{}\", \"{}\", r##\"ALTER TABLE \"{}\" ADD COLUMN \"{}\" {ty}{null}{check}\"##)", e.name, f.name, e.name, f.name));
         }
         s.push_str(&format!("CREATE TABLE IF NOT EXISTS \"{}\" ({}) STRICT;\n", e.name, cols.join(", ")));
         for f in &e.fields {
@@ -493,7 +504,7 @@ pub fn schema(m: &Model) -> String {
         }
         s.push_str(&format!("CREATE INDEX IF NOT EXISTS \"ix_{}_created\" ON \"{}\" (created, seq);\n", e.name, e.name));
     }
-    s
+    (s, adds)
 }
 
 fn split_and(e: &Expr, out: &mut Vec<Expr>) {

@@ -1,3 +1,4 @@
 <script>(function(){var s=document.getElementById("sidebar");if(!s)return;var me=s.dataset.userId,admin=s.dataset.role==="administrator";
 document.querySelectorAll(".message[data-user-id]").forEach(function(m){var mine=m.dataset.userId===me;if(mine)m.classList.add("message--me");if(mine||admin)m.querySelectorAll(".message__edit").forEach(function(e){e.hidden=false})});
-document.querySelectorAll(".boost__remove").forEach(function(f){if(f.dataset.boosterId===me)f.hidden=false})})()</script>
+document.querySelectorAll(".boost__remove").forEach(function(f){if(f.dataset.boosterId===me)f.hidden=false});
+if(s.dataset.readRoom)fetch("/_do/read_room",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"room="+s.dataset.readRoom,redirect:"manual"})})()</script>

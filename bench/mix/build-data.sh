@@ -17,5 +17,6 @@ node /mnt/d/code/etch/bench/mix/gen-rails.mjs "$FIX/db/production.sqlite3" "$M/r
 rm -rf "$M/crudspec" "$M/etch"
 (cd /mnt/d/code/crudspec && node bench/import-rails.ts "$M/rails.sqlite3" "$M/crudspec" > /dev/null)
 cp -a "$M/crudspec" "$M/etch"; rm -f "$M/etch/secret" "$M/etch/vapid.json"
+python3 /mnt/d/code/etch/scripts/backfill-seen.py "$M/etch/app.sqlite"
 node /mnt/d/code/etch/bench/mix/people.mjs "$M/rails.sqlite3" "$PASS" > "$M/people.json"
 node -e "const p=require('$M/people.json'); console.log('people', p.people.length, 'rooms', Object.keys(p.rooms).length, 'memberships', p.people.reduce((s,x)=>s+x.rooms.length,0))"

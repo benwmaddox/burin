@@ -22,13 +22,14 @@ entity Room {
   type: Text                             // "open" | "closed" | "direct"
   name: Text? max 100
   creator: User?
+  posted: Int                            // counts the room's posts: unread is posted > a member's seen
 }
 
 entity Membership {
   room: Room
   user: User
   involvement: Text                      // "mentions" | "everything" | "nothing" | "invisible"
-  unread_since: Time?
+  seen: Int                              // the room's posted count when this member last read it
   connected_at: Time?
 }
 

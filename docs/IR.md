@@ -93,8 +93,14 @@ The always-correct default is to rebuild those keys from SQL after the commit. E
 | --- | --- | --- | --- |
 | insert `Message` (room = r) | message window of `room` | `r` | append: `created = now` is the window's order, so the new row is last; the oldest drops (proved monotone) |
 | insert `Message` | message fragment | the new row | build it |
-| set `Room.updated` (r) | sidebars (direct rooms are ordered by it) | `Membership where .room == r` → `.user`, if `r` is direct | rebuild |
-| set `Membership.unread_since` | sidebars | each changed row's `.user` | rebuild |
+| set `Room.updated`, `Room.posted` (r) | none kept (sidebars are rendered per request) | none | none |
+| set the poster's `Membership.seen` | none kept | none | none |
+
+Unread is counts, not a write per member (22 Oct 2026): a post adds one to `Room.posted` and sets
+the poster's `Membership.seen` to it; a room is unread for a member while `posted > seen`, and
+`read_room` (the room page asks, when it was unread) catches the reader up. A post writes three
+rows however many people are in the room. (Campfire marked each disconnected member's row; its
+60-second "connected" rule is not kept.)
 
 An incremental update (the append) is used only where the compiler can prove it equals the
 rebuild. Everything else is rebuilt. In test mode, `--verify` compares every fast page with a

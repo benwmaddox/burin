@@ -332,6 +332,8 @@ impl<'a, 'b> Act<'a, 'b> {
                 self.line(&format!("{x} = call i64 @etch_w_seq_now(ptr %w)"));
                 Ok((x, Shape::I64))
             }
+            // a number SQL computed (RETURNING), by its value
+            Expr::Name(n, _) if n.starts_with("@i64") => Ok((n[4..].to_string(), Shape::I64)),
             // a text made once (a token), by the pointer it was made at
             Expr::Name(n, _) if n.starts_with("@ptr") => Ok((n[4..].to_string(), Shape::Str)),
             Expr::Int(n, _) | Expr::Dur(n, _) => Ok((n.to_string(), Shape::I64)),
@@ -1017,7 +1019,8 @@ impl<'a, 'b> Act<'a, 'b> {
                     for s in inner {
                         match s {
                             Stmt::Set(Expr::Name(o, _), f, v, _) if o == var => {
-                                sets.push((f.clone(), v.clone()));
+                                // the row's own fields (`set r.n = r.n + 1`): `.n`, computed by SQL
+                                sets.push((f.clone(), of_row(v, var)));
                             }
                             Stmt::Delete(Expr::Name(o, _), _) if o == var && inner.len() == 1 => delete = true,
                             _ => return Err("inside for each: `set x.f = v`s, or one `delete x`".into()),
@@ -1030,6 +1033,17 @@ impl<'a, 'b> Act<'a, 'b> {
                     let filter = q.filter.as_ref().map(|f| inline::expr(self.m, f, &inline::Env::new(), 0, 0));
                     // the changed rows' columns the delta edges key by: lists' and screens' keys
                     let mut ret: Vec<String> = vec!["id".into()];
+                    // a value computed from the row comes back with RETURNING: forwarded as it is
+                    let computed: Vec<String> = sets.iter().filter(|(_, v)| reads_row(v)).map(|(c, _)| c.clone()).collect();
+                    for c in &computed {
+                        match self.m.field_type(&ent, c).map(|t| t.strip_opt().clone()) {
+                            Some(Type::Text) | Some(Type::Password) => return Err(format!("`{c}`: a text computed from its row isn't lowered yet")),
+                            _ => {}
+                        }
+                        if !ret.contains(c) {
+                            ret.push(c.clone());
+                        }
+                    }
                     let audience_keys: Vec<String> = self.audiences.iter().filter(|a| a.entity == ent).filter_map(|a| a.key_col.clone()).collect();
                     let keys = lists.iter().filter(|l| l.entity == ent).filter_map(|l| l.keyed_by.clone()).chain(screens.iter().filter(|l| l.entity == ent).filter_map(|l| l.keyed_by.clone())).chain(audience_keys);
                     for k in keys {
@@ -1057,7 +1071,11 @@ impl<'a, 'b> Act<'a, 'b> {
                         self.edges(&ent, &["*".into()], &vals, &[], regs, lists, screens, None, true)?;
                     } else {
                         let cols: Vec<String> = sets.iter().map(|(c, _)| c.clone()).filter(|c| !c.ends_with("__seq")).collect();
-                        let real_sets: Vec<(String, Expr)> = sets.iter().filter(|(c, _)| !c.ends_with("__seq")).cloned().collect();
+                        let real_sets: Vec<(String, Expr)> = sets
+                            .iter()
+                            .filter(|(c, _)| !c.ends_with("__seq"))
+                            .map(|(c, v)| if computed.contains(c) { (c.clone(), Expr::Name(format!("@i64{}", vals[c]), Span::default())) } else { (c.clone(), v.clone()) })
+                            .collect();
                         self.edges(&ent, &cols, &vals, &real_sets, regs, lists, screens, None, false)?;
                     }
                     let _ = writeln!(self.b, "  br label %{h}\n{done}:\n  call void @etch_done(ptr {st}, i32 {rc})");
@@ -1065,6 +1083,34 @@ impl<'a, 'b> Act<'a, 'b> {
             }
         }
         Ok(())
+    }
+}
+
+/// A set's value with the row's own name made `it` (`r.n + 1` → `.n + 1`).
+fn of_row(e: &Expr, var: &str) -> Expr {
+    let r = |x: &Expr| Box::new(of_row(x, var));
+    match e {
+        Expr::Field(o, f, s) if matches!(&**o, Expr::Name(n, _) if n == var) => Expr::Dot(f.clone(), *s),
+        Expr::Name(n, s) if n == var => Expr::Name("it".into(), *s),
+        Expr::Field(o, f, s) => Expr::Field(r(o), f.clone(), *s),
+        Expr::Bin(op, a, b, s) => Expr::Bin(op.clone(), r(a), r(b), *s),
+        Expr::Not(a, s) => Expr::Not(r(a), *s),
+        Expr::If(c, a, b, s) => Expr::If(r(c), r(a), r(b), *s),
+        Expr::Call(f, a, s) => Expr::Call(f.clone(), a.iter().map(|x| of_row(x, var)).collect(), *s),
+        _ => e.clone(),
+    }
+}
+
+/// Whether a value reads the row it's written to (then SQL computes it).
+fn reads_row(e: &Expr) -> bool {
+    match e {
+        Expr::Dot(..) => true,
+        Expr::Name(n, _) => n == "it",
+        Expr::Field(o, _, _) | Expr::Not(o, _) => reads_row(o),
+        Expr::Bin(_, a, b, _) => reads_row(a) || reads_row(b),
+        Expr::If(c, a, b, _) => reads_row(c) || reads_row(a) || reads_row(b),
+        Expr::Call(_, a, _) => a.iter().any(reads_row),
+        _ => false,
     }
 }
 

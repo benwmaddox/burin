@@ -103,6 +103,8 @@ pub unsafe trait Glue: Send + Sync + 'static {
     fn after_act(name: &str, form: &[(String, String)]) -> String;
     /// The tables the app keeps its entities in (created if missing).
     fn schema() -> &'static str;
+    /// Each field's column: (table, column, the ALTER TABLE that adds it).
+    fn columns() -> &'static [(&'static str, &'static str, &'static str)];
     /// A screen's unmet guard's answer for a viewer, on the cold path: a redirect, or 501.
     fn refuse(c: &Connection, s: usize, key: i64, viewer: i64) -> Option<String>;
 }
@@ -124,6 +126,17 @@ pub fn with_db<T>(c: &Connection, f: impl FnOnce(*mut Db) -> T) -> T {
         let db: *mut Db = &mut d.as_mut().unwrap().1;
         f(db)
     })
+}
+
+/// Columns for fields added since the database was made (a number starts at 0).
+fn add_columns<G: Glue>(c: &Connection) {
+    for (table, col, add) in G::columns() {
+        let has: bool = c.prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?")).and_then(|mut st| st.exists([col])).expect("table info");
+        if !has {
+            c.execute_batch(add).unwrap_or_else(|e| panic!("adding {table}.{col}: {e}"));
+            eprintln!("added the column {table}.{col}");
+        }
+    }
 }
 
 /// A register's record, loaded from SQLite (a read); `viewer` for one rendered per request.
@@ -456,6 +469,7 @@ impl<G: Glue> App<G> {
     pub fn start(ctx: Arc<Ctx>, db_path: &str, host: &str, verify: bool, session_cookie: &'static [u8], seq: i64, scrub_ms: u64) -> Arc<App<G>> {
         let w = open_write(db_path);
         w.execute_batch(G::schema()).expect("the schema");
+        add_columns::<G>(&w);
         let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
         snap.sessions = G::sessions(&w).into_iter().map(|(_, t, u)| (t.into_bytes().into_boxed_slice(), u)).collect();
         let snap = Arc::new(ArcSwap::from_pointee(snap));
