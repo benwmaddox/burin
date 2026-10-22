@@ -63,6 +63,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "campfire-etch"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "base64",
+ "etch-rt",
+ "getrandom",
+ "p256",
+ "rusqlite",
+ "sha2",
+]
+
+[[package]]
 name = "campfire-hand"
 version = "0.1.0"
 dependencies = [

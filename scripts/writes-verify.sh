@@ -5,7 +5,7 @@
 #   bash /mnt/d/code/etch/scripts/writes-verify.sh [posts]
 set -e
 N=${1:-60}
-BIN=$HOME/etch-target/release/campfire-hand
+BIN=${ETCH_BIN:-$HOME/etch-target/release/campfire-hand}
 D=/tmp/etch-wv; rm -rf $D; mkdir -p $D; cp -a ~/hw/golden-data $D/data; rm -f $D/data/app.lock
 PORT=13791
 TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/crudspec-assets/campfire --port $PORT --workers 2 --verify > $D/server.log 2>&1 &

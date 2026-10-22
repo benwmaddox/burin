@@ -765,7 +765,7 @@ fn parse_template(raw: &str, span: Span) -> R<Vec<TNode>> {
                     stack.push(Frame::If(e, vec![], None));
                 } else if code == "else" {
                     match stack.last_mut() {
-                        Some(Frame::If(_, _, b @ None)) => *b = Some(vec![]),
+                        Some(Frame::If(_, _, b)) if b.is_none() => *b = Some(vec![]),
                         _ => return Err(herr("{{else}} outside an {{if}}".into())),
                     }
                 } else if code == "end" {

@@ -1,0 +1,13 @@
+indexes auto: made ax_PushSubscription_user_endpoint_auth_key_seq in 5 ms
+indexes auto: made ax_User_status_created_seq in 0 ms
+indexes auto: made ax_User_role_status in 0 ms
+indexes auto: made ax_Room_type in 0 ms
+indexes auto: made ax_PushSubscription_user_endpoint_p256dh_key_auth_key_seq in 0 ms
+indexes auto: made ax_Message_room_created_seq in 0 ms
+indexes auto: made ax_Membership_room_seq in 0 ms
+indexes auto: made ax_Ban_ip in 0 ms
+indexes auto: made ax_Room_created_seq in 0 ms
+indexes auto: made ax_PushSubscription_user_endpoint_seq in 0 ms
+indexes auto: made ax_PushSubscription_user_endpoint_p256dh_key_seq in 0 ms
+started in 38 ms
+crudspec app: campfire on http://127.0.0.1:13774 (data /home/ben/crudspec-bench/e1-p1-other-cspk/data)

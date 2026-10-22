@@ -5,6 +5,8 @@
 
 mod ast;
 mod check;
+mod inline;
+mod llvm;
 mod netlist;
 mod parse;
 #[cfg(test)]
@@ -48,6 +50,31 @@ fn main() -> ExitCode {
                 model.actions.len()
             );
             ExitCode::SUCCESS
+        }
+        "emit" => {
+            // etchc emit <app> <out dir> <register,…>: the registers' LLVM module and Rust header
+            let (out, regs) = match (args.get(3), args.get(4)) {
+                (Some(o), Some(r)) => (Path::new(o), r.split(',').collect::<Vec<_>>()),
+                _ => {
+                    eprintln!("usage: etchc emit <app dir> <out dir> <register,…>");
+                    return ExitCode::from(64);
+                }
+            };
+            let dl = std::env::var("ETCH_DATALAYOUT").unwrap_or_else(|_| "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128".into());
+            let tt = std::env::var("ETCH_TRIPLE").unwrap_or_else(|_| "x86_64-unknown-linux-gnu".into());
+            match llvm::module(&model, &regs, &format!("target datalayout = \"{dl}\""), &format!("target triple = \"{tt}\"")) {
+                Ok((ll, rs)) => {
+                    let _ = std::fs::create_dir_all(out);
+                    std::fs::write(out.join("app.ll"), ll).unwrap();
+                    std::fs::write(out.join("app_gen.rs"), rs).unwrap();
+                    println!("wrote {}", out.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("emit: {e}");
+                    ExitCode::from(1)
+                }
+            }
         }
         "report" => {
             print!("{}", netlist::report(&netlist::build(&model)));

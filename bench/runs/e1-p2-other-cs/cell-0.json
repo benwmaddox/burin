@@ -1,0 +1,1 @@
+{"avg_bytes":366229,"conc":32,"errors":0,"gzip":false,"invalid_reasons":{},"invalid_responses":0,"latency":{"max_ms":18.815,"mean_ms":0.9,"n":343656,"p50_ms":0.789,"p90_ms":1.581,"p99_ms":2.531},"ok":343656,"path":"/rooms/486777696","rps":34355.3,"secs":10.0,"statuses":{"200":343656},"validation":"status-only"}

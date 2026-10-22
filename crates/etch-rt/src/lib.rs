@@ -1,6 +1,7 @@
 //! etch's runtime: the prebuilt base every generated app links. Like a chip's base layers, it is
 //! the same for every app; the compiler generates only the app's own layer.
 
+pub mod abi;
 pub mod html;
 pub mod http;
 pub mod out;

@@ -3,7 +3,7 @@
 # compares them with crudspec's pages (without crudspec's live-update markers and scripts).
 #   bash /mnt/d/code/etch/scripts/golden.sh [--verify]
 set -e
-BIN=$HOME/etch-target/release/campfire-hand
+BIN=${ETCH_BIN:-$HOME/etch-target/release/campfire-hand}
 G=/mnt/d/code/crudspec-hw/golden
 OUT=/tmp/etch-golden; mkdir -p $OUT
 PORT=13790

@@ -4,7 +4,7 @@
 #   bash /mnt/d/code/etch/scripts/post-parity.sh
 set -e
 CS=$HOME/hw/campfire-pk
-ET=$HOME/etch-target/release/campfire-hand
+ET=${ETCH_BIN:-$HOME/etch-target/release/campfire-hand}
 D=/tmp/etch-pp; rm -rf $D; mkdir -p $D
 cp -a ~/hw/golden-data $D/cs; cp -a ~/hw/golden-data $D/et; rm -f $D/cs/app.lock $D/et/app.lock
 cd /mnt/d/code/crudspec

@@ -1,0 +1,2 @@
+{"posts_per_s":0,"reads_per_s":42088.2,"read_errors":0,"statuses":{"200":420882},"cpu_ms_per_read":0.096,"server_util":1.01,"read_p50_ms":0.699,"read_p99_ms":1.465,"posts":0,"posts_ok":0,"post_p50_ms":null,"post_p99_ms":null,"cache_hit_rate":0,"avg_page_bytes":350823}
+{"posts_per_s":1,"reads_per_s":42166.4,"read_errors":0,"statuses":{"200":421664},"cpu_ms_per_read":0.094,"server_util":0.99,"read_p50_ms":0.685,"read_p99_ms":1.539,"posts":10,"posts_ok":10,"post_p50_ms":9.7,"post_p99_ms":103.7,"cache_hit_rate":0,"avg_page_bytes":350823}

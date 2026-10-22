@@ -183,6 +183,14 @@ impl Out {
     }
 }
 
+/// Writes n in decimal, with a sign when negative.
+pub fn push_int_signed(b: &mut Vec<u8>, n: i64) {
+    if n < 0 {
+        b.push(b'-');
+    }
+    push_int(b, n.unsigned_abs());
+}
+
 /// Writes n in decimal.
 pub fn push_int(b: &mut Vec<u8>, n: u64) {
     let mut tmp = [0u8; 20];
