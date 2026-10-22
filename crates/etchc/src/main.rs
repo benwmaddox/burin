@@ -5,6 +5,7 @@
 
 mod ast;
 mod check;
+mod netlist;
 mod parse;
 #[cfg(test)]
 mod tests;
@@ -46,6 +47,10 @@ fn main() -> ExitCode {
                 model.screens.len(),
                 model.actions.len()
             );
+            ExitCode::SUCCESS
+        }
+        "report" => {
+            print!("{}", netlist::report(&netlist::build(&model)));
             ExitCode::SUCCESS
         }
         _ => {
