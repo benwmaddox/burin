@@ -8,6 +8,7 @@ entity User {
   name: Text
   email: Text? max 254
   password: Password?                    // an argon2id hash; only authenticates() reads it
+  bio: Text? max 200
   role: Text                             // "member" | "administrator"
   status: Text                           // "active" | "deactivated"
 }

@@ -140,6 +140,19 @@ pub unsafe extern "C" fn etch_initials(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: 
 
 /// # Safety: live Vecs.
 #[no_mangle]
+pub unsafe extern "C" fn etch_upper(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+    put(buf(out), &text(t).to_uppercase(), esc);
+}
+
+/// `choose`: the CRC-32 of a text, modulo n (Campfire picks an avatar's color this way).
+/// # Safety: a live Vec.
+#[no_mangle]
+pub unsafe extern "C" fn etch_crc_mod(t: *mut Vec<u8>, n: i64) -> i64 {
+    (crc32fast::hash(&*t) as i64).rem_euclid(n.max(1))
+}
+
+/// # Safety: live Vecs.
+#[no_mangle]
 pub unsafe extern "C" fn etch_lower(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     put(buf(out), &text(t).to_ascii_lowercase(), esc);
 }
@@ -518,14 +531,27 @@ pub unsafe extern "C" fn etch_exec(st: *mut ffi::sqlite3_stmt) {
     etch_done(st, rc);
 }
 
-/// Resets a statement; panics on an error (the writer rolls the batch back). # Safety: live statement.
+thread_local! {
+    /// A generated write that failed (a constraint): the writer rolls the action back.
+    static WRITE_FAILED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The failure of the action just run, if a write of it failed (and forgets it).
+pub fn take_write_failure() -> Option<String> {
+    WRITE_FAILED.with(|f| f.borrow_mut().take())
+}
+
+/// Resets a statement; an error is kept for the writer (which rolls the action back).
+/// # Safety: a live statement.
 #[no_mangle]
 pub unsafe extern "C" fn etch_done(st: *mut ffi::sqlite3_stmt, rc: i32) {
     ffi::sqlite3_reset(st);
     if rc != ffi::SQLITE_DONE {
         let db = ffi::sqlite3_db_handle(st);
-        let msg = std::ffi::CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy();
-        panic!("a generated write failed ({rc}): {msg}");
+        let msg = std::ffi::CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned();
+        WRITE_FAILED.with(|f| {
+            f.borrow_mut().get_or_insert(format!("{rc}: {msg}"));
+        });
     }
 }
 

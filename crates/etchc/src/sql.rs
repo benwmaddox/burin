@@ -18,12 +18,18 @@ pub struct Select {
     pub binds: Vec<Bind>,
 }
 
-// ---- read sets: every (entity, column) the lowering turns into SQL while it is recording (a
-// register's loader, a screen list's query). "*": the entity's rows themselves (a row made or
-// deleted can enter or leave). Recorded where paths become columns, so nothing read is missed.
+// ---- read sets: every path the lowering turns into SQL while it is recording (a register's
+// loader, a screen list's query): (the table it starts from, the dotted path from it), so the same
+// column read along two paths (a message's creator's name, a boost's booster's name) is two reads.
+// "*": the table's rows themselves (a row made or deleted can enter or leave). Recorded where
+// paths become columns, so nothing read is missed.
 
 thread_local! {
     static READS: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn note_path(ent: &str, path: &[String]) {
+    note(ent, &path.join("."));
 }
 
 fn note(ent: &str, col: &str) {
@@ -35,6 +41,19 @@ fn note(ent: &str, col: &str) {
             }
         }
     });
+}
+
+/// Where a read path ends: (entity, column), "*" for a table's rows.
+pub fn target(m: &Model, start: &str, path: &str) -> Option<(String, String)> {
+    if path == "*" {
+        return Some((start.to_string(), "*".into()));
+    }
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut ent = start.to_string();
+    for f in &parts[..parts.len() - 1] {
+        ent = ref_target(m, &ent, f).ok()?;
+    }
+    Some((ent, parts[parts.len() - 1].to_string()))
 }
 
 /// Runs `f`, returning what it read.
@@ -65,10 +84,10 @@ impl Joins {
         if path.is_empty() {
             return Ok(format!("{base}.id"));
         }
+        note_path(base_ent, path);
         let (mut alias, mut ent) = (base.to_string(), base_ent.to_string());
         for i in 0..path.len() - 1 {
             let f = &path[i];
-            note(&ent, f);
             let target = ref_target(m, &ent, f)?;
             let key: Vec<String> = std::iter::once(base.to_string()).chain(path[..=i].iter().cloned()).collect();
             let a = match self.list.iter().find(|(k, _)| *k == key) {
@@ -85,7 +104,6 @@ impl Joins {
             ent = target;
         }
         let last = &path[path.len() - 1];
-        note(&ent, last);
         if m.field_type(&ent, last).is_none() {
             return Err(format!("{ent} has no field {last}"));
         }
@@ -105,13 +123,19 @@ fn sub_column(m: &Model, alias: &str, ent: &str, p: &[String]) -> Result<String,
     match p.len() {
         0 => Ok(format!("{alias}.id")),
         1 => {
-            note(ent, &p[0]);
+            note_path(ent, p);
             Ok(format!("{alias}.{}", q(&p[0])))
         }
         _ => {
-            note(ent, &p[0]);
+            note_path(ent, p);
             let target = ref_target(m, ent, &p[0])?;
-            let inner = sub_column(m, "x", &target, &p[1..])?;
+            // (the inner part is the same path, already noted from its start)
+            let inner = READS.with(|r| {
+                let saved = r.borrow_mut().take();
+                let x = sub_column(m, "x", &target, &p[1..]);
+                *r.borrow_mut() = saved;
+                x
+            })?;
             Ok(format!("(SELECT {inner} FROM {} x WHERE x.id = {alias}.{})", q(&target), q(&p[0])))
         }
     }

@@ -371,8 +371,23 @@ impl Parser {
                 let params = self.params()?;
                 self.expect_kw("at")?;
                 let route = self.string()?;
-                let cold = self.eat_kw("cold");
-                let public = self.eat_kw("public");
+                let (mut cold, mut public, mut ctype, mut max_age) = (false, false, None, None);
+                loop {
+                    if self.eat_kw("cold") {
+                        cold = true;
+                    } else if self.eat_kw("public") {
+                        public = true;
+                    } else if self.eat_kw("type") {
+                        ctype = Some(self.string()?);
+                    } else if self.eat_kw("max_age") {
+                        match self.next() {
+                            Tok::Int(n) => max_age = Some(n),
+                            _ => return self.err("expected a number of seconds after max_age"),
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 let mut requires = vec![];
                 let mut cookies = vec![];
                 loop {
@@ -386,7 +401,7 @@ impl Parser {
                         break;
                     }
                 }
-                Ok(Decl::Screen { name, params, route, cold, public, requires, cookies, body: self.template()?, span })
+                Ok(Decl::Screen { name, params, route, cold, public, ctype, max_age, requires, cookies, body: self.template()?, span })
             }
             "action" => {
                 let name = self.ident()?;
@@ -503,6 +518,8 @@ impl Parser {
             self.expect_kw("in")?;
             let q = match self.expr()? {
                 Expr::Query(q) => *q,
+                // every row of an entity
+                Expr::Name(n, _) if is_entity_name(&n) => Query { source: Source::Entity(n), filter: None, order: vec![], limit: None, window_last: None, span },
                 other => Query { source: Source::Expr(other), filter: None, order: vec![], limit: None, window_last: None, span },
             };
             let body = self.block()?;

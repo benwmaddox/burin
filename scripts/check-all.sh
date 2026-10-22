@@ -10,8 +10,9 @@ echo "== outcomes";      bash scripts/outcomes.sh 2>&1 | tail -4
 echo "== edits";         bash scripts/edits-verify.sh 2>&1 | tail -1
 echo "== sign in";     bash scripts/signin-check.sh 2>&1 | tail -8
 echo "== rooms";       bash scripts/rooms-check.sh 2>&1 | tail -3
+echo "== people";      bash scripts/people-check.sh 2>&1 | tail -1
 echo "== scrub";       bash scripts/scrub-check.sh 2>&1 | tail -2
-echo "== fuzz";        for s in 1 2 3; do bash scripts/fuzz.sh 600 $s 2>&1 | tail -1; done
+echo "== fuzz";        bash scripts/fuzz-seeds.sh 600 1 2 3 | grep -E "PASS|FAIL"
 echo "== direct";      bash scripts/direct-check.sh 2>&1 | tail -3
 echo "== board";         ETCH_BIN=$HOME/hw/etch-board-release bash scripts/board-check.sh 2>&1 | tail -16
 echo "== hot path";      bash scripts/hot-path-test.sh 2>&1 | tail -4

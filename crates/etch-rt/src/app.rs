@@ -730,13 +730,30 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             match cmd {
                 Cmd::Act { name, viewer, form, reply } => {
                     let vrec = viewers.entry(viewer).or_insert_with(|| load_viewer::<G>(&tx, &ctx, viewer)).ptr();
-                    let r = with_db(&tx, |db| G::act(&name, &tx, &ctx, db, &mut w, viewer, vrec, &form, &mut deltas));
+                    // each action is all or nothing: a savepoint, rolled back (with its delta
+                    // edges) when it doesn't end ok, a failed require after a write or a write
+                    // a constraint refused
+                    let marks = (deltas.list.len(), deltas.patches.len(), deltas.finds.len());
+                    tx.execute_batch("SAVEPOINT act").expect("savepoint");
+                    let mut r = with_db(&tx, |db| G::act(&name, &tx, &ctx, db, &mut w, viewer, vrec, &form, &mut deltas));
+                    if let Some(e) = crate::abi::take_write_failure() {
+                        eprintln!("action {name}: a write failed ({e}); rolled back");
+                        r = Err("invalid");
+                    }
                     let cookie = match (w.signed_in.take(), std::mem::take(&mut w.signed_out)) {
                         (Some(t), _) => Some(t),
                         (None, true) => Some(vec![]),
                         _ => None,
                     };
                     let go = w.go.take();
+                    if r.is_ok() {
+                        tx.execute_batch("RELEASE act").expect("release");
+                    } else {
+                        tx.execute_batch("ROLLBACK TO act; RELEASE act").expect("rollback");
+                        deltas.list.truncate(marks.0);
+                        deltas.patches.truncate(marks.1);
+                        deltas.finds.truncate(marks.2);
+                    }
                     replies.push((reply, r.map(|_| Done { to: G::after_act(&name, &form), cookie, go })));
                 }
                 Cmd::Warm { screen, key, viewer } => warm.push((screen, key, viewer)),
@@ -750,6 +767,7 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
         let mut forwarded: HashMap<i64, i64> = HashMap::new();
         let mut recheck: HashSet<(usize, i64)> = HashSet::new();
         let (mut shared, mut relist, mut dropped, mut audiences): (HashSet<(usize, i64)>, HashSet<(usize, i64)>, HashSet<(usize, i64)>, HashSet<(usize, i64)>) = Default::default();
+        let mut rescreen: HashSet<(usize, i64)> = HashSet::new();
         for &(op, a, key, item) in &deltas.list {
             let a = a as usize;
             match op {
@@ -818,12 +836,25 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 }
                 // what the viewers' records read changed (a fallback): every record read again,
                 // every kept per-viewer register too, the screens rebuilt on demand
-                15 => {
+                15 if key == i64::MIN => {
                     stats.cleared.fetch_add(1, Ordering::Relaxed);
                     viewers.clear();
                     reload.extend(kept.keys().copied());
                     for s in &mut next.screens {
                         s.clear();
+                    }
+                }
+                // one viewer's row changed: their record, their own registers, and every kept page
+                // they can see (their variants may change)
+                15 => {
+                    viewers.remove(&key);
+                    reload.extend(kept.keys().filter(|(_, u)| *u == key).copied());
+                    for s in 0..G::SCREENS {
+                        for (k, inst) in next.screens[s].iter() {
+                            if inst.audience.binary_search(&key).is_ok() {
+                                rescreen.insert((s, *k));
+                            }
+                        }
                     }
                 }
                 // a new row's register: no screen keeps it yet (a list that shows it adds it,
@@ -925,6 +956,12 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 None => {
                     next.regs[kind].remove(&key);
                 }
+            }
+        }
+        // pages rebuilt in full (a viewer's row changed)
+        for (s, key) in rescreen {
+            if next.screens[s].contains_key(&key) {
+                build_screen::<G>(&c, &ctx, &mut next, &mut viewers, s, key);
             }
         }
         // audiences that may have changed: read again; a kept instance whose audience changed is

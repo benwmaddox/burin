@@ -1,0 +1,114 @@
+// People and the account: avatars, profiles, the account's settings and its people. All `cold`:
+// built per request, not kept (they're rarely visited; keeping them would only cost memory and
+// write work).
+
+const avatar_colors = ["#AF2E1B", "#CC6324", "#3B4B59", "#BFA07A", "#ED8008", "#ED3F1C", "#BF1B1B", "#736B1E", "#D07B53",
+  "#736356", "#AD1D1D", "#BF7C2A", "#C09C6F", "#698F9C", "#7C956B", "#5D618F", "#3B3633", "#67695E"]
+
+fn administrator(u: User): Bool = u.role == "administrator"
+fn another_admin(u: User): Bool = count(User where .role == "administrator" and .status == "active" and it != u) > 0
+
+view people() = User where .status == "active" and .role != "bot" order by lower(.name), .created limit 500
+
+// An avatar: a bot's picture, or the person's initials on a color picked by their id (CRC-32,
+// as Campfire picks). Browsers keep it for 5 minutes.
+screen avatar(u: User) at "/avatars/User/{u}" cold type "image/svg+xml" max_age 300
+<<<{{avatar_svg(u)}}>>>
+
+fragment avatar_svg(u: User) <<<\
+{{if u.role == "bot"}}{{include("assets/images/default-bot-avatar.svg")}}{{else}}\
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="100%" height="100%" rx="50" fill="{{choose(avatar_colors, text(u.id))}}"/>\
+<text x="50%" y="50%" fill="#FFFFFF" text-anchor="middle" dy="0.35em" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif" \
+font-size="230" font-weight="800" letter-spacing="-5">{{upper(initials(u.name))}}</text></svg>{{end}}>>>
+
+// ---- your profile
+
+// Changes your name, email address, bio, and (when given) password.
+action update_profile(name: Text, email: Text, bio: Text, password: Text) {
+  require present(name) else invalid
+  set viewer.name = name
+  if present(email) { set viewer.email = email } else { set viewer.email = none }
+  set viewer.bio = bio
+  if present(password) {
+    set viewer.password = hash(password)
+  }
+}
+
+screen profile() at "/users/me/profile" cold
+<<<{{profile_page()}}>>>
+
+fragment profile_page() per viewer <<<\
+{{settings_head("My profile")}}\
+<div class="flex align-center gap"><img src="/avatars/User/{{viewer.id}}" width="96" height="96" class="avatar" alt=""></div>\
+<form method="post" action="/_do/update_profile" class="flex flex-column gap">\
+<label class="flex align-center gap input input--actor">{{icon("person.svg")}}<input type="text" name="name" class="input" required maxlength="100" value="{{viewer.name}}"></label>\
+<label class="flex align-center gap input input--actor">{{icon("email.svg")}}<input type="email" name="email" class="input" maxlength="254" value="{{if viewer.email != none}}{{viewer.email}}{{end}}"></label>\
+<label class="flex align-center gap input input--actor"><input type="text" name="bio" class="input" maxlength="200" placeholder="A short bio" value="{{if viewer.bio != none}}{{viewer.bio}}{{end}}"></label>\
+<label class="flex align-center gap input input--actor">{{icon("password.svg")}}<input type="password" name="password" class="input" autocomplete="new-password" placeholder="A new password (leave empty to keep it)"></label>\
+<button type="submit" class="btn btn--reversed">{{icon("check.svg")}} Save</button></form>\
+<form method="post" action="/_do/sign_out"><button type="submit" class="btn">{{icon("logout.svg")}} Sign out</button></form>\
+{{settings_tail()}}>>>
+
+// ---- someone's page
+
+screen user_page(user: User) at "/users/{user}" cold
+<<<{{user_card(user)}}>>>
+
+fragment user_card(user: User) <<<\
+{{settings_head(user.name)}}\
+<div class="flex flex-column align-center gap"><img src="/avatars/User/{{user.id}}" width="128" height="128" class="avatar" alt="">\
+<h2 class="txt-large">{{user.name}}</h2>{{if user.bio != none}}<p>{{user.bio}}</p>{{end}}\
+{{if user != viewer and user.status == "active"}}<form method="post" action="/_do/create_direct_room"><input type="hidden" name="users" value="{{user.id}}">\
+<button type="submit" class="btn btn--reversed">{{icon("messages-add.svg")}} Ping {{first_word(user.name)}}</button></form>{{end}}</div>\
+{{settings_tail()}}>>>
+
+// ---- the account
+
+// Renames the account, and limits room creation to administrators or not. Administrators only.
+action update_account(name: Text, restrict: Text) {
+  require administrator(viewer) else forbidden
+  require present(name) else invalid
+  for each a in Account {
+    set a.name = name
+    set a.restrict_room_creation = restrict == "on"
+  }
+}
+
+// Makes a person an administrator or a member. Administrators only; an account keeps one.
+action change_role(user: User, role: Text) {
+  require administrator(viewer) else forbidden
+  require user.status == "active" and user.role != "bot" else not_found
+  require role == "administrator" or role == "member" else invalid
+  require role == "administrator" or user.role != "administrator" or another_admin(user) else invalid
+  set user.role = role
+}
+
+// Deactivates a person: they can't sign in, and they leave every room but direct ones.
+// Administrators only; an account keeps one administrator.
+action deactivate_user(user: User) {
+  require administrator(viewer) else forbidden
+  require user.status == "active" else not_found
+  require user.role != "administrator" or another_admin(user) else invalid
+  for each ms in Membership where .user == user and .room.type != "direct" { delete ms }
+  for each s in Session where .user == user { delete s }
+  set user.status = "deactivated"
+}
+
+screen account() at "/account/edit" cold
+<<<{{account_page()}}>>>
+
+fragment account_page() per viewer <<<\
+{{settings_head("Account settings")}}\
+{{if administrator(viewer)}}<form method="post" action="/_do/update_account" class="flex flex-column gap">\
+<label class="flex align-center gap input input--actor"><input type="text" name="name" class="input" required maxlength="100" value="{{if first(Account).name != none}}{{first(Account).name}}{{end}}"></label>\
+<label class="flex align-center gap"><input type="checkbox" name="restrict"{{if first(Account).restrict_room_creation}} checked{{end}}> Only administrators can make rooms</label>\
+<button type="submit" class="btn btn--reversed">{{icon("check.svg")}} Save</button></form>{{end}}\
+<h2>People</h2><ul class="flex flex-column gap unpad">\
+{{for u in people()}}<li class="flex align-center gap"><img src="/avatars/User/{{u.id}}" width="32" height="32" class="avatar" alt=""><a href="/users/{{u.id}}">{{u.name}}</a>\
+<span class="txt-small">{{u.role}}</span>\
+{{if administrator(viewer) and u != viewer}}<form method="post" action="/_do/change_role" class="flex-inline"><input type="hidden" name="user" value="{{u.id}}">\
+<input type="hidden" name="role" value="{{if u.role == "administrator"}}member{{else}}administrator{{end}}">\
+<button type="submit" class="btn txt-small">{{if u.role == "administrator"}}Make a member{{else}}Make an administrator{{end}}</button></form>\
+<form method="post" action="/_do/deactivate_user" class="flex-inline" onsubmit="return confirm(&quot;Deactivate this person?&quot;)"><input type="hidden" name="user" value="{{u.id}}">\
+<button type="submit" class="btn txt-small">Deactivate</button></form>{{end}}</li>{{end}}</ul>\
+{{settings_tail()}}>>>

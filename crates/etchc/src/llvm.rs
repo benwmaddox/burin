@@ -555,7 +555,36 @@ impl<'a, 'b> Gen<'a, 'b> {
                 "sign" => via_tmp(self, &args[0], &|t| format!("call void @etch_sign(ptr %ctx, ptr {out}, ptr {t}, i64 {e1})"))?,
                 "autolink" => via_tmp(self, &args[0], &|t| format!("call void @etch_autolink(ptr {out}, ptr {t})"))?,
                 "asset" => via_tmp(self, &args[0], &|t| format!("call void @etch_asset(ptr %ctx, ptr {out}, ptr {t}, i64 {e1})"))?,
-                "first_word" | "initials" | "lower" => {
+                "choose" => {
+                    let items: Vec<String> = match &args[0] {
+                        Expr::Name(n, _) => match self.m.consts.get(n) {
+                            Some(Decl::Const { value: Expr::List(xs, _), .. }) => xs.iter().map(|x| self.constant(roots, x).ok_or("choose's list holds texts")).collect::<Result<_, _>>()?,
+                            _ => return Err("choose takes a constant list".into()),
+                        },
+                        _ => return Err("choose takes a constant list".into()),
+                    };
+                    let t = self.tmp();
+                    self.text(roots, &args[1], &t, false)?;
+                    self.flush(&t);
+                    if !self.bits {
+                        let i = self.v();
+                        self.line(&format!("{i} = call i64 @etch_crc_mod(ptr {t}, i64 {})", items.len()));
+                        let done = self.label("chosen");
+                        let labels: Vec<String> = (0..items.len()).map(|_| self.label("choice")).collect();
+                        let cases: String = labels.iter().enumerate().map(|(k, l)| format!("i64 {k}, label %{l} ")).collect();
+                        self.line(&format!("switch i64 {i}, label %{done} [ {cases}]"));
+                        for (k, l) in labels.iter().enumerate() {
+                            self.block(l);
+                            let b = if esc { esc_bytes(items[k].as_bytes()) } else { items[k].clone().into_bytes() };
+                            let g = self.md.str_const(&b);
+                            self.line(&format!("call void @etch_put(ptr {out}, ptr {g}, i64 {})", b.len()));
+                            self.line(&format!("br label %{done}"));
+                        }
+                        self.block(&done);
+                    }
+                    self.untmp();
+                }
+                "first_word" | "initials" | "lower" | "upper" => {
                     let f = f.clone();
                     via_tmp(self, &args[0], &|t| format!("call void @etch_{f}(ptr {out}, ptr {t}, i64 {e1})"))?
                 }
@@ -1223,6 +1252,8 @@ declare void @etch_delta_find(ptr, i64, i64, i64, i64)
 declare i64 @etch_str_chars(ptr)
 declare void @etch_w_sign_in(ptr, ptr)
 declare void @etch_w_sign_out(ptr)
+declare i64 @etch_crc_mod(ptr, i64)
+declare void @etch_upper(ptr, ptr, i64)
 declare %List @etch_w_ids(ptr, ptr)
 declare void @etch_w_go(ptr, ptr, i64, i64, ptr, i64)
 "#;

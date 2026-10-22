@@ -382,6 +382,27 @@ impl<'a> Model<'a> {
                 arg(0, Type::Text)?;
                 Ok(Type::Bool)
             }
+            "upper" => {
+                arity(1)?;
+                arg(0, Type::Text)?;
+                Ok(Type::Text)
+            }
+            // one of a constant list of texts, picked by the CRC-32 of a key's text
+            "choose" => {
+                arity(2)?;
+                match &args[0] {
+                    Expr::Name(n, _) if matches!(self.consts.get(n), Some(Decl::Const { value: Expr::List(..), .. })) => {}
+                    _ => return err(s, "choose takes a constant list, then a key"),
+                }
+                arg(1, Type::Text)?;
+                Ok(Type::Text)
+            }
+            // a password's hash (made off the writer, in an action only)
+            "hash" => {
+                arity(1)?;
+                arg(0, Type::Text)?;
+                Ok(Type::Password)
+            }
             "max" => {
                 arity(2)?;
                 arg(0, Type::Int)?;

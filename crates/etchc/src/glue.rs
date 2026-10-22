@@ -177,8 +177,8 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     let mut colds: Vec<String> = vec![];
     let mut consts: Vec<String> = vec![];
     for (si, d) in screen_decls.iter().enumerate() {
-        let (params, requires, cookies, body, public, cold) = match d {
-            Decl::Screen { params, requires, cookies, body, public, cold, .. } => (params, requires, cookies, body, *public, *cold),
+        let (params, requires, cookies, body, public, cold, ctype, max_age) = match d {
+            Decl::Screen { params, requires, cookies, body, public, cold, ctype, max_age, .. } => (params, requires, cookies, body, *public, *cold, ctype.clone(), *max_age),
             _ => continue,
         };
         // per request (public or cold): no audience, the guards checked in order each time
@@ -240,7 +240,10 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
             None if per_request => (String::new(), String::new()),
             None => return Err("a precomputed screen needs a guard naming its audience (member(viewer, …))".into()),
         };
-        let mut headers = String::from("Content-Type: text/html; charset=utf-8\\r\\n");
+        let mut headers = format!("Content-Type: {}\\r\\n", ctype.unwrap_or_else(|| "text/html; charset=utf-8".into()));
+        if let Some(n) = max_age {
+            headers.push_str(&format!("Cache-Control: private, max-age={n}\\r\\n"));
+        }
         let mut cookie_fmt = vec![];
         for (n, e) in cookies {
             // text(the parameter) or text(the parameter.id): the key
@@ -398,6 +401,16 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
             let _ = writeln!(s, "                let hash: Option<String> = c.prepare_cached(r##\"{}\"##).ok().and_then(|mut st| st.query_row(rusqlite::params![{}], |r| r.get::<_, Option<String>>(0)).ok()).flatten();", sel.sql, binds.join(", "));
             let _ = writeln!(s, "                let ok = etch_rt::pass::verify(hash.as_deref(), etch_rt::app::field(form, {text:?}).unwrap_or(\"\"));");
             let _ = writeln!(s, "                form.push((\"__verified_{i}\".to_string(), if ok {{ hash.unwrap_or_default() }} else {{ String::new() }}));");
+        }
+        let _ = writeln!(s, "            }}");
+    }
+    let _ = writeln!(s, "            _ => {{}}\n        }}");
+    // each hash(text): hashed here (slow by design), off the writer
+    let _ = writeln!(s, "        match name {{");
+    for a in acts.iter().filter(|a| !a.hashes.is_empty()) {
+        let _ = writeln!(s, "            {:?} => {{", a.name);
+        for (i, arg) in &a.hashes {
+            let _ = writeln!(s, "                let t = etch_rt::app::field(form, {arg:?}).unwrap_or(\"\").to_string();\n                form.push((\"__hashed_{i}\".to_string(), if t.is_empty() {{ String::new() }} else {{ etch_rt::pass::hash(&t) }}));");
         }
         let _ = writeln!(s, "            }}");
     }

@@ -53,6 +53,9 @@ pub struct ActInfo {
     pub verifies: Vec<(usize, Expr, String)>,
     /// arguments that are lists of rows: from repeated fields, as JSON arrays of ids
     pub list_args: Vec<String>,
+    /// each `hash(text)`: (its index, the text's argument); the runtime hashes it off the writer
+    /// (`__hashed_<i>`, empty for empty text)
+    pub hashes: Vec<(usize, String)>,
 }
 
 /// `authenticates(h, p)` replaced by `h == __verified_<i>`, in order; the replaced (h, p) pairs.
@@ -282,8 +285,10 @@ struct Act<'a, 'b> {
     verifies: Vec<(usize, Expr, String)>,
     /// the entry block's allocas
     allocas: String,
-    /// the registers ('r') and screen lists ('l') a write's precise edges reached
-    touched: Vec<(char, usize)>,
+    /// the registers ('r') and screen lists ('l') a write's precise edges reached: in full (None),
+    /// or for one read path (its start table, its path)
+    touched: Vec<(char, usize, Option<(String, String)>)>,
+    hashes: Vec<(usize, String)>,
 }
 
 impl<'a, 'b> Act<'a, 'b> {
@@ -348,6 +353,10 @@ impl<'a, 'b> Act<'a, 'b> {
                 self.line(&format!("{s1} = insertvalue %Str undef, ptr {g}, 0\n  {s2} = insertvalue %Str {s1}, i64 {}, 1\n  store %Str {s2}, ptr {p}", s.len()));
                 Ok((p, Shape::Str))
             }
+            Expr::Call(f, _, _) if f == "hash" => {
+                let n = self.unhash(e)?;
+                self.value(&n)
+            }
             Expr::Call(f, a, _) if f == "token" => {
                 let n = match a.first() {
                     Some(Expr::Int(n, _)) => *n,
@@ -359,6 +368,32 @@ impl<'a, 'b> Act<'a, 'b> {
             }
             _ => Err(format!("an action can't compute `{}` yet", show(e))),
         }
+    }
+
+    /// `hash(arg)` as its hidden argument (the runtime hashes the text off the writer).
+    fn unhash(&mut self, e: &Expr) -> Result<Expr, String> {
+        match e {
+            Expr::Call(f, a, s) if f == "hash" => {
+                let arg = match a.first() {
+                    Some(Expr::Name(n, _)) if self.args.iter().any(|(x, sh)| x == n && *sh == Shape::Str) => n.clone(),
+                    _ => return Err("hash takes a text argument".into()),
+                };
+                let i = match self.hashes.iter().position(|(_, x)| *x == arg) {
+                    Some(i) => i,
+                    None => {
+                        self.hashes.push((self.hashes.len(), arg));
+                        self.hashes.len() - 1
+                    }
+                };
+                Ok(Expr::Name(format!("__hashed_{i}"), *s))
+            }
+            other => Ok(other.clone()),
+        }
+    }
+
+    /// A precise edge covers this read path of register `reg`.
+    fn cover(&mut self, reg: usize, start: &str, path: &str) {
+        self.touched.push(('r', reg, Some((start.to_string(), path.to_string()))));
     }
 
     fn outcome(&mut self, o: &str) -> usize {
@@ -418,9 +453,11 @@ impl<'a, 'b> Act<'a, 'b> {
     }
 
     fn delta(&mut self, op: i32, a: usize, key: &str, item: &str) {
+        // ops that rebuild a register or list in full cover all its reads (op 3 covers the read
+        // path its caller names: `cover`)
         match op {
-            1 | 3 | 4 | 6 | 9 => self.touched.push(('r', a)),
-            2 | 5 | 7 => self.touched.push(('l', a)),
+            1 | 4 | 6 | 9 => self.touched.push(('r', a, None)),
+            2 | 5 | 7 => self.touched.push(('l', a, None)),
             _ => {}
         }
         self.line(&format!("call void @etch_delta(ptr %d, i32 {op}, i64 {a}, i64 {key}, i64 {item})"));
@@ -553,7 +590,26 @@ impl<'a, 'b> Act<'a, 'b> {
             }) {
                 let id = vals.get("id").cloned().unwrap_or_default();
                 self.delta(3, ri, &id, "0");
+                for c in cols {
+                    self.cover(ri, ent, c);
+                }
                 self.note(format!("set {ent}.{} → {}: READ (rebuilt)", cols.join(","), r.name));
+            }
+        }
+        // a row-keyed register's fields through a reference to the written row (a message's
+        // creator's name): every kept one rebuilt
+        for (ri, r) in regs.iter().enumerate() {
+            let Some((_, rent)) = &r.root else { continue };
+            if rows_change {
+                continue;
+            }
+            for (p, _) in &r.schema.fields {
+                let ps: Vec<&str> = p.split('.').skip(1).collect();
+                if ps.len() == 2 && cols.iter().any(|c| c == ps[1]) && self.m.field_type(rent, ps[0]).map(|t| matches!(t.strip_opt(), Type::Ref(e) if e == ent)).unwrap_or(false) {
+                    self.delta(4, ri, "0", "0");
+                    self.note(format!("set {ent}.{} → {} (through {rent}.{}): READ (every kept one rebuilt)", cols.join(","), r.name, ps[0]));
+                    break;
+                }
             }
         }
         // registers' lists over this entity, or reaching it through a reference
@@ -596,7 +652,7 @@ impl<'a, 'b> Act<'a, 'b> {
                             let (v, _) = self.value(e)?;
                             let slot = l.slot.unwrap();
                             self.line(&format!("call void @etch_delta_patch(ptr %d, i64 {}, i64 {k}, i64 {id}, i64 {slot}, i64 {fi}, i64 {v})", l.reg));
-                            self.touched.push(('r', l.reg));
+                            self.cover(l.reg, &l.entity, c);
                             if !self.patches.contains(&(l.reg, slot, fi)) {
                                 self.patches.push((l.reg, slot, fi));
                             }
@@ -605,6 +661,10 @@ impl<'a, 'b> Act<'a, 'b> {
                     }
                     (Some(k), false) => {
                         self.delta(3, l.reg, &k, "0");
+                        self.cover(l.reg, &l.entity, "*");
+                        for c in cols {
+                            self.cover(l.reg, &l.entity, c);
+                        }
                         self.note(format!("{verb} {ent} → {reg_name}: READ (its list changes order or rows)"));
                     }
                     (None, _) => {
@@ -625,7 +685,9 @@ impl<'a, 'b> Act<'a, 'b> {
             }) {
                 let id = vals.get("id").cloned().ok_or("the written row's id")?;
                 self.line(&format!("call void @etch_delta_find(ptr %d, i64 {}, i64 {id}, i64 {slot}, i64 {pi})", l.reg));
-                self.touched.push(('r', l.reg));
+                for c in cols {
+                    self.cover(l.reg, &l.entity, &format!("{}.{c}", l.items.fields[pi].0.split('.').nth(1).unwrap_or("")));
+                }
                 if !self.finds.contains(&(l.reg, slot, pi)) {
                     self.finds.push((l.reg, slot, pi));
                 }
@@ -642,6 +704,9 @@ impl<'a, 'b> Act<'a, 'b> {
                 let _ = writeln!(self.b, "  br label %{h}\n{h}:\n  {rc} = call i32 @sqlite3_step(ptr {st})\n  {ok} = icmp eq i32 {rc}, 100\n  br i1 {ok}, label %{body}, label %{done}\n{body}:");
                 self.line(&format!("{k} = call i64 @etch_col_i64(ptr {st}, i32 0)"));
                 self.delta(3, l.reg, &k, "0");
+                for c in cols {
+                    self.cover(l.reg, &l.entity, &format!("{p0}.{c}"));
+                }
                 let _ = writeln!(self.b, "  br label %{h}\n{done}:\n  call i32 @sqlite3_reset(ptr {st})");
                 self.note(format!("set {ent}.{} → {reg_name} (through {}.{p0}): READ (each reaching key rebuilt)", cols.join(","), l.entity));
             } else {
@@ -721,9 +786,20 @@ impl<'a, 'b> Act<'a, 'b> {
         // speed, never correctness; the build reports it
         // a row made or deleted reaches what scans its entity ("*"); a column read through a
         // reference reaches only through the referring row (that row's own write covers it)
-        let hit = |reads: &[(String, String)]| reads.iter().any(|(e, c)| e == ent && if rows_change { c == "*" } else { cols.contains(c) });
+        let m = self.m;
+        let reaches = |start: &str, path: &str| match sql::target(m, start, path) {
+            Some((e, c)) => e == ent && if rows_change { c == "*" } else { cols.contains(&c) },
+            None => false,
+        };
+        let hit = |reads: &[(String, String)]| reads.iter().any(|(s, p)| reaches(s, p));
+        let uncovered = |touched: &[(char, usize, Option<(String, String)>)], kind: char, i: usize, reads: &[(String, String)]| {
+            if touched.iter().any(|(k, x, c)| *k == kind && *x == i && c.is_none()) {
+                return false;
+            }
+            reads.iter().any(|(s, p)| reaches(s, p) && !touched.iter().any(|(k, x, c)| *k == kind && *x == i && c.as_ref() == Some(&(s.clone(), p.clone()))))
+        };
         for (ri, r) in regs.iter().enumerate() {
-            if !self.touched.contains(&('r', ri)) && hit(&r.reads) {
+            if uncovered(&self.touched, 'r', ri, &r.reads) {
                 // a row-keyed register of a new row isn't kept yet; of a deleted one, dropped
                 if rows_change && r.root.as_ref().map(|(_, e)| e == ent).unwrap_or(false) {
                     continue;
@@ -733,15 +809,25 @@ impl<'a, 'b> Act<'a, 'b> {
             }
         }
         for (si, s) in screens.iter().enumerate() {
-            if !self.touched.contains(&('l', si)) && hit(&s.reads) {
+            if uncovered(&self.touched, 'l', si, &s.reads) {
                 self.delta(5, si, "-9223372036854775808", "0");
                 self.note(format!("{verb} {ent}.{} → screen list {}: FALLBACK (every kept one read again; no precise rule)", cols.join(","), s.name));
             }
         }
         // (a new row changes no one's record)
         if !created && hit(&self.md.viewer_reads.clone()) {
-            self.delta(15, 0, "0", "0");
-            self.note(format!("{verb} {ent}.{} → the viewers' records: FALLBACK (all read again, the screens rebuilt)", cols.join(",")));
+            let own = self.m.viewer_entity() == Some(ent);
+            match vals.get("id").cloned().filter(|_| own) {
+                // the viewer's own row: its record, its registers and the pages it can see
+                Some(id) => {
+                    self.delta(15, 0, &id, "0");
+                    self.note(format!("{verb} {ent}.{} → that viewer: READ (their record, their own registers, the pages they can see)", cols.join(",")));
+                }
+                None => {
+                    self.delta(15, 0, "-9223372036854775808", "0");
+                    self.note(format!("{verb} {ent}.{} → the viewers' records: FALLBACK (all read again, the screens rebuilt)", cols.join(",")));
+                }
+            }
         }
         Ok(())
     }
@@ -978,6 +1064,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     for (f, v) in &sets {
                         self.check_max(&ent, f, v)?;
                     }
+                    let sets: Vec<(String, Expr)> = sets.iter().map(|(c, v)| Ok((c.clone(), self.unhash(v)?))).collect::<Result<_, String>>()?;
                     let filter = q.filter.as_ref().map(|f| inline::expr(self.m, f, &inline::Env::new(), 0, 0));
                     // the changed rows' columns the delta edges key by: lists' and screens' keys
                     let mut ret: Vec<String> = vec!["id".into()];
@@ -1116,6 +1203,41 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
             }
             let mut hid = vec![];
             hidden(body, &mut hid, &mut 0);
+            // each distinct hash(argument), in order of appearance
+            fn hashed(body: &[Stmt], out: &mut Vec<String>) {
+                fn ex(e: &Expr, out: &mut Vec<String>) {
+                    match e {
+                        Expr::Call(f, a, _) if f == "hash" => {
+                            if let Some(Expr::Name(n, _)) = a.first() {
+                                if !out.contains(n) {
+                                    out.push(n.clone());
+                                }
+                            }
+                        }
+                        Expr::Call(_, a, _) => a.iter().for_each(|x| ex(x, out)),
+                        Expr::Bin(_, l, r, _) => {
+                            ex(l, out);
+                            ex(r, out);
+                        }
+                        _ => {}
+                    }
+                }
+                for s in body {
+                    match s {
+                        Stmt::Set(_, _, v, _) => ex(v, out),
+                        Stmt::Create(_, fs, _, _) => fs.iter().for_each(|(_, v)| ex(v, out)),
+                        Stmt::ForEach(_, _, inner, _) => hashed(inner, out),
+                        Stmt::If(_, a, b, _) => {
+                            hashed(a, out);
+                            hashed(b, out);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut hs = vec![];
+            hashed(body, &mut hs);
+            hid.extend((0..hs.len()).map(|i| format!("__hashed_{i}")));
             args.extend(hid.into_iter().map(|h| (h, Shape::Str)));
             let mut creates = vec![];
             creates_of(body, &mut creates);
@@ -1123,7 +1245,7 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
                 Some(Decl::Viewer { entity, .. }) => Some(("viewer".to_string(), entity.clone())),
                 _ => None,
             }).collect();
-            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![], audiences: auds.clone(), lets: HashMap::new(), verifies: vec![], allocas: String::new(), touched: vec![] };
+            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![], audiences: auds.clone(), lets: HashMap::new(), verifies: vec![], allocas: String::new(), touched: vec![], hashes: vec![] };
             a.stmts(body, &Scope::of(params), &regs, &lists, screens)?;
             let mut f = String::new();
             let parts: Vec<&str> = args.iter().map(|(_, s)| if *s == Shape::Str { "%Str" } else { "i64" }).collect();
@@ -1137,7 +1259,7 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
                 let _ = writeln!(f, "{l}:\n  ret i32 {code}");
             }
             let _ = writeln!(f, "}}\n");
-            let (outcomes, edges, patches, verifies) = (a.outcomes.clone(), a.edges.clone(), a.patches.clone(), a.verifies.clone());
+            let (outcomes, edges, patches, verifies, hashes) = (a.outcomes.clone(), a.edges.clone(), a.patches.clone(), a.verifies.clone(), a.hashes.clone());
             for f in a.finds.clone() {
                 if !all_finds.contains(&f) {
                     all_finds.push(f);
@@ -1149,7 +1271,7 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
                     all_patches.push(p);
                 }
             }
-            infos.push(ActInfo { name: name.clone(), args, outcomes, edges, public: *public, verifies, list_args });
+            infos.push(ActInfo { name: name.clone(), args, outcomes, edges, public: *public, verifies, list_args, hashes });
         }
     }
     for p in &all_patches {

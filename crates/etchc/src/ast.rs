@@ -205,7 +205,9 @@ pub enum Decl {
     Fragment { name: String, params: Vec<Param>, per_viewer: bool, body: Template, span: Span },
     /// `cold`: rendered per request, outside the fast path; `public`: for anyone (no viewer, no
     /// parameters: rendered per request)
-    Screen { name: String, params: Vec<Param>, route: String, cold: bool, public: bool, requires: Vec<Require>, cookies: Vec<(String, Expr)>, body: Template, span: Span },
+    /// `type "…"`: the response's content type (HTML when absent); `max_age N`: how long a browser
+    /// may keep it (seconds; private)
+    Screen { name: String, params: Vec<Param>, route: String, cold: bool, public: bool, ctype: Option<String>, max_age: Option<i64>, requires: Vec<Require>, cookies: Vec<(String, Expr)>, body: Template, span: Span },
     /// `public`: run without a viewer (signing in)
     Action { name: String, params: Vec<Param>, public: bool, body: Vec<Stmt>, span: Span },
     /// `home <screen>(<row>)`: where "/" goes for a viewer

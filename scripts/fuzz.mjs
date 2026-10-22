@@ -73,13 +73,21 @@ const actions = [
     const r = pick(roomsOf(w.user));
     if (r && r !== 486777696) await act(w, "delete_room", [["room", r]]);
   }],
+  [3, async (w) => act(w, "update_profile", [["name", `${pick(["Ann", "Bo", "Cy", "Di"])} ${Math.floor(rnd() * 100)}`], ["email", pick(["", "dup@example.com", `p${Math.floor(rnd() * 1e6)}@example.com`])], ["bio", rnd() < 0.5 ? "" : "fuzzing"], ["password", ""]])],
+  [2, async (w) => {
+    const u = one("select id from User where status = 'active' and role != 'bot' order by random() limit 1");
+    if (u) await act(w, "change_role", [["user", u.id], ["role", pick(["administrator", "member"])]]);
+  }],
+  [1, async (w) => act(w, "update_account", [["name", `Account ${Math.floor(rnd() * 100)}`], ["restrict", rnd() < 0.3 ? "on" : ""]])],
   [5, async (w) => act(w, "set_involvement", [["room", pick(roomsOf(w.user)) ?? anyRoom()], ["involvement", pick(["everything", "mentions", "nothing", "invisible"])]])],
 ];
 const total = actions.reduce((s, [w]) => s + w, 0);
+let choices = 0;
 
 for (let i = 0; i < steps; i++) {
   const who = pick(people);
   let x = rnd() * total;
+  choices = (Math.imul(choices, 31) + Math.floor(x)) >>> 0;
   for (const [w, f] of actions) {
     if ((x -= w) < 0) {
       await f(who);
@@ -97,4 +105,4 @@ for (let i = 0; i < steps; i++) {
 for (const p of people) for (const room of roomsOf(p.user)) await read(p, room);
 await new Promise((r) => setTimeout(r, 400));
 for (const p of people) for (const room of roomsOf(p.user)) await read(p, room);
-console.log(JSON.stringify(Object.fromEntries(Object.entries(outcomes).sort())));
+console.log(JSON.stringify({ seed: seedArg, choices, ...Object.fromEntries(Object.entries(outcomes).sort()) }));
