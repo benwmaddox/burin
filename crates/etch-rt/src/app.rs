@@ -810,7 +810,7 @@ pub fn main<G: Glue>(configs: &[&str], session_cookie: &'static [u8]) {
     let args: Vec<String> = std::env::args().collect();
     let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let data = arg("--data").expect("--data DIR");
-    let assets = arg("--assets").unwrap_or_else(|| ".".into());
+    let assets = arg("--assets");
     let port: u16 = arg("--port").map(|p| p.parse().expect("--port N")).unwrap_or(3000);
     let host = arg("--host").unwrap_or_else(|| format!("127.0.0.1:{port}"));
     let workers: usize = arg("--workers").map(|w| w.parse().expect("--workers N")).unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
@@ -832,7 +832,7 @@ pub fn main<G: Glue>(configs: &[&str], session_cookie: &'static [u8]) {
             other => std::env::var(format!("ETCH_CONFIG_{}", other.to_uppercase())).unwrap_or_default(),
         })
         .collect();
-    let ctx = Arc::new(Ctx { signer: crate::sign::Signer::new(&secret), assets: asset_urls(std::path::Path::new(&assets)), configs: values });
+    let ctx = Arc::new(Ctx { signer: crate::sign::Signer::new(&secret), assets: assets.map(|a| asset_urls(std::path::Path::new(&a))).unwrap_or_default(), configs: values });
     let db_path = dir.join("app.sqlite").to_string_lossy().into_owned();
     // the next seq: past every table's
     let seq = {

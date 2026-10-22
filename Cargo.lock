@@ -69,6 +69,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "board-app"
+version = "0.1.0"
+dependencies = [
+ "etch-rt",
+ "rusqlite",
+]
+
+[[package]]
 name = "campfire-app"
 version = "0.1.0"
 dependencies = [

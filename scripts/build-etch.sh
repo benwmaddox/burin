@@ -8,7 +8,7 @@ source ~/.cargo/env 2>/dev/null || true
 PROFILE=${1:-release}; EXTRA=${2:-}
 cd /mnt/d/code/etch
 BIN=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin
-GEN=$HOME/etch-gen; mkdir -p $GEN
+GEN=$HOME/etch-gen-${APP:-campfire}; mkdir -p $GEN
 t0=$(date +%s.%N)
 # etchc is only the compiler: built with a newer toolchain (stable 1.93 crashes on it: a rustc bug)
 CARGO_TARGET_DIR=$HOME/etch-target-etchc taskset -c 0-7 cargo +1.99.0 build -q --release -p etchc
@@ -25,7 +25,7 @@ FLAGS="-Clinker-plugin-lto -Clink-arg=-fuse-ld=lld -Clink-arg=-B$BIN/gcc-ld $EXT
 ETCH_GEN_DIR=$GEN RUSTFLAGS="$FLAGS" CARGO_TARGET_DIR=$HOME/etch-target-gen taskset -c 0-7 cargo build -q --profile $PROFILE -p ${CRATE:-campfire-app}
 t2=$(date +%s.%N)
 DIR=$PROFILE; [ "$PROFILE" = dev ] && DIR=debug
-cp $HOME/etch-target-gen/$DIR/${CRATE:-campfire-app} ~/hw/etch-gen-$PROFILE
-echo "spec -> IR -> bitcode: $(echo "$t1 - $t0" | bc | cut -c1-5) s; link with LTO: $(echo "$t2 - $t1" | bc | cut -c1-5) s -> ~/hw/etch-gen-$PROFILE"
-echo "generated functions left in the binary (inlined when absent): $($BIN/llvm-nm ~/hw/etch-gen-$PROFILE | grep -cE ' etch_(build|bits)_')"
-echo "runtime helpers left as symbols: $($BIN/llvm-nm ~/hw/etch-gen-$PROFILE | grep -cE ' T etch_(put|esc|int|json|sign|time|str_eq)$')"
+cp $HOME/etch-target-gen/$DIR/${CRATE:-campfire-app} ~/hw/etch-${APP:-gen}-$PROFILE
+echo "spec -> IR -> bitcode: $(echo "$t1 - $t0" | bc | cut -c1-5) s; link with LTO: $(echo "$t2 - $t1" | bc | cut -c1-5) s -> ~/hw/etch-${APP:-gen}-$PROFILE"
+echo "generated functions left in the binary (inlined when absent): $($BIN/llvm-nm ~/hw/etch-${APP:-gen}-$PROFILE | grep -cE ' etch_(build|bits)_')"
+echo "runtime helpers left as symbols: $($BIN/llvm-nm ~/hw/etch-${APP:-gen}-$PROFILE | grep -cE ' T etch_(put|esc|int|json|sign|time|str_eq)$')"
