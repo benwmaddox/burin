@@ -1,0 +1,8 @@
+etch
+Copyright 2026 Maddox Labs LLC
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The Campfire application in apps/campfire/ reimplements the behavior of ONCE Campfire by
+37signals, LLC, which is distributed under the MIT license. Its assets (apps/campfire/assets/)
+come from Campfire; that license is reproduced in apps/campfire/assets/MIT-LICENSE.
