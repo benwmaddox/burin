@@ -131,12 +131,7 @@ fragment sidebar(page_room: Room) per viewer <<<\
 {{for ms in sidebar_directs()}}<a href="/rooms/{{ms.room.id}}" class="direct{{if unread(ms) and ms.room != page_room}} unread{{end}}"><div class="avatar__group">\
 {{for o in others(ms.room) limit 4}}<span class="avatar"><img src="/avatars/User/{{o.user.id}}" alt=""></span>{{end}}</div>\
 <div class="direct__author flex align-center gap max-width min-width border-radius txt-small"><span class="txt-nowrap overflow-ellipsis">{{direct_label(ms.room)}}</span></div></a>{{end}}\
-</div><div class="" data-live-list>\
-{{for u in direct_placeholders()}}<form method="post" action="/_do/create_direct_room" class="flex-inline" ><input type="hidden" name="__arg_users" value="@{{u.id}}">\
-<input type="hidden" name="__h" value="{{plain_token(page_room)}}"><button type="submit" class="direct borderless fill-transparent unpad"><div class="avatar">\
-<img aria-hidden="true" src="/avatars/User/{{u.id}}" width="48" height="48"></div>\
-<div class="direct__author flex align-center gap max-width min-width border-radius txt-small"><div class="txt-nowrap overflow-ellipsis">\
-<span class="for-screen-reader">Start a ping with</span><span class="">{{first_word(u.name)}}</span></div></div></button></form>{{end}}\
+</div><div class="" data-live-list data-ping-suggestions="/rooms/{{page_room.id}}/ping_suggestions">\
 </div></div><div class="rooms position-relative flex flex-column gap"><div class="" data-live-list>\
 {{for ms in sidebar_open()}}<a href="/rooms/{{ms.room.id}}" class="align-center gap room btn txt-nowrap{{if unread(ms) and ms.room != page_room}} unread{{end}}">\
 <span class="overflow-ellipsis">{{ms.room.name}}</span></a>{{end}}</div>\
@@ -164,3 +159,15 @@ fragment invitation(room: Room) <<<\
 <div class="flex align-center gap"><button type="button" class="btn" onclick="navigator.clipboard.writeText({{json("http://" + config.host + "/join/" + first(Account).join_code)}})">\
 {{icon("copy-paste.svg")}}<span class="for-screen-reader">Copy join link</span></button></div></div>\
 </div></div></div>{{end}}>>>
+
+// The people the viewer could start a direct room with: loaded on demand (the page's script asks
+// the first time the direct rooms' strip is pointed at or focused), not built for every page.
+screen ping_suggestions(room: Room) at "/rooms/{room}/ping_suggestions" cold
+  require member(viewer, room) else go "/"
+<<<{{ping_suggestion_list(room)}}>>>
+
+fragment ping_suggestion_list(page_room: Room) per viewer <<<{{for u in direct_placeholders()}}<form method="post" action="/_do/create_direct_room" class="flex-inline" ><input type="hidden" name="__arg_users" value="@{{u.id}}">\
+<input type="hidden" name="__h" value="{{plain_token(page_room)}}"><button type="submit" class="direct borderless fill-transparent unpad"><div class="avatar">\
+<img aria-hidden="true" src="/avatars/User/{{u.id}}" width="48" height="48"></div>\
+<div class="direct__author flex align-center gap max-width min-width border-radius txt-small"><div class="txt-nowrap overflow-ellipsis">\
+<span class="for-screen-reader">Start a ping with</span><span class="">{{first_word(u.name)}}</span></div></div></button></form>{{end}}>>>

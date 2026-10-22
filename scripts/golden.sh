@@ -20,6 +20,8 @@ for who in david:$TOKEN jason:jasontokenjasontokenjasontoken00; do
   sleep 0.2
   curl -sS -D $OUT/$name.headers -o $OUT/$name-2.html -H "Cookie: session_token=$tok" http://127.0.0.1:$PORT/rooms/486777696
   # gzip, decoded by curl: must be the same page
+  # the on-demand part: who the viewer could start a direct room with
+  curl -sS -o $OUT/$name-ping.html -H "Cookie: session_token=$tok" http://127.0.0.1:$PORT/rooms/486777696/ping_suggestions
   curl -sS --compressed -D $OUT/$name-gz.headers -o $OUT/$name-3.html -H "Cookie: session_token=$tok" http://127.0.0.1:$PORT/rooms/486777696
 done
 curl -sS http://127.0.0.1:$PORT/_etch/stats; echo

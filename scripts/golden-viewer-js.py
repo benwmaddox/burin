@@ -8,6 +8,13 @@ me = re.search(r'<aside id="sidebar" data-user-id="(\d+)" data-role="([^"]*)"(?:
 uid, admin = me.group(1), me.group(2) == 'administrator'
 page = new.replace(me.group(0), '<aside id="sidebar">')
 page = page.replace(open('/mnt/d/code/etch/apps/campfire/scripts/viewer.js.html', encoding='utf-8').read(), '')
+# the part loaded on demand (argv[3]: what its route answered), put where the script puts it
+if len(sys.argv) > 3:
+    ping = open(sys.argv[3], encoding='utf-8').read()
+    page, n = re.subn(r'<div class="" data-live-list data-ping-suggestions="[^"]*">', lambda m: '<div class="" data-live-list>' + ping, page, count=1)
+    assert n == 1, 'no on-demand container'
+# the room being read is marked read by the script (no visible change)
+page = re.sub(r' data-read-room="\d+"', '', page)
 
 # each message: its author, then its edit controls shown or removed, and "mine"
 def message(m):
