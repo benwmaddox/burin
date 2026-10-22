@@ -55,13 +55,13 @@ inns curl -fsS -o /dev/null http://127.0.0.1:13774/up || { note "not ready"; tai
 note "ready run=$RUN gobin=$GOBIN page_keys=${PAGE_KEYS:-} wroom=$WROOM conns=$CONNS server_cpus=$SRV_CPUS loadgen_cpus=$LG_CPUS"
 cg_usec() { awk '$1=="usage_usec"{print $2}' "$CG/cpu.stat"; }
 cache() { inns curl -fsS http://127.0.0.1:6060/debug/cache 2>/dev/null || echo '{"hits":0,"misses":0}'; }
-inns taskset -c "$LG_CPUS" setpriv --reuid=$U --regid=$U --init-groups "$LGBIN" http --base http://127.0.0.1:13774 --cookie "$COOKIE" --path "/rooms/$ROOM" --conc 4 --duration 3 --gzip 0 > "$OUT/warmup.json"
+inns taskset -c "$LG_CPUS" setpriv --reuid=$U --regid=$U --init-groups "$LGBIN" http --base http://127.0.0.1:13774 --cookie "$COOKIE" --path "/rooms/$ROOM" --conc 4 --duration 3 --gzip ${GZIP:-0} > "$OUT/warmup.json"
 NCPU=$(taskset -c "$SRV_CPUS" nproc)
 for R in "${RATES[@]}"; do
   S0=$(cg_usec); C0=$(cache)
   inns taskset -c "$LG_CPUS" setpriv --reuid=$U --regid=$U --init-groups node /mnt/d/code/etch/bench/post-writer.mjs http://127.0.0.1:13774 "$COOKIE" "$WROOM" "$R" "$SECS" > "$W/writer-$R.json" &
   WP=$!
-  inns taskset -c "$LG_CPUS" setpriv --reuid=$U --regid=$U --init-groups "$LGBIN" http --base http://127.0.0.1:13774 --cookie "$COOKIE" --path "/rooms/$ROOM" --conc "$CONNS" --duration "$SECS" --gzip 0 > "$OUT/cell-$R.json"
+  inns taskset -c "$LG_CPUS" setpriv --reuid=$U --regid=$U --init-groups "$LGBIN" http --base http://127.0.0.1:13774 --cookie "$COOKIE" --path "/rooms/$ROOM" --conc "$CONNS" --duration "$SECS" --gzip ${GZIP:-0} > "$OUT/cell-$R.json"
   wait $WP; S1=$(cg_usec); C1=$(cache)
   cp "$W/writer-$R.json" "$OUT/writer-$R.json"
   node -e '

@@ -709,8 +709,16 @@ impl<'a, 'b> Gen<'a, 'b> {
                         // a splice: its place is marked; it's its own register, keyed by the parameter
                         self.flush(out);
                         if !self.bits {
-                            self.line(&format!("call void @etch_split(ptr %splits, ptr {out})"));
-                            self.splices.push(e.clone());
+                            // the splice's site: which splice register goes here
+                            let key = show(e);
+                            let site = match self.splices.iter().position(|x| show(x) == key) {
+                                Some(i) => i,
+                                None => {
+                                    self.splices.push(e.clone());
+                                    self.splices.len() - 1
+                                }
+                            };
+                            self.line(&format!("call void @etch_split(ptr %splits, ptr {out}, i64 {site})"));
                         }
                         continue;
                     }
@@ -848,7 +856,9 @@ fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[T
     } else {
         match params.first().map(|p| (p.name.clone(), p.ty.strip_opt().clone())) {
             Some((r, Type::Ref(e))) if params.len() == 1 => Some((r, e)),
-            _ => return Err(format!("fragment {name}: a register needs one row parameter, or `per viewer`")),
+            // no parameters: one instance for the app (key 0)
+            None => None,
+            _ => return Err(format!("fragment {name}: a register needs one row parameter, none, or `per viewer`")),
         }
     };
     let mut names = vec![];
@@ -1019,7 +1029,7 @@ declare void @etch_first_word(ptr, ptr, i64)
 declare void @etch_initials(ptr, ptr, i64)
 declare void @etch_lower(ptr, ptr, i64)
 declare void @etch_sentence(ptr, ptr, i64)
-declare void @etch_split(ptr, ptr)
+declare void @etch_split(ptr, ptr, i64)
 declare void @etch_replace(ptr, ptr, ptr, i64, ptr, i64, i64)
 declare void @etch_time(ptr, i64, i64, i64)
 declare void @etch_config(ptr, ptr, i64, i64)
@@ -1050,8 +1060,11 @@ declare void @etch_delta_find(ptr, i64, i64, i64, i64)
 pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> Result<(String, String), String> {
     let mut md = Module { globals: String::new(), strs: HashMap::new(), viewer: Schema::default(), funcs: String::new(), registers: vec![] };
     md.viewer.field("viewer", Shape::I64);
-    for r in registers {
-        let (params, body, per_viewer) = match m.fragments.get(*r) {
+    // the registers: those named, or (by default) what the screens show
+    let auto = crate::glue::registers_of(m);
+    let registers: Vec<&str> = if registers.is_empty() { auto.iter().map(String::as_str).collect() } else { registers.to_vec() };
+    for r in &registers {
+        let (params, body, per_viewer) = match m.fragments.get(&r.to_string()) {
             Some(Decl::Fragment { params, body, per_viewer, .. }) => (params, body, *per_viewer),
             _ => return Err(format!("no fragment {r}")),
         };
@@ -1116,6 +1129,7 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
         let _ = writeln!(rs, "        ({r}, {l}, {f}) => etch_find_{}_{l}_{f}(rec, row, 0),", md.registers[*r].name);
     }
     let _ = writeln!(rs, "        _ => true,\n    }}\n}}");
+    rs.push_str(&crate::glue::glue(m, &md, &screens, &acts)?);
     Ok((ll, rs))
 }
 

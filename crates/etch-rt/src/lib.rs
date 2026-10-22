@@ -2,11 +2,14 @@
 //! the same for every app; the compiler generates only the app's own layer.
 
 pub mod abi;
+pub mod app;
 pub mod gz;
 pub mod html;
+pub mod keys;
 pub mod http;
 pub mod out;
 pub mod sign;
+pub mod store;
 pub mod time;
 
 pub use http::{serve, Handler, Req};

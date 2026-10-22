@@ -6,6 +6,7 @@
 mod ast;
 mod actions;
 mod check;
+mod glue;
 mod inline;
 mod llvm;
 mod netlist;
@@ -55,10 +56,12 @@ fn main() -> ExitCode {
         }
         "emit" => {
             // etchc emit <app> <out dir> <register,…>: the registers' LLVM module and Rust header
+            // (the registers are what the screens show, unless named)
             let (out, regs) = match (args.get(3), args.get(4)) {
                 (Some(o), Some(r)) => (Path::new(o), r.split(',').collect::<Vec<_>>()),
+                (Some(o), None) => (Path::new(o), vec![]),
                 _ => {
-                    eprintln!("usage: etchc emit <app dir> <out dir> <register,…>");
+                    eprintln!("usage: etchc emit <app dir> <out dir> [register,…]");
                     return ExitCode::from(64);
                 }
             };

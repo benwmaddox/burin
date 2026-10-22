@@ -289,10 +289,16 @@ impl Arena {
     }
 }
 
-/// Marks a splice's place in a per-viewer register's bytes. # Safety: live Vecs.
+/// Marks a splice's place in a per-viewer register's bytes, and which splice goes there (its
+/// site, in the high bits). # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_split(splits: *mut Vec<usize>, out: *mut Vec<u8>) {
-    (*splits).push((*out).len());
+pub unsafe extern "C" fn etch_split(splits: *mut Vec<usize>, out: *mut Vec<u8>, site: i64) {
+    (*splits).push((*out).len() | ((site as usize) << 48));
+}
+
+/// A split's offset and site.
+pub fn split_at(s: usize) -> (usize, usize) {
+    (s & ((1 << 48) - 1), s >> 48)
 }
 
 /// "a", "a and b", "a, b, and c", from items each ended by a NUL. # Safety: live Vecs.
