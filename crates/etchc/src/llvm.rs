@@ -214,6 +214,8 @@ pub struct RegInfo {
     pub root: Option<(String, String)>,
     /// for a `per viewer` register: its splices' registers, in order
     pub splices: Vec<String>,
+    /// every (entity, column) its loader reads ("*": the entity's rows)
+    pub reads: Vec<(String, String)>,
 }
 
 pub struct Module {
@@ -222,6 +224,8 @@ pub struct Module {
     pub viewer: Schema,
     pub funcs: String,
     pub registers: Vec<RegInfo>,
+    /// what the viewer's record reads (its variant bits' inputs)
+    pub viewer_reads: Vec<(String, String)>,
 }
 
 impl Module {
@@ -1030,7 +1034,7 @@ fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[T
         register(m, md, &sname, &used, &[TNode::Hole(e.clone())], false)?;
         names.push(sname);
     }
-    md.registers.push(RegInfo { name: name.to_string(), schema, tmps: out.2, bits: out.3, per_viewer, root, splices: names });
+    md.registers.push(RegInfo { name: name.to_string(), schema, tmps: out.2, bits: out.3, per_viewer, root, splices: names, reads: vec![] });
     Ok(())
 }
 
@@ -1171,7 +1175,7 @@ fn loader(m: &Model, md: &mut Module, reg: &RegInfo, qid: &mut usize) -> Result<
 /// The viewer's record: `etch_load_viewer(ctx, db, key, rec, arena) -> i1`.
 fn viewer_loader(m: &Model, md: &mut Module, qid: &mut usize) -> Result<String, String> {
     let ent = m.viewer_entity().ok_or("no viewer declaration")?.to_string();
-    let reg = RegInfo { name: "viewer".into(), schema: md.viewer.clone(), tmps: 0, bits: 0, per_viewer: false, root: Some(("viewer".into(), ent)), splices: vec![] };
+    let reg = RegInfo { name: "viewer".into(), schema: md.viewer.clone(), tmps: 0, bits: 0, per_viewer: false, root: Some(("viewer".into(), ent)), splices: vec![], reads: vec![] };
     let s = loader(m, md, &reg, qid)?;
     Ok(s.replace("%In_viewer", "%Viewer"))
 }
@@ -1225,7 +1229,7 @@ declare void @etch_w_go(ptr, ptr, i64, i64, ptr, i64)
 
 /// The module for these registers, and a Rust header with the same records.
 pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> Result<(String, String), String> {
-    let mut md = Module { globals: String::new(), strs: HashMap::new(), viewer: Schema::default(), funcs: String::new(), registers: vec![] };
+    let mut md = Module { globals: String::new(), strs: HashMap::new(), viewer: Schema::default(), funcs: String::new(), registers: vec![], viewer_reads: vec![] };
     md.viewer.field("viewer", Shape::I64);
     // the registers: those named, or (by default) what the screens show
     let auto = crate::glue::registers_of(m);
@@ -1240,10 +1244,29 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
     }
     let mut qid = 0usize;
     let regs = md.registers.clone();
+    let mut reads_of = vec![];
     for reg in &regs {
-        let f = loader(m, &mut md, reg, &mut qid)?;
+        let (f, reads) = crate::sql::reading(|| loader(m, &mut md, reg, &mut qid));
+        let f = f?;
+        reads_of.push(reads);
         md.funcs.push_str(&f);
     }
+    for (r, reads) in md.registers.iter_mut().zip(reads_of) {
+        r.reads = reads;
+        if std::env::var("ETCH_SHOW_READS").is_ok() {
+            eprintln!("{} reads {}", r.name, r.reads.iter().map(|(e, c)| format!("{e}.{c}")).collect::<Vec<_>>().join(" "));
+        }
+    }
+    // what the viewer's record reads: every column of its entity (forwarding adds fields to it
+    // while the actions are lowered), and what it reads through references (from a trial build)
+    let (_, mut viewer_reads) = crate::sql::reading(|| viewer_loader(m, &mut md, &mut qid.clone()));
+    if let Some(e) = m.viewer_entity() {
+        viewer_reads.retain(|(x, _)| x != e);
+        for f in &m.entities[e].fields {
+            viewer_reads.push((e.to_string(), f.name.clone()));
+        }
+    }
+    md.viewer_reads = viewer_reads;
     let screens = crate::actions::screen_lists(m)?;
     let (acts, patches, finds) = crate::actions::lower(m, &mut md, &mut qid, &screens)?;
     // the viewer's loader last: forwarding may have added fields to the viewer's record

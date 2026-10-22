@@ -18,6 +18,37 @@ pub struct Select {
     pub binds: Vec<Bind>,
 }
 
+// ---- read sets: every (entity, column) the lowering turns into SQL while it is recording (a
+// register's loader, a screen list's query). "*": the entity's rows themselves (a row made or
+// deleted can enter or leave). Recorded where paths become columns, so nothing read is missed.
+
+thread_local! {
+    static READS: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn note(ent: &str, col: &str) {
+    READS.with(|r| {
+        if let Some(v) = r.borrow_mut().as_mut() {
+            let x = (ent.to_string(), col.to_string());
+            if !v.contains(&x) {
+                v.push(x);
+            }
+        }
+    });
+}
+
+/// Runs `f`, returning what it read.
+pub fn reading<R>(f: impl FnOnce() -> R) -> (R, Vec<(String, String)>) {
+    let outer = READS.with(|r| r.borrow_mut().replace(vec![]));
+    let x = f();
+    let got = READS.with(|r| std::mem::replace(&mut *r.borrow_mut(), outer)).unwrap_or_default();
+    // a recording inside another: the outer one reads it too
+    for (e, c) in &got {
+        note(e, c);
+    }
+    (x, got)
+}
+
 fn q(name: &str) -> String {
     format!("\"{name}\"")
 }
@@ -37,6 +68,7 @@ impl Joins {
         let (mut alias, mut ent) = (base.to_string(), base_ent.to_string());
         for i in 0..path.len() - 1 {
             let f = &path[i];
+            note(&ent, f);
             let target = ref_target(m, &ent, f)?;
             let key: Vec<String> = std::iter::once(base.to_string()).chain(path[..=i].iter().cloned()).collect();
             let a = match self.list.iter().find(|(k, _)| *k == key) {
@@ -53,6 +85,7 @@ impl Joins {
             ent = target;
         }
         let last = &path[path.len() - 1];
+        note(&ent, last);
         if m.field_type(&ent, last).is_none() {
             return Err(format!("{ent} has no field {last}"));
         }
@@ -71,8 +104,12 @@ fn ref_target(m: &Model, ent: &str, f: &str) -> Result<String, String> {
 fn sub_column(m: &Model, alias: &str, ent: &str, p: &[String]) -> Result<String, String> {
     match p.len() {
         0 => Ok(format!("{alias}.id")),
-        1 => Ok(format!("{alias}.{}", q(&p[0]))),
+        1 => {
+            note(ent, &p[0]);
+            Ok(format!("{alias}.{}", q(&p[0])))
+        }
         _ => {
+            note(ent, &p[0]);
             let target = ref_target(m, ent, &p[0])?;
             let inner = sub_column(m, "x", &target, &p[1..])?;
             Ok(format!("(SELECT {inner} FROM {} x WHERE x.id = {alias}.{})", q(&target), q(&p[0])))
@@ -238,6 +275,7 @@ impl<'a> Tx<'a> {
         };
         self.sub += 1;
         let a = format!("s{}", self.sub);
+        note(&ent, "*");
         self.rows.push((a.clone(), ent.clone()));
         let w = match &qy.filter {
             Some(f) => format!(" WHERE {}", self.expr(f)?),
@@ -251,6 +289,7 @@ impl<'a> Tx<'a> {
 /// arguments), the items' fields (paths from the loop variable, whose first part is dropped).
 pub fn list_select(m: &Model, list: &Expr, fields: &[String], scope: &Scope) -> Result<Select, String> {
     let (qy, ent) = resolve(m, list, scope)?;
+    note(&ent, "*");
     let mut tx = Tx { m, joins: Joins { list: vec![], sql: String::new(), next: 0 }, binds: vec![], params: vec![], rows: vec![("t0".into(), ent.clone())], sub: 0 };
     let mut cols = vec![];
     for f in fields {

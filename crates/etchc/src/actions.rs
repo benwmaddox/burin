@@ -34,6 +34,8 @@ pub struct ScreenList {
     pub monotone: bool,
     /// newest first, with a limit: a new row goes first
     pub newest_first: bool,
+    /// every (entity, column) its query reads
+    pub reads: Vec<(String, String)>,
 }
 
 pub struct ActInfo {
@@ -194,7 +196,13 @@ pub fn screen_lists(m: &Model) -> Result<Vec<ScreenList>, String> {
                     let keyed_by = eqs.iter().find(|(_, x)| matches!(x, Expr::Name(n, _) if params.iter().any(|p| &p.name == n))).map(|(f, _)| f.clone());
                     let monotone = matches!(q.order.first(), Some((Expr::Dot(f, _), false)) if f == "created") && q.window_last.is_some();
                     let newest_first = matches!(q.order.first(), Some((Expr::Dot(f, _), true)) if f == "created") && q.limit.is_some() && q.window_last.is_none();
-                    out.push(ScreenList { name: show(list), expr: list.clone(), entity: ent, keyed_by, monotone, newest_first });
+                    let var = match n {
+                        TNode::For(v, ..) => v.clone(),
+                        _ => unreachable!(),
+                    };
+                    let (sel, reads) = sql::reading(|| sql::list_select(m, list, &[var], &Scope::of(params)));
+                    sel?;
+                    out.push(ScreenList { name: show(list), expr: list.clone(), entity: ent, keyed_by, monotone, newest_first, reads });
                 }
             }
         }
@@ -274,6 +282,8 @@ struct Act<'a, 'b> {
     verifies: Vec<(usize, Expr, String)>,
     /// the entry block's allocas
     allocas: String,
+    /// the registers ('r') and screen lists ('l') a write's precise edges reached
+    touched: Vec<(char, usize)>,
 }
 
 impl<'a, 'b> Act<'a, 'b> {
@@ -408,6 +418,11 @@ impl<'a, 'b> Act<'a, 'b> {
     }
 
     fn delta(&mut self, op: i32, a: usize, key: &str, item: &str) {
+        match op {
+            1 | 3 | 4 | 6 | 9 => self.touched.push(('r', a)),
+            2 | 5 | 7 => self.touched.push(('l', a)),
+            _ => {}
+        }
         self.line(&format!("call void @etch_delta(ptr %d, i32 {op}, i64 {a}, i64 {key}, i64 {item})"));
     }
 
@@ -506,6 +521,7 @@ impl<'a, 'b> Act<'a, 'b> {
     #[allow(clippy::too_many_arguments)]
     fn edges(&mut self, ent: &str, cols: &[String], vals: &HashMap<String, String>, sets: &[(String, Expr)], regs: &[RegInfo], lists: &[ListRead], screens: &[ScreenList], new: Option<(&str, &str, &[(String, Expr)])>, removed: bool) -> Result<(), String> {
         let created = new.is_some();
+        self.touched.clear();
         // rows enter or leave lists
         let rows_change = created || removed;
         let verb = if created { "create" } else if removed { "delete" } else { "set" };
@@ -580,6 +596,7 @@ impl<'a, 'b> Act<'a, 'b> {
                             let (v, _) = self.value(e)?;
                             let slot = l.slot.unwrap();
                             self.line(&format!("call void @etch_delta_patch(ptr %d, i64 {}, i64 {k}, i64 {id}, i64 {slot}, i64 {fi}, i64 {v})", l.reg));
+                            self.touched.push(('r', l.reg));
                             if !self.patches.contains(&(l.reg, slot, fi)) {
                                 self.patches.push((l.reg, slot, fi));
                             }
@@ -608,6 +625,7 @@ impl<'a, 'b> Act<'a, 'b> {
             }) {
                 let id = vals.get("id").cloned().ok_or("the written row's id")?;
                 self.line(&format!("call void @etch_delta_find(ptr %d, i64 {}, i64 {id}, i64 {slot}, i64 {pi})", l.reg));
+                self.touched.push(('r', l.reg));
                 if !self.finds.contains(&(l.reg, slot, pi)) {
                     self.finds.push((l.reg, slot, pi));
                 }
@@ -697,6 +715,33 @@ impl<'a, 'b> Act<'a, 'b> {
                     self.note(format!("create {ent} → screen list {}: {how}", s.name));
                 }
             }
+        }
+        // the fail-safe: anything that reads what was written (its read set, recorded where its
+        // SQL was made) and that no precise edge reached is rebuilt in full. A missing rule costs
+        // speed, never correctness; the build reports it
+        // a row made or deleted reaches what scans its entity ("*"); a column read through a
+        // reference reaches only through the referring row (that row's own write covers it)
+        let hit = |reads: &[(String, String)]| reads.iter().any(|(e, c)| e == ent && if rows_change { c == "*" } else { cols.contains(c) });
+        for (ri, r) in regs.iter().enumerate() {
+            if !self.touched.contains(&('r', ri)) && hit(&r.reads) {
+                // a row-keyed register of a new row isn't kept yet; of a deleted one, dropped
+                if rows_change && r.root.as_ref().map(|(_, e)| e == ent).unwrap_or(false) {
+                    continue;
+                }
+                self.delta(4, ri, "0", "0");
+                self.note(format!("{verb} {ent}.{} → {}: FALLBACK (every kept one rebuilt; no precise rule)", cols.join(","), r.name));
+            }
+        }
+        for (si, s) in screens.iter().enumerate() {
+            if !self.touched.contains(&('l', si)) && hit(&s.reads) {
+                self.delta(5, si, "-9223372036854775808", "0");
+                self.note(format!("{verb} {ent}.{} → screen list {}: FALLBACK (every kept one read again; no precise rule)", cols.join(","), s.name));
+            }
+        }
+        // (a new row changes no one's record)
+        if !created && hit(&self.md.viewer_reads.clone()) {
+            self.delta(15, 0, "0", "0");
+            self.note(format!("{verb} {ent}.{} → the viewers' records: FALLBACK (all read again, the screens rebuilt)", cols.join(",")));
         }
         Ok(())
     }
@@ -1078,7 +1123,7 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
                 Some(Decl::Viewer { entity, .. }) => Some(("viewer".to_string(), entity.clone())),
                 _ => None,
             }).collect();
-            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![], audiences: auds.clone(), lets: HashMap::new(), verifies: vec![], allocas: String::new() };
+            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![], audiences: auds.clone(), lets: HashMap::new(), verifies: vec![], allocas: String::new(), touched: vec![] };
             a.stmts(body, &Scope::of(params), &regs, &lists, screens)?;
             let mut f = String::new();
             let parts: Vec<&str> = args.iter().map(|(_, s)| if *s == Shape::Str { "%Str" } else { "i64" }).collect();

@@ -119,6 +119,31 @@ Rust helps here: a per-request arena with a lifetime lets the borrow checker pro
 outlives the request, which crudspec's Go runtime can't prove (its bench README: "nothing proves
 it here").
 
+### Keeping precomputed pages right (22 Oct 2026)
+
+A kept page must always equal a fresh render. Time limits on cached pages were considered and
+rejected: they hide a missed dependency instead of fixing it, and break that guarantee for up to
+the limit. Instead there are four layers:
+
+1. **Precise delta edges** from the spec: which kept pieces a write changes, and how (forwarded,
+   patched, appended, rebuilt at a key). This is the fast path for writes.
+2. **Read sets, and a fail-safe.** While the compiler lowers a register's loader or a screen
+   list's query, it records every (entity, column) it turns into SQL: after functions and views
+   are expanded and references followed, so nothing a page reads can be missed. A write that
+   touches a register's read set without a precise edge gets a fallback edge: every kept instance
+   is rebuilt. A missing rule costs speed, never correctness, and the build reports it
+   (`FALLBACK` in `emit`'s edges). Campfire has none.
+3. **A scrubber.** While the writer is idle (`--scrub-ms`, default 100), it rebuilds one kept
+   page for one audience member at a time from SQLite and compares it with what readers get. A
+   difference is logged, counted (`scrub_fixed`) and rebuilt. This is the hardware idea of
+   memory scrubbing: it limits the damage from a bug that gets past the first two layers.
+4. **Random-action testing** (`scripts/fuzz.sh`): seeded runs of every action by every person,
+   with page reads after each and `--verify` comparing every fast page with a fresh build; it
+   passes only with no mismatch, no full clear, and nothing for the scrubber to fix.
+
+The writer is preferred over readers: read workers run at nice 10, so under contention the
+writer gets about nine times a reader's CPU share, and reads still use every idle cycle.
+
 ### 3. Actions are fixed rules, run by one writer
 
 *Hardware: Bluespec's guarded atomic actions; a rule fires only when its guard holds, and the

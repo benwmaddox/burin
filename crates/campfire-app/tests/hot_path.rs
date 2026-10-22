@@ -51,7 +51,7 @@ fn the_fast_path_allocates_and_frees_nothing_and_copies_only_headers() {
     let c = rusqlite::Connection::open(&db).unwrap();
     let token: String = c.query_row("SELECT token FROM Session WHERE id = 481019661", [], |r| r.get(0)).unwrap();
     drop(c);
-    let app = App::<Spec>::start(ctx, &db, host, false, b"session_token", 1_000_000);
+    let app = App::<Spec>::start(ctx, &db, host, false, b"session_token", 1_000_000, 0);
     let cookie = format!("session_token={token}");
     for gzip in [false, true] {
         let req = Req { method: b"GET", path: b"/rooms/486777696", query: b"", host: host.as_bytes(), cookie: cookie.as_bytes(), content_type: b"", referer: b"", body: b"", gzip, worker: 0 };

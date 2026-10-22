@@ -266,6 +266,10 @@ pub struct Stats {
     pub cleared: AtomicU64,
     /// screen instances rebuilt because their audience changed
     pub audiences: AtomicU64,
+    /// kept pages the scrubber compared with a fresh build, and the ones it found different (and
+    /// rebuilt): a missed edge
+    pub scrubbed: AtomicU64,
+    pub scrub_fixed: AtomicU64,
 }
 
 pub struct App<G: Glue> {
@@ -301,7 +305,7 @@ pub fn open_write(path: &str) -> Connection {
 
 impl<G: Glue> App<G> {
     /// Starts the writer (and the checkpointer); returns the app to serve.
-    pub fn start(ctx: Arc<Ctx>, db_path: &str, host: &str, verify: bool, session_cookie: &'static [u8], seq: i64) -> Arc<App<G>> {
+    pub fn start(ctx: Arc<Ctx>, db_path: &str, host: &str, verify: bool, session_cookie: &'static [u8], seq: i64, scrub_ms: u64) -> Arc<App<G>> {
         let w = open_write(db_path);
         w.execute_batch(G::schema()).expect("the schema");
         let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
@@ -311,7 +315,7 @@ impl<G: Glue> App<G> {
         let stats = Arc::new(Stats::default());
         {
             let (ctx, snap, stats) = (ctx.clone(), snap.clone(), stats.clone());
-            std::thread::Builder::new().name("etch-writer".into()).spawn(move || writer::<G>(w, ctx, snap, rx, stats, seq)).unwrap();
+            std::thread::Builder::new().name("etch-writer".into()).spawn(move || writer::<G>(w, ctx, snap, rx, stats, seq, scrub_ms)).unwrap();
         }
         {
             let snap = snap.clone();
@@ -485,8 +489,8 @@ impl<G: Glue> App<G> {
             let st = &self.stats;
             let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
             let s = format!(
-                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"patched":{},"cleared":{},"audiences":{},"version":{}}}"#,
-                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.patched), g(&st.cleared), g(&st.audiences), self.snap.load().version
+                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"patched":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"version":{}}}"#,
+                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.patched), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), self.snap.load().version
             );
             return respond(out, 200, "application/json", &[], s.as_bytes());
         }
@@ -681,7 +685,7 @@ impl<G: Glue> crate::Handler for App<G> {
 // ---- the writer
 
 /// The writer: actions in batches (group commit), then their delta edges into the next snapshot.
-fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Receiver<Cmd>, stats: Arc<Stats>, seq: i64) {
+fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Receiver<Cmd>, stats: Arc<Stats>, seq: i64, scrub_ms: u64) {
     let mut w = Writer::new(seq);
     // kept between batches: viewers' records, per-viewer registers' records (patched in place)
     let mut viewers: HashMap<i64, Rec> = HashMap::new();
@@ -689,7 +693,24 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
     // the sessions' tokens by their row's id (a deleted row's token is forgotten by its id)
     let mut tokens: HashMap<i64, Box<[u8]>> = G::sessions(&c).into_iter().map(|(id, t, _)| (id, t.into_bytes().into_boxed_slice())).collect();
     let mut batch = Vec::with_capacity(256);
-    while let Ok(first) = rx.recv() {
+    // the scrubber's place in the kept pages
+    let mut cursor = 0usize;
+    loop {
+        let first = if scrub_ms == 0 {
+            match rx.recv() {
+                Ok(c) => c,
+                Err(_) => break,
+            }
+        } else {
+            match rx.recv_timeout(std::time::Duration::from_millis(scrub_ms)) {
+                Ok(c) => c,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    scrub::<G>(&c, &ctx, &snap, &mut viewers, &mut kept, &stats, &mut cursor);
+                    continue;
+                }
+                Err(_) => break,
+            }
+        };
         batch.push(first);
         while batch.len() < 256 {
             match rx.try_recv() {
@@ -795,6 +816,16 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 4 => {
                     shared.extend(next.regs[a].keys().map(|k| (a, *k)));
                 }
+                // what the viewers' records read changed (a fallback): every record read again,
+                // every kept per-viewer register too, the screens rebuilt on demand
+                15 => {
+                    stats.cleared.fetch_add(1, Ordering::Relaxed);
+                    viewers.clear();
+                    reload.extend(kept.keys().copied());
+                    for s in &mut next.screens {
+                        s.clear();
+                    }
+                }
                 // a new row's register: no screen keeps it yet (a list that shows it adds it,
                 // ops 2 and 7; a screen built later reads it)
                 1 => {}
@@ -845,6 +876,11 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 }
             }
         }
+        // every key of a list (a fallback edge: i64::MIN)
+        let relist: Vec<(usize, i64)> = relist
+            .into_iter()
+            .flat_map(|(l, k)| if k == i64::MIN { next.lists[l].keys().map(|k2| (l, *k2)).collect::<Vec<_>>() } else { vec![(l, k)] })
+            .collect();
         for (list, key) in relist {
             let s = G::list_screen(list);
             let Some(inst) = next.screens[s].get(&key).cloned() else { continue };
@@ -973,6 +1009,75 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
         }
         let _ = &mut c;
     }
+}
+
+/// The scrubber (while the writer is idle): one kept page, for one member of its audience in
+/// turn, is built afresh from SQLite (the viewer's record too) and compared with what readers are
+/// served. A difference is a missed edge: logged, counted, and the page rebuilt.
+fn scrub<G: Glue>(c: &Connection, ctx: &Ctx, snap: &ArcSwap<Snap>, viewers: &mut HashMap<i64, Rec>, kept: &mut HashMap<(usize, i64), Rec>, stats: &Stats, cursor: &mut usize) {
+    let cur = snap.load_full();
+    let mut all: Vec<(usize, i64)> = (0..G::SCREENS).flat_map(|s| cur.screens[s].keys().map(move |k| (s, *k))).collect();
+    if all.is_empty() {
+        return;
+    }
+    all.sort_unstable();
+    let (s, key) = all[*cursor % all.len()];
+    let round = *cursor / all.len();
+    *cursor += 1;
+    let inst = cur.screens[s][&key].clone();
+    if inst.audience.is_empty() {
+        return;
+    }
+    let place = round % inst.audience.len();
+    let uid = inst.audience[place];
+    // the page as served (a viewer whose own registers aren't kept yet: nothing to compare)
+    let mut fast = Vec::with_capacity(400_000);
+    if !G::assemble(&cur, s, key, uid, place, &mut |seg| fast.extend_from_slice(&seg.raw)) {
+        return;
+    }
+    stats.scrubbed.fetch_add(1, Ordering::Relaxed);
+    // the page built afresh
+    let mut tmp = Snap::new(G::REGS, G::LISTS, G::SCREENS);
+    let mut fresh_viewers = HashMap::new();
+    let fresh = if build_screen::<G>(c, ctx, &mut tmp, &mut fresh_viewers, s, key) {
+        tmp.screens[s].get(&key).cloned().and_then(|t| {
+            let p = t.audience.binary_search(&uid).ok()?;
+            fresh_viewers.entry(uid).or_insert_with(|| load_viewer::<G>(c, ctx, uid));
+            for kind in G::viewer_regs(s) {
+                let rec = load::<G>(c, ctx, kind, uid)?;
+                tmp.regs[kind].insert(uid, Arc::new(build::<G>(ctx, kind, rec.ptr(), &[fresh_viewers[&uid].ptr()])));
+            }
+            let mut page = Vec::with_capacity(400_000);
+            G::assemble(&tmp, s, key, uid, p, &mut |seg| page.extend_from_slice(&seg.raw)).then_some(page)
+        })
+    } else {
+        None
+    };
+    if fresh.as_ref() == Some(&fast) {
+        return;
+    }
+    stats.scrub_fixed.fetch_add(1, Ordering::Relaxed);
+    let at = fresh.as_ref().map(|f| f.iter().zip(&fast).position(|(a, b)| a != b).unwrap_or(f.len().min(fast.len())));
+    eprintln!("scrub: screen {s} key {key} viewer {uid}: the kept page differed from a fresh build (at byte {at:?}); rebuilt");
+    // rebuilt: the screen, the viewer's record and own registers
+    let mut next = cur.next();
+    viewers.insert(uid, load_viewer::<G>(c, ctx, uid));
+    if !build_screen::<G>(c, ctx, &mut next, viewers, s, key) {
+        next.screens[s].remove(&key);
+    }
+    for kind in G::viewer_regs(s) {
+        match load::<G>(c, ctx, kind, uid) {
+            Some(rec) => {
+                next.regs[kind].insert(uid, Arc::new(build::<G>(ctx, kind, rec.ptr(), &[viewers[&uid].ptr()])));
+                kept.insert((kind, uid), rec);
+            }
+            None => {
+                next.regs[kind].remove(&uid);
+                kept.remove(&(kind, uid));
+            }
+        }
+    }
+    snap.store(Arc::new(next));
 }
 
 /// The audience a kept shared register is built for: the screen instance whose list holds it, or
@@ -1172,7 +1277,8 @@ pub fn main<G: Glue>(configs: &[&str], session_cookie: &'static [u8]) {
         let tables: Vec<String> = c.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
         tables.iter().filter_map(|t| c.query_row(&format!("SELECT max(seq) FROM \"{t}\""), [], |r| r.get::<_, Option<i64>>(0)).ok().flatten()).max().unwrap_or(0)
     };
-    let app = App::<G>::start(ctx, &db_path, &host, verify, session_cookie, seq);
+    let scrub_ms: u64 = arg("--scrub-ms").map(|v| v.parse().expect("--scrub-ms N")).unwrap_or(100);
+    let app = App::<G>::start(ctx, &db_path, &host, verify, session_cookie, seq, scrub_ms);
     println!("started in {} ms ({workers} workers{})", start.elapsed().as_millis(), if verify { ", verifying" } else { "" });
     crate::http::serve(format!("0.0.0.0:{port}").parse().unwrap(), workers, app).expect("serve");
 }
