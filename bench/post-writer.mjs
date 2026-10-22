@@ -19,6 +19,11 @@ const post = async () => {
   // etch's outcome header, or the reference baseline's
   if (r && (r.headers.get("X-Etch-Outcome") ?? r.headers.get("X-Crudspec-Outcome")) === "ok") ok++;
 };
+// one post first, untimed: the client's own warm-up (its first connection, its JIT) isn't the
+// server's latency (it showed as every server's p99 at low rates)
+if (Number(rate) > 0) {
+  await fetch(`${base}/_do/post_message`, { method: "POST", redirect: "manual", headers: { Cookie: cookie, "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ room, body: "warm-up" }) }).catch(() => null);
+}
 const pending = [];
 if (Number(rate) > 0) {
   for (let next = Date.now(); next < end; next += per) {
