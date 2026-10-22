@@ -1,0 +1,1 @@
+{"app":"crudspec","conc":64,"people":117,"posts":{"ok":150,"p50_ms":3.19,"p99_ms":81.28,"sent":150},"reads":{"avg_bytes":52094,"checked":452,"errors":0,"invalid":0,"ok":9666,"p50_ms":91.01,"p999_ms":535.04,"p99_ms":296.19,"people_reading":117,"per_s":636.8,"rooms_read":50,"statuses":{"200":9666}},"secs":15.18}

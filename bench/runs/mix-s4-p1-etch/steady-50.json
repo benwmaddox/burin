@@ -1,0 +1,1 @@
+{"app":"etch","conc":64,"people":117,"posts":{"ok":750,"p50_ms":4.67,"p99_ms":8.06,"sent":750},"reads":{"avg_bytes":20518,"checked":29534,"errors":0,"invalid":0,"ok":591335,"p50_ms":1.51,"p999_ms":4.65,"p99_ms":3.42,"people_reading":117,"per_s":39415.5,"rooms_read":60,"statuses":{"200":591335}},"secs":15.0}

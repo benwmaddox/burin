@@ -1,0 +1,2 @@
+2026-10-22T19:22:25.245Z ready app=crudspec run=s3-p2-crudspec conns=64 secs=15 rates=0 10 50 server_cpus=8-11 loadgen_cpus=12-19
+2026-10-22T19:23:25.979Z done
