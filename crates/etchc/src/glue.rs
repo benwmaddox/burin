@@ -322,10 +322,41 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     }
     let _ = writeln!(s, "            _ => Err(\"not_found\"),\n        }}\n    }}");
     let _ = writeln!(s, "    fn after_act(_name: &str, _form: &[(String, String)]) -> String {{ \"/\".to_string() }}");
+    let _ = writeln!(s, "    fn schema() -> &'static str {{ r##\"{}\"## }}", schema(m));
     let _ = writeln!(s, "}}\n");
     // the screens' constant text, made once
     let _ = writeln!(s, "fn consts() -> &'static [etch_rt::store::Seg] {{\n    static C: std::sync::OnceLock<Vec<etch_rt::store::Seg>> = std::sync::OnceLock::new();\n    C.get_or_init(|| vec![{}])\n}}", consts.iter().map(|c| format!("etch_rt::store::Seg::new({c:?}.as_bytes().to_vec())")).collect::<Vec<_>>().join(", "));
     Ok(s)
+}
+
+/// The tables an app's entities are kept in (created if missing; an existing table is left as it is).
+pub fn schema(m: &Model) -> String {
+    let mut s = String::new();
+    let mut ents: Vec<&&Entity> = m.entities.values().collect();
+    ents.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in ents {
+        let mut cols = vec!["id INTEGER PRIMARY KEY".to_string(), "seq INTEGER NOT NULL".into(), "created INTEGER NOT NULL".into(), "updated INTEGER NOT NULL".into()];
+        for f in &e.fields {
+            let ty = match f.ty.strip_opt() {
+                Type::Text => "TEXT",
+                _ => "INTEGER",
+            };
+            let null = if matches!(f.ty, Type::Opt(_)) { "" } else { " NOT NULL" };
+            let check = match (f.max, f.ty.strip_opt()) {
+                (Some(n), Type::Text) => format!(" CHECK (length(\"{}\") <= {n})", f.name),
+                _ => String::new(),
+            };
+            cols.push(format!("\"{}\" {ty}{null}{check}", f.name));
+        }
+        s.push_str(&format!("CREATE TABLE IF NOT EXISTS \"{}\" ({}) STRICT;\n", e.name, cols.join(", ")));
+        for f in &e.fields {
+            if matches!(f.ty.strip_opt(), Type::Ref(_)) {
+                s.push_str(&format!("CREATE INDEX IF NOT EXISTS \"ix_{}_{}\" ON \"{}\" (\"{}\");\n", e.name, f.name, e.name, f.name));
+            }
+        }
+        s.push_str(&format!("CREATE INDEX IF NOT EXISTS \"ix_{}_created\" ON \"{}\" (created, seq);\n", e.name, e.name));
+    }
+    s
 }
 
 fn split_and(e: &Expr, out: &mut Vec<Expr>) {

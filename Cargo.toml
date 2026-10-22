@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/etch-rt", "crates/campfire-hand", "crates/campfire-app", "crates/etchc"]
+members = ["crates/etch-rt", "crates/campfire-app", "crates/etchc"]
 
 [workspace.package]
 edition = "2021"

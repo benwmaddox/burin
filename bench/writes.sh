@@ -1,24 +1,24 @@
-# The room page under reads and writes: the fair-benchmark setup of crudspec-lifetime.sh (the
+# The room page under reads and writes: the fair-benchmark setup of lifetime.sh (the
 # server in its own network namespace and cgroup, pinned to SRV_CPUS; the clients on LG_CPUS),
 # with readers loading the room page at CONNS connections while a writer posts messages to the
 # same room at each rate. Pages change as messages arrive, so they are checked for status, not
 # against the read-only contract. Reports reads/s, CPU per read, the writes' latency, and the
 # fragment cache's hit rate.
 # Run as root:
-#   wsl -d Ubuntu -u root -- bash /mnt/d/code/crudspec/bench/crudspec-writes.sh <run-name> [secs] [rates...]
+#   wsl -d Ubuntu -u root -- bash /mnt/d/code/etch/bench/writes.sh <run-name> [secs] [rates...]
 set -euo pipefail
 [ -n "${BENCH_LOCKED:-}" ] || { exec 9>>/home/ben/linuxbench/bench.lock; flock -x 9; }   # the bench lock the sessions share (a driver may hold it already)
 RUN=$1; SECS=${2:-10}; shift; [ $# -gt 0 ] && shift; RATES=("$@"); [ ${#RATES[@]} -eq 0 ] && RATES=(0 1 5 20 50)
 CONNS=${CONNS:-32}
 U=ben; UH=/home/$U
-REPO=/mnt/d/code/crudspec
-SNAPDATA=${SNAPDATA:-/mnt/d/code/crudspec-run/bench-snap-nc5}
+REPO=/mnt/d/code/etch
+SNAPDATA=${SNAPDATA:-/mnt/d/code/etch/data/campfire}
 ROOM=486777696
 WROOM=${WROOM:-$ROOM}   # the room the writer posts into (another room the reader is in: 654632876)
-OUT=/mnt/d/code/etch/bench/runs/$RUN; W=$UH/crudspec-bench/$RUN
-NS=csbench; CG=/sys/fs/cgroup/csbench-srv
+OUT=/mnt/d/code/etch/bench/runs/$RUN; W=$UH/etch-bench/$RUN
+NS=etchbench; CG=/sys/fs/cgroup/etchbench-srv
 SRV_CPUS=${SRV_CPUS:-8-11}; LG_CPUS=${LG_CPUS:-12-19}
-LGBIN=$UH/cm258/loadgen-linux/release/loadgen
+LGBIN=/mnt/d/code/etch/tools/loadgen
 test -n "${GOBIN:-}" || { echo "GOBIN=<the compiled app> is required"; exit 64; }
 test ! -e "$OUT" || { echo "run $RUN exists"; exit 2; }
 test ! -e "$CG" || { echo "cgroup $CG exists"; exit 2; }
@@ -47,7 +47,7 @@ ip netns add $NS; ip -n $NS link set lo up
 mkdir "$CG"
 ( cd "$REPO"; echo $BASHPID > "$CG/cgroup.procs"
   exec nsenter --net=/run/netns/$NS taskset -c "$SRV_CPUS" setpriv --reuid=$U --regid=$U --init-groups env -i HOME=$UH TZ=America/New_York CRUDSPEC_PPROF=6060 ${PAGE_KEYS:+CRUDSPEC_PAGE_KEYS=1} \
-    "$GOBIN" --data "$W/data" --assets /mnt/d/code/crudspec-assets/campfire --port 13774 ) \
+    "$GOBIN" --data "$W/data" --assets /mnt/d/code/etch/apps/campfire/assets --port 13774 ) \
   > "$W/server.log" 2>&1 &
 BOOT=$!
 for i in $(seq 1 600); do inns curl -fsS -o /dev/null http://127.0.0.1:13774/up 2>/dev/null && break; sleep 0.1; done

@@ -12,7 +12,8 @@ const post = async () => {
     body: new URLSearchParams({ room, body: `benchmark message ${++n}`, client_id: `bench-${process.pid}-${n}` }),
   }).catch(() => null);
   times.push(performance.now() - t0); posted++;
-  if (r && r.headers.get("X-Crudspec-Outcome") === "ok") ok++;
+  // etch's outcome header, or the reference baseline's
+  if (r && (r.headers.get("X-Etch-Outcome") ?? r.headers.get("X-Crudspec-Outcome")) === "ok") ok++;
 };
 const pending = [];
 if (Number(rate) > 0) {

@@ -5,10 +5,10 @@
 #   bash /mnt/d/code/etch/scripts/train.sh <binary> [secs]
 set -e
 BIN=$1; SECS=${2:-20}
-D=/tmp/etch-train; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/crudspec-run/bench-snap-nc5 $D/data; rm -f $D/data/app.lock
+D=/tmp/etch-train; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/etch/data/campfire $D/data; rm -f $D/data/app.lock
 PORT=13795
-LG=$HOME/cm258/loadgen-linux/release/loadgen
-TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/crudspec-assets/campfire --port $PORT --workers 4 --exit-after $((SECS + 8)) > $D/server.log 2>&1 &
+LG=/mnt/d/code/etch/tools/loadgen
+TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/etch/apps/campfire/assets --port $PORT --workers 4 --exit-after $((SECS + 8)) > $D/server.log 2>&1 &
 PID=$!
 for i in $(seq 1 200); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done
 TOKEN=$(node -e "const {DatabaseSync}=require('node:sqlite');console.log(new DatabaseSync('$D/data/app.sqlite').prepare('select token from Session where id = 481019661').get().token)" 2>/dev/null)

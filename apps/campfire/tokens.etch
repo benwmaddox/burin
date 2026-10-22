@@ -1,0 +1,9 @@
+// The signed tokens the room page's forms carry (their shapes follow the reference page this
+// Campfire was built to match).
+
+fn plain_token(r: Room): Text = sign("{\"e\":[],\"p\":" + quote("/rooms/" + text(r.id)) + ",\"v\":[]}")
+fn edit_token(m: Message): Text =
+  sign("{\"e\":[137],\"p\":\"/rooms/" + text(m.room.id) + "\",\"v\":[[\"m\",{\"ref\":\"Message\",\"id\":" + text(m.id) + "}]]}")
+fn composer_token(r: Room): Text =
+  sign("{\"e\":[88],\"p\":" + quote("/rooms/" + text(r.id)) + ",\"v\":[[\"room\",{\"ref\":\"Room\",\"id\":" + text(r.id) + "}]]}")
+fn picker_token(r: Room): Text = sign("{\"e\":85,\"v\":[[\"room\",{\"id\":" + text(r.id) + ",\"ref\":\"Room\"}]]}")

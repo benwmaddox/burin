@@ -88,6 +88,8 @@ pub unsafe trait Glue: Send + Sync + 'static {
     fn act(name: &str, c: &Connection, ctx: &Ctx, db: *mut Db, w: &mut Writer, viewer: i64, vrec: *const u8, form: &[(String, String)], d: &mut Deltas) -> Result<(), &'static str>;
     /// The page to go to after an action (its form fields).
     fn after_act(name: &str, form: &[(String, String)]) -> String;
+    /// The tables the app keeps its entities in (created if missing).
+    fn schema() -> &'static str;
     /// A screen's unmet guard's answer for a viewer, on the cold path: a redirect, or 501.
     fn refuse(c: &Connection, s: usize, key: i64, viewer: i64) -> Option<String>;
 }
@@ -269,6 +271,7 @@ impl<G: Glue> App<G> {
     /// Starts the writer (and the checkpointer); returns the app to serve.
     pub fn start(ctx: Arc<Ctx>, db_path: &str, host: &str, verify: bool, session_cookie: &'static [u8], seq: i64) -> Arc<App<G>> {
         let w = open_write(db_path);
+        w.execute_batch(G::schema()).expect("the schema");
         let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
         snap.sessions = G::sessions(&w).into_iter().map(|(t, u)| (t.into_bytes().into_boxed_slice(), u)).collect();
         let snap = Arc::new(ArcSwap::from_pointee(snap));
@@ -572,7 +575,7 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 6 => {
                     forwarded.insert(key, item);
                 }
-                2 => {
+                2 | 7 => {
                     // a new item appended to a screen list: its register built for the screen's audience
                     let s = G::list_screen(a);
                     let inst = match next.screens[s].get(&key) {
@@ -599,11 +602,19 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     };
                     next.regs[kind].insert(item, Arc::new(reg));
                     let mut items: Vec<i64> = next.lists[a].get(&key).map(|l| (**l).clone()).unwrap_or_default();
-                    items.push(item);
-                    // a window: the oldest beyond its bound (the spec's) drops
-                    while items.len() > G::list_bound(a).max(1) {
-                        let old = items.remove(0);
-                        next.regs[kind].remove(&old);
+                    // oldest first (op 2): appended, the oldest drops; newest first (op 7): first, the last drops
+                    if op == 2 {
+                        items.push(item);
+                        while items.len() > G::list_bound(a).max(1) {
+                            let old = items.remove(0);
+                            next.regs[kind].remove(&old);
+                        }
+                    } else {
+                        items.insert(0, item);
+                        while items.len() > G::list_bound(a).max(1) {
+                            let old = items.pop().unwrap();
+                            next.regs[kind].remove(&old);
+                        }
                     }
                     next.lists[a].insert(key, Arc::new(items));
                     recheck.insert((s, key));
@@ -721,8 +732,7 @@ pub fn redirect(out: &mut Out, to: &str, outcome: Option<&str>) {
         b.extend_from_slice(to.as_bytes());
         b.extend_from_slice(b"\r\n");
         if let Some(o) = outcome {
-            // the outcome, under crudspec's header name (its benchmark reads it)
-            b.extend_from_slice(b"X-Crudspec-Outcome: ");
+            b.extend_from_slice(b"X-Etch-Outcome: ");
             b.extend_from_slice(o.as_bytes());
             b.extend_from_slice(b"\r\n");
         }
@@ -764,11 +774,9 @@ fn unescape(s: &[u8]) -> String {
     String::from_utf8_lossy(&o).into_owned()
 }
 
-/// A form field's value (`name`, or crudspec's `__arg_name` with its `#`).
+/// A form field's value: an action's argument by its name.
 pub fn field<'a>(form: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    form.iter()
-        .find(|(k, _)| k == name || k.strip_prefix("__arg_") == Some(name))
-        .map(|(_, v)| v.trim_start_matches('#'))
+    form.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
 // ---- a generated app's main

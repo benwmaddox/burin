@@ -39,7 +39,7 @@ action post_message(room: Room, body: Text) {
   require present(body) else invalid
   create Message { room: room, creator: viewer, body: body, client_id: token(36) }
   touch room
-  // unread for the members who aren't connected (crudspec's trigger on create Message)
+  // unread for the members who aren't connected
   for each ms in Membership where .room == room and .user != viewer and visible(it)
                               and (.connected_at == none or .connected_at < now - 60s) {
     set ms.unread_since = now

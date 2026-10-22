@@ -1,22 +1,21 @@
-# One crudspec runtime lifetime under the fair-benchmark setup (AgentLang report 282's protocol):
+# One server lifetime under the fair-benchmark setup (AgentLang report 282's protocol):
 # the server in its own network namespace (loopback only) and cgroup, pinned to SRV_CPUS; the
 # load generator pinned to LG_CPUS; every response validated against the canonical room_show
 # contract. Sweeps the given connection counts, one measured window each.
 # Run as root:
-#   wsl -d Ubuntu -u root -- bash /mnt/d/code/crudspec/bench/crudspec-lifetime.sh <run-name> [secs] [conns...]
+#   wsl -d Ubuntu -u root -- bash /mnt/d/code/etch/bench/lifetime.sh <run-name> [secs] [conns...]
 set -euo pipefail
 [ -n "${BENCH_LOCKED:-}" ] || { exec 9>>/home/ben/linuxbench/bench.lock; flock -x 9; }   # the bench lock the sessions share (a driver may hold it already)
 RUN=$1; SECS=${2:-10}; shift; [ $# -gt 0 ] && shift; CONNS=("$@"); [ ${#CONNS[@]} -eq 0 ] && CONNS=(16 32 64)
 U=ben; UH=/home/$U
-REPO=/mnt/d/code/crudspec
-M=/mnt/d/code/AgentLang/.agentlang/campfire-matched-258          # the recorded benchmark's contract and snapshot
-CONTRACT=$M/contracts-preflight-1/room_show.json
-SNAPDATA=${SNAPDATA:-/mnt/d/code/crudspec-run/bench-snap-nc5}    # made by bench/import-rails.ts; nc4: cleaned of the 6 rows the spec refuses, storage format 4; nc5: nc4 migrated to the schema with app invariants (19 Oct)
+REPO=/mnt/d/code/etch
+CONTRACT=/mnt/d/code/etch/tools/room_show.json
+SNAPDATA=${SNAPDATA:-/mnt/d/code/etch/data/campfire}    # made by bench/import-rails.ts; nc4: cleaned of the 6 rows the spec refuses, storage format 4; nc5: nc4 migrated to the schema with app invariants (19 Oct)
 ROOM=486777696                                                    # rooms.watercooler in the snapshot
-OUT=/mnt/d/code/etch/bench/runs/$RUN; W=$UH/crudspec-bench/$RUN
-NS=csbench; CG=/sys/fs/cgroup/csbench-srv
+OUT=/mnt/d/code/etch/bench/runs/$RUN; W=$UH/etch-bench/$RUN
+NS=etchbench; CG=/sys/fs/cgroup/etchbench-srv
 SRV_CPUS=${SRV_CPUS:-8-11}; LG_CPUS=${LG_CPUS:-12-19}
-LGBIN=$UH/cm258/loadgen-linux/release/loadgen
+LGBIN=/mnt/d/code/etch/tools/loadgen
 test -n "${GOBIN:-}" || { echo "GOBIN=<the compiled app> is required"; exit 64; }
 test ! -e "$OUT" || { echo "run $RUN exists"; exit 2; }
 test ! -e "$CG" || { echo "cgroup $CG exists"; exit 2; }
@@ -32,7 +31,7 @@ if [ -z "${COOKIE:-}" ]; then
   TOKEN=$(asu node -e "const {DatabaseSync}=require('node:sqlite');console.log(new DatabaseSync('$W/data/app.sqlite').prepare('select token from Session where id = 481019661').get().token)" 2>/dev/null)
   COOKIE="session_token=$TOKEN"
 fi
-PAGE=${PAGE:-/rooms/$ROOM}; ASSETS=${ASSETS:-/mnt/d/code/crudspec-assets/campfire}
+PAGE=${PAGE:-/rooms/$ROOM}; ASSETS=${ASSETS:-/mnt/d/code/etch/apps/campfire/assets}
 VAL=(--validate "$CONTRACT"); [ -n "${NO_VALIDATE:-}" ] && VAL=()
 
 cleanup() {

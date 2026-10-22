@@ -6,7 +6,7 @@ set -e
 CS=$HOME/hw/campfire-pk
 ET=${ETCH_BIN:-$HOME/etch-target/release/campfire-hand}
 D=/tmp/etch-pp; rm -rf $D; mkdir -p $D
-cp -a ~/hw/golden-data $D/cs; cp -a ~/hw/golden-data $D/et; rm -f $D/cs/app.lock $D/et/app.lock
+cp -a /mnt/d/code/etch/data/campfire-golden $D/cs; cp -a /mnt/d/code/etch/data/campfire-golden $D/et; rm -f $D/cs/app.lock $D/et/app.lock
 cd /mnt/d/code/crudspec
 TZ=America/New_York CRUDSPEC_NO_CACHE=1 taskset -c 0-3 "$CS" --data $D/cs --assets /mnt/d/code/crudspec-assets/campfire --port 13792 > $D/cs.log 2>&1 &
 P1=$!

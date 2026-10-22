@@ -32,6 +32,8 @@ pub struct ScreenList {
     pub entity: String,
     pub keyed_by: Option<String>,
     pub monotone: bool,
+    /// newest first, with a limit: a new row goes first
+    pub newest_first: bool,
 }
 
 pub struct ActInfo {
@@ -152,7 +154,8 @@ pub fn screen_lists(m: &Model) -> Result<Vec<ScreenList>, String> {
                     }
                     let keyed_by = eqs.iter().find(|(_, x)| matches!(x, Expr::Name(n, _) if params.iter().any(|p| &p.name == n))).map(|(f, _)| f.clone());
                     let monotone = matches!(q.order.first(), Some((Expr::Dot(f, _), false)) if f == "created") && q.window_last.is_some();
-                    out.push(ScreenList { name: show(list), expr: list.clone(), entity: ent, keyed_by, monotone });
+                    let newest_first = matches!(q.order.first(), Some((Expr::Dot(f, _), true)) if f == "created") && q.limit.is_some() && q.window_last.is_none();
+                    out.push(ScreenList { name: show(list), expr: list.clone(), entity: ent, keyed_by, monotone, newest_first });
                 }
             }
         }
@@ -169,7 +172,6 @@ struct Act<'a, 'b> {
     args: Vec<(String, Shape)>,
     outcomes: Vec<String>,
     fails: Vec<(String, usize)>,
-    crudspec: bool,
     /// the entities this action creates (a new row's lists of these may not be empty)
     creates: Vec<String>,
     patches: Vec<Patch>,
@@ -490,8 +492,15 @@ impl<'a, 'b> Act<'a, 'b> {
             }
             if let (Some((id, _, _)), Some(f)) = (new, &s.keyed_by) {
                 if let Some(k) = vals.get(f).cloned() {
-                    self.delta(if s.monotone { 2 } else { 5 }, si, &k, id);
-                    self.note(format!("create {ent} → screen list {}: {}", s.name, if s.monotone { "appended (monotone order)" } else { "READ (rebuilt)" }));
+                    let (op, how) = if s.monotone {
+                        (2, "appended (oldest first: the new row is last)")
+                    } else if s.newest_first {
+                        (7, "prepended (newest first: the new row is first)")
+                    } else {
+                        (5, "READ (rebuilt)")
+                    };
+                    self.delta(op, si, &k, id);
+                    self.note(format!("create {ent} → screen list {}: {how}", s.name));
                 }
             }
         }
@@ -584,11 +593,6 @@ impl<'a, 'b> Act<'a, 'b> {
                         match s {
                             Stmt::Set(Expr::Name(o, _), f, v, _) if o == var => {
                                 sets.push((f.clone(), v.clone()));
-                                let is_time = matches!(self.m.field_type(&ent, f).as_ref().map(|t| t.strip_opt().clone()), Some(Type::Time));
-                                if self.crudspec && is_time {
-                                    // crudspec's storage: a time's order column beside it
-                                    sets.push((format!("{f}__seq"), Expr::Name("@seq".into(), Span::default())));
-                                }
                             }
                             _ => return Err("only `set x.f = v` is lowered inside for each".into()),
                         }
@@ -686,7 +690,6 @@ none:
 pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]) -> Result<(Vec<ActInfo>, Vec<Patch>, Vec<Patch>), String> {
     let regs = md.registers.clone();
     let lists = list_reads(m, &regs)?;
-    let crudspec = matches!(m.consts.get("storage"), Some(Decl::Const { value: Expr::Str(s, _), .. }) if s == "crudspec");
     let mut infos = vec![];
     let mut all_patches: Vec<Patch> = vec![];
     let mut all_finds: Vec<Patch> = vec![];
@@ -695,7 +698,7 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
             let args: Vec<(String, Shape)> = params.iter().map(|p| (p.name.clone(), if matches!(p.ty.strip_opt(), Type::Text) { Shape::Str } else { Shape::I64 })).collect();
             let mut creates = vec![];
             creates_of(body, &mut creates);
-            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), outcomes: vec!["ok".into()], fails: vec![], crudspec, creates, patches: vec![], finds: vec![], edges: vec![] };
+            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![] };
             a.stmts(body, &Scope::of(params), &regs, &lists, screens)?;
             let mut f = String::new();
             let parts: Vec<&str> = args.iter().map(|(_, s)| if *s == Shape::Str { "%Str" } else { "i64" }).collect();

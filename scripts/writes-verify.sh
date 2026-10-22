@@ -6,9 +6,9 @@
 set -e
 N=${1:-60}
 BIN=${ETCH_BIN:-$HOME/etch-target/release/campfire-hand}
-D=/tmp/etch-wv; rm -rf $D; mkdir -p $D; cp -a ~/hw/golden-data $D/data; rm -f $D/data/app.lock
+D=/tmp/etch-wv; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/etch/data/campfire-golden $D/data; rm -f $D/data/app.lock
 PORT=13791
-TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/crudspec-assets/campfire --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
+TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/etch/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
 PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 100); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done

@@ -1,4 +1,4 @@
-// The room page (crudspec's room_screen, byte for byte without crudspec's live-update markers).
+// The room page.
 // Templates are exact bytes between <<< and >>>; a line ending in \ joins the next one (its
 // leading spaces dropped). Holes are {{ expr }}; {{if}}…{{else}}…{{end}} and {{for x in list}}…{{end}}.
 // A hole is escaped for where it is: text and attribute values as HTML; inside on…= attributes
@@ -96,7 +96,7 @@ fragment room_tail(room: Room) <<<\
 <footer id="footer"><div class="composer flex align-end gap position-relative"><a href="/searches" class="btn flex-item-no-shrink composer__context-btn">\
 {{icon("search.svg")}}<span class="for-screen-reader">Search</span></a>\
 <form method="post" action="/_do/post_message" enctype="multipart/form-data" class="margin-block flex-item-grow contain" id="composer">\
-<input type="hidden" name="__arg_room" value="#{{room.id}}"><input type="hidden" name="__h" value="{{composer_token(room)}}">\
+<input type="hidden" name="room" value="{{room.id}}"><input type="hidden" name="__h" value="{{composer_token(room)}}">\
 <fieldset  style="display: contents"><div class="flex composer__input input input--actor fill-white min-width">{{icon("messages-outlined.svg")}}\
 <label class="flex-item-grow min-width"><textarea name="body" class="input" rows="1" data-richtext data-mentions-src="/_pick?ctx={{picker_token(room)}}" \
 data-unfurl-src="/_view/unfurl_link?link=" onkeydown="if(event.key==='Enter'&&!event.shiftKey&&!this.dataset.picking){event.preventDefault();this.form.requestSubmit()}"></textarea>\
