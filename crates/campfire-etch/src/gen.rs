@@ -136,3 +136,16 @@ pub fn sidebar(c: &Connection, ctx: &Ctx, viewer: Id) -> Option<Vec<Vec<u8>>> {
         Some(pieces)
     })
 }
+
+/// post_message, as the generated rule (etch_act_post_message), inside the writer's transaction.
+pub fn post_message(c: &Connection, ctx: &Ctx, w: &mut etch_rt::abi::Writer, viewer: Id, room: Id, body: &str, d: &mut etch_rt::abi::Deltas) -> Result<(), &'static str> {
+    with(c, |db, _arena| unsafe {
+        let args = Args_post_message { room, body: Str::of(body) };
+        let r = etch_act_post_message(ctx, db, w, viewer, &args, d);
+        if r == 0 {
+            Ok(())
+        } else {
+            Err(OUTCOMES_POST_MESSAGE[r as usize])
+        }
+    })
+}

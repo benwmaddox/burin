@@ -8,3 +8,6 @@ fn edit_token(m: Message): Text =
 fn composer_token(r: Room): Text =
   sign("{\"e\":[88],\"p\":" + quote("/rooms/" + text(r.id)) + ",\"v\":[[\"room\",{\"ref\":\"Room\",\"id\":" + text(r.id) + "}]]}")
 fn picker_token(r: Room): Text = sign("{\"e\":85,\"v\":[[\"room\",{\"id\":" + text(r.id) + ",\"ref\":\"Room\"}]]}")
+
+// crudspec stores an order column (f__seq) beside each optional time; set with it
+const storage = "crudspec"

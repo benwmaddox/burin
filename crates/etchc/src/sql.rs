@@ -120,8 +120,10 @@ impl<'a> Tx<'a> {
         Ok(match e {
             Expr::Str(s, _) => format!("'{}'", s.replace('\'', "''")),
             Expr::Int(n, _) => n.to_string(),
+            Expr::Dur(n, _) => n.to_string(),
             Expr::Bool(b, _) => (*b as i32).to_string(),
             Expr::None(_) => "NULL".into(),
+            Expr::Call(f, args, _) if f == "present" => format!("(trim(coalesce({}, '')) <> '')", self.expr(&args[0])?),
             Expr::Name(..) | Expr::Field(..) => {
                 // a value from outside the query: bound
                 self.binds.push(Bind::Path(e.clone()));
@@ -275,6 +277,38 @@ pub fn row_select(m: &Model, ent: Option<&str>, root: &str, fields: &[String], s
         None => format!("SELECT {}", cols.join(", ")),
     };
     Ok(Select { sql, binds: tx.binds })
+}
+
+/// A condition as one SQL expression: `SELECT <cond>` (its values from outside bound).
+pub fn cond_select(m: &Model, cond: &Expr) -> Result<Select, String> {
+    let mut tx = Tx { m, joins: Joins { list: vec![], sql: String::new(), next: 0 }, binds: vec![], rows: vec![], sub: 0 };
+    let e = tx.expr(cond)?;
+    Ok(Select { sql: format!("SELECT {e}"), binds: tx.binds })
+}
+
+/// A set over the rows a filter selects, as one UPDATE: `sets` are (column, value); the columns in
+/// `returning` come back for each changed row (what the delta edges need).
+pub fn update(m: &Model, ent: &str, filter: Option<&Expr>, sets: &[(String, Expr)], returning: &[String]) -> Result<Select, String> {
+    // no joins in an UPDATE: paths through references are correlated subselects (the alias isn't t0)
+    let mut tx = Tx { m, joins: Joins { list: vec![], sql: String::new(), next: 0 }, binds: vec![], rows: vec![("u0".into(), ent.to_string())], sub: 0 };
+    let mut set_sql = vec![];
+    for (c, v) in sets {
+        let saved = std::mem::take(&mut tx.rows);
+        let x = tx.expr(v)?;
+        tx.rows = saved;
+        set_sql.push(format!("{} = {x}", q(c)));
+    }
+    let w = match filter {
+        Some(f) => format!(" WHERE {}", tx.expr(f)?),
+        None => String::new(),
+    };
+    let ret = if returning.is_empty() { String::new() } else { format!(" RETURNING {}", returning.iter().map(|c| if c == "id" { "id".to_string() } else { q(c) }).collect::<Vec<_>>().join(", ")) };
+    Ok(Select { sql: format!("UPDATE {} AS u0 SET {}{w}{ret}", q(ent), set_sql.join(", ")), binds: tx.binds })
+}
+
+/// The keys of a list's rows that reach a written row through a reference: `SELECT F FROM L WHERE P = ?`.
+pub fn reach(ent: &str, key_col: &str, via: &str) -> String {
+    format!("SELECT {} FROM {} WHERE {} = ?", q(key_col), q(ent), q(via))
 }
 
 /// `first(query).field` as a scalar subselect.

@@ -1,3 +1,4 @@
 2026-10-22T14:37:46.163Z ready run=t1-p2-reads-etch-bolt no_cache= no_page_cache= prune=on gogc= gomemlimit= procs=1 server_cpus=8-11 loadgen_cpus=12-19 node=v24.12.0
 2026-10-22T14:37:46.178Z decoded_bytes=350823
 2026-10-22T14:37:58.711Z warmup {"avg_bytes":350823,"conc":4,"errors":0,"gzip":false,"invalid_reasons":{},"invalid_responses":0,"latency":{"max_ms":1.656,"mean_ms":0.26,"n":136072,"p50_ms":0.252,"p90_ms":0.382,"p99_ms":0.536},"ok":136072,"path":"/rooms/486777696","rps":13606.6,"secs":10.0,"statuses":{"200":136072},"validation":"ro
+2026-10-22T14:39:01.359Z done

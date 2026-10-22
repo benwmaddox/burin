@@ -252,6 +252,7 @@ dependencies = [
  "base64",
  "crc32fast",
  "flate2",
+ "getrandom",
  "hmac",
  "httparse",
  "httpdate",

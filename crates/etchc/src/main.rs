@@ -4,6 +4,7 @@
 //!   etchc report <app dir>    the dataflow netlist: each node's stage, the registers, splices
 
 mod ast;
+mod actions;
 mod check;
 mod inline;
 mod llvm;

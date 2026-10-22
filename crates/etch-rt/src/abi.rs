@@ -316,3 +316,116 @@ pub unsafe extern "C" fn etch_bind_str(st: *mut ffi::sqlite3_stmt, i: i32, s: *c
         ffi::sqlite3_bind_text(st, i, s.ptr as *const _, s.len as i32, ffi::SQLITE_TRANSIENT());
     }
 }
+
+// ---- the writer: what generated actions read and report
+
+/// The writer's state an action reads: the time (one per batch), the next ids and seq, an arena
+/// for the text it makes (tokens).
+pub struct Writer {
+    pub now: i64,
+    pub seq: i64,
+    next_ids: HashMap<String, i64>,
+    arena: Arena,
+}
+
+impl Writer {
+    pub fn new(seq: i64) -> Writer {
+        Writer { now: 0, seq, next_ids: HashMap::new(), arena: Arena::default() }
+    }
+    /// A new batch: its time; the arena emptied.
+    pub fn begin(&mut self, now: i64) {
+        self.now = now;
+        self.arena.reset();
+    }
+    /// Forgets the ids handed out since the last commit (a rolled-back batch).
+    pub fn forget_ids(&mut self) {
+        self.next_ids.clear();
+    }
+}
+
+/// What an action's commit changes, for the writer to rebuild: (op, register or list, key, item).
+/// 1 build register for a new row; 2 append item to a screen list; 3 rebuild register at key;
+/// 4 rebuild every kept instance of a register; 5 rebuild a screen list at key.
+#[derive(Default)]
+pub struct Deltas {
+    pub list: Vec<(i32, i64, i64, i64)>,
+}
+
+/// # Safety: a live Deltas.
+#[no_mangle]
+pub unsafe extern "C" fn etch_delta(d: *mut Deltas, op: i32, a: i64, key: i64, item: i64) {
+    let d = &mut *d;
+    if !d.list.contains(&(op, a, key, item)) {
+        d.list.push((op, a, key, item));
+    }
+}
+
+/// # Safety: a live Writer.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_now(w: *mut Writer) -> i64 {
+    (*w).now
+}
+
+/// A new seq. # Safety: a live Writer.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_seq(w: *mut Writer) -> i64 {
+    (*w).seq += 1;
+    (*w).seq
+}
+
+/// The seq last handed out. # Safety: a live Writer.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_seq_now(w: *mut Writer) -> i64 {
+    (*w).seq
+}
+
+/// A new id for a row of `ent` (one more than the largest, read once). # Safety: live Writer, Db.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_id(w: *mut Writer, db: *mut Db, ent: *const u8, n: i64) -> i64 {
+    let name = std::str::from_utf8_unchecked(bytes(ent, n)).to_string();
+    let w = &mut *w;
+    if !w.next_ids.contains_key(&name) {
+        let sql = format!("SELECT coalesce(max(id), 0) + 1 FROM \"{name}\"");
+        let st = etch_stmt(db, 1_000_000 + w.next_ids.len() as i64, sql.as_ptr(), sql.len() as i64);
+        ffi::sqlite3_step(st);
+        let v = ffi::sqlite3_column_int64(st, 0);
+        ffi::sqlite3_reset(st);
+        w.next_ids.insert(name.clone(), v);
+    }
+    let id = w.next_ids.get_mut(&name).unwrap();
+    let v = *id;
+    *id += 1;
+    v
+}
+
+/// A random token of n URL-safe characters, in the writer's arena. # Safety: live Writer, dst.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_token(w: *mut Writer, n: i64, dst: *mut Str) {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let n = n as usize;
+    let mut raw = vec![0u8; n];
+    getrandom::getrandom(&mut raw).expect("random");
+    let p = (*w).arena.take(n);
+    for (i, b) in raw.iter().enumerate() {
+        *p.add(i) = A[(*b & 63) as usize];
+    }
+    *dst = Str { ptr: p, len: n as i64 };
+}
+
+/// Runs a statement that returns no rows. # Safety: a live statement.
+#[no_mangle]
+pub unsafe extern "C" fn etch_exec(st: *mut ffi::sqlite3_stmt) {
+    let rc = ffi::sqlite3_step(st);
+    etch_done(st, rc);
+}
+
+/// Resets a statement; panics on an error (the writer rolls the batch back). # Safety: live statement.
+#[no_mangle]
+pub unsafe extern "C" fn etch_done(st: *mut ffi::sqlite3_stmt, rc: i32) {
+    ffi::sqlite3_reset(st);
+    if rc != ffi::SQLITE_DONE {
+        let db = ffi::sqlite3_db_handle(st);
+        let msg = std::ffi::CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy();
+        panic!("a generated write failed ({rc}): {msg}");
+    }
+}
