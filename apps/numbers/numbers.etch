@@ -71,6 +71,7 @@ fragment top(p: Planet) <<<\
 <li data-k="back">{{iso(p.started - 2d + 90s)}}</li><li data-k="longest">{{text(max(p.took, 1h) * 3)}}</li></ul>
 <p id="metal" title="{{grouped(p.metal)}}">{{if p.metal >= p.level * 100}}can build{{else}}can't build{{end}}</p>
 <p id="next">{{text(p.took * (p.level + 1))}}</p>
+<p id="flags">{{if p.metal / p.level < 10}}a{{end}}{{if p.bonus + 1 < 3}}b{{end}}{{if not (p.metal / p.level < 10)}}c{{end}}</p>
 >>>
 
 // the same values, as the action computed them in SQL
@@ -104,4 +105,29 @@ action build(p: Planet) {
   create Build { planet: p, level: p.level + 1, done: now + p.took * (p.level + 1) }
   set p.metal = p.metal - p.level * 100
   set p.level = p.level + 1
+}
+
+// Queues each build again, ten levels up and `took` later: arithmetic on the loop's row.
+action requeue(p: Planet) {
+  require p.owner == viewer else not_found
+  for each b in Build where .planet == p {
+    create Build { planet: p, level: b.level + 10, done: b.done + p.took }
+  }
+}
+
+// The page's flags, as requires: ok exactly when the page shows the flag (none orders with
+// nothing, in both).
+action probe_a(p: Planet) {
+  require p.metal / p.level < 10 else invalid
+  touch p
+}
+
+action probe_b(p: Planet) {
+  require p.bonus + 1 < 3 else invalid
+  touch p
+}
+
+action probe_c(p: Planet) {
+  require not (p.metal / p.level < 10) else invalid
+  touch p
 }

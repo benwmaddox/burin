@@ -795,8 +795,11 @@ impl<'a, 'b> Gen<'a, 'b> {
                 };
                 let (a, _) = self.value(roots, l)?;
                 let (b, _) = self.value(roots, r)?;
-                let v = self.v();
-                self.line(&format!("{v} = icmp {pred} i64 {a}, {b}"));
+                // none orders with nothing: false, as SQL's NULL (a `require` refuses it)
+                let (c, na, nb, bad, v) = (self.v(), self.v(), self.v(), self.v(), self.v());
+                self.line(&format!(
+                    "{c} = icmp {pred} i64 {a}, {b}\n  {na} = icmp eq i64 {a}, -9223372036854775808\n  {nb} = icmp eq i64 {b}, -9223372036854775808\n  {bad} = or i1 {na}, {nb}\n  {v} = select i1 {bad}, i1 false, i1 {c}"
+                ));
                 Ok(v)
             }
             Expr::Bin(op @ (BinOp::Eq | BinOp::Ne), l, r, _) => {

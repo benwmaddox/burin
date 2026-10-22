@@ -248,7 +248,7 @@ then shown in the compile report). The checker enforces these rules:
 | **Queries name their order and go through indexes** | write-time rebuilds are index lookups; incremental appends where the order is proved monotone | nothing: a scan of a table on a hot rebuild is reported as an error |
 | **Holes are escaped for where they are**, at write time | safety without per-request work; `on…=` holes take only `json(…)` | `raw(…)` for `Html` values (autolink's output), which the checker types |
 
-## Numbers and time (23 Oct 2026)
+## Numbers and time (22 Oct 2026)
 
 Three number types, each a 64-bit integer in an `INTEGER` column (no floating point, so SQLite
 and the fragments' code compute the same bits):
@@ -281,6 +281,9 @@ rules:
 
 - `/` truncates toward 0 (`-7 / 2` is `-3`) and `%` takes the dividend's sign (`-7 % 3` is `-1`).
 - **none in, none out**: `p.bonus + 1` is none when `bonus` is (the checker types it `Int?`).
+- **none orders with nothing**: `x < 10` is false when x is none, in a page as in a `require`
+  (SQL's NULL), and `not (x < 10)` is true in both (SQL's NOT of it is made two-valued with
+  `coalesce`). `==` and `!=` see none as a value: `x == none` is true when x is none.
 - **dividing by 0 gives none** (SQLite's NULL). So `a / b` is `Int?`, unless `b` is a nonzero
   literal (`a / 4`, `d / 1h`).
 - **overflow gives none.** A result outside 64 bits is none in a page, through LLVM's

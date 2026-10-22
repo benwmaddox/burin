@@ -42,9 +42,13 @@ act() { curl -sS -o /dev/null -D - -H "Cookie: sid=ada-token" --data-urlencode "
 for p in 1 2 3 4 5; do
   echo "planet $p: read $(get $p cold$p), snapshot $(act $p snapshot), read $(sleep 0.2; get $p snap$p) $(get $p fast$p)"
 done
+for p in 1 2 3 4 5; do
+  echo "$(act $p probe_a) $(act $p probe_b) $(act $p probe_c)" > $D/probes$p
+done
 for p in 1 2; do
   echo "planet $p: build $(act $p build), read $(sleep 0.2; get $p built$p)"
 done
+echo "planet 1: requeue $(act 1 requeue), read $(sleep 0.2; get 1 requeued1)"
 grep -iE 'mismatch|panic|error' $D/server.log | head -5 || true
 python3 - <<'EOF'
 import re, datetime
@@ -123,5 +127,18 @@ for i in (1, 2):
     ok = (bool(builds) == can) and (not builds or builds[0][1] == nxt)
     bad += not ok
     print(f'build on planet {i}: page said {"can" if can else "cannot"}; builds {builds}; next was {nxt!r}:', 'ok' if ok else 'MISMATCH')
+# an order on none is false in a page and in a require; `not` of it is true in both
+for i in range(1, 6):
+    flags = re.search(r'<p id="flags">([^<]*)</p>', open(D + f'snap{i}.html').read()).group(1)
+    outcomes = open(D + f'probes{i}').read().split()
+    want = ['ok' if f in flags else 'invalid' for f in 'abc']
+    ok = outcomes == want
+    bad += not ok
+    print(f'planet {i}: page flags {flags!r}, requires {outcomes}:', 'ok' if ok else 'MISMATCH')
+# requeue: each build again, ten levels up (arithmetic on a for each's row)
+levels = re.findall(r'<p class="build" data-level="(\d+)">', open(D + 'requeued1.html').read())
+ok = levels == ['15', '5']
+bad += not ok
+print('requeued builds on planet 1:', levels, 'ok' if ok else 'MISMATCH')
 print('PASS' if bad == 0 else f'FAIL: {bad}')
 EOF

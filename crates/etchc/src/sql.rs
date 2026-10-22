@@ -143,6 +143,16 @@ fn sub_column(m: &Model, alias: &str, ent: &str, p: &[String]) -> Result<String,
 
 /// (how many queries out, the path) when `e` is a path from a query's row: `.a.b` and `it.a` are
 /// the innermost row's; `^k.a` the row k queries further out.
+/// Whether a condition holds an order (`<`, `>=`, …) outside a subquery: NULL when a side is none.
+fn orders(e: &Expr) -> bool {
+    match e {
+        Expr::Bin(BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, ..) => true,
+        Expr::Bin(BinOp::And | BinOp::Or, l, r, _) => orders(l) || orders(r),
+        Expr::Not(x, _) => orders(x),
+        _ => false,
+    }
+}
+
 fn row_ref(e: &Expr) -> Option<(usize, Vec<String>)> {
     match e {
         Expr::Dot(f, _) => Some((0, if f == "id" { vec![] } else { vec![f.clone()] })),
@@ -245,6 +255,9 @@ impl<'a> Tx<'a> {
                 self.binds.push(Bind::Path(e.clone()));
                 "?".into()
             }
+            // an order on none is NULL, which NOT keeps NULL: made false first, so `not (x < 10)`
+            // is true for none, as a fragment's code has it
+            Expr::Not(x, _) if orders(x) => format!("NOT coalesce(({}), 0)", self.expr(x)?),
             Expr::Not(x, _) => format!("NOT ({})", self.expr(x)?),
             Expr::Bin(op, l, r, _) => {
                 let (a, b) = (self.expr(l)?, self.expr(r)?);
