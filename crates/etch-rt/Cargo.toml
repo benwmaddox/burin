@@ -1,0 +1,16 @@
+[package]
+name = "etch-rt"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "etch's runtime: the prebuilt base every generated app links (the HTTP fast path, signing, formatting)"
+
+[dependencies]
+httparse = "1"
+mio = { version = "1", features = ["net", "os-poll"] }
+socket2 = { version = "0.5", features = ["all"] }
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+httpdate = "1"
+jiff = "0.2"
