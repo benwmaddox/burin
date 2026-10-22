@@ -33,7 +33,7 @@ pub enum Shape {
 
 fn shape_of(t: &Type) -> Shape {
     match t.strip_opt() {
-        Type::Text | Type::Html | Type::Json => Shape::Str,
+        Type::Text | Type::Html | Type::Json | Type::Password => Shape::Str,
         _ => Shape::I64,
     }
 }
@@ -1216,6 +1216,8 @@ declare void @etch_w_copy(ptr, ptr, ptr)
 declare void @etch_delta_patch(ptr, i64, i64, i64, i64, i64, i64)
 declare void @etch_delta_find(ptr, i64, i64, i64, i64)
 declare i64 @etch_str_chars(ptr)
+declare void @etch_w_sign_in(ptr, ptr)
+declare void @etch_w_sign_out(ptr)
 "#;
 
 /// The module for these registers, and a Rust header with the same records.

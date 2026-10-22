@@ -98,3 +98,21 @@ fn viewer_text_in_a_shared_fragment_is_refused() {
 fn viewer_conditions_in_a_shared_fragment_pass() {
     lowered(r#"fragment p(x: Post) <<<{{if x.author == viewer}}<b>mine</b>{{end}}{{x.body}}>>>"#, "p").unwrap();
 }
+
+#[test]
+fn a_public_action_reading_the_viewer_is_refused() {
+    let e = verdict("action p(b: Text) public {\n  create Post { author: viewer, body: b }\n}").unwrap_err();
+    assert!(e.contains("public action"), "{e}");
+}
+
+#[test]
+fn a_password_in_a_page_is_refused() {
+    let src = "entity Login { user: User  password: Password }\nfragment p(l: Login) <<<<b>{{l.password}}</b>>>>";
+    let e = verdict(src).unwrap_err();
+    assert!(e.contains("Password can't go in text"), "{e}");
+}
+
+#[test]
+fn signing_in_and_out_pass() {
+    verdict("entity Login { user: User  password: Password? }\naction sign_in(u: User, p: Text) public {\n  let l = first(Login where .user == u)\n  require l != none and authenticates(l.password, p) else unauthenticated\n  sign in u\n}\naction sign_out() {\n  sign out\n}").unwrap();
+}

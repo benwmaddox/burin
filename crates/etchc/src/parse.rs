@@ -253,6 +253,7 @@ impl Parser {
                 "Bool" => Type::Bool,
                 "Time" => Type::Time,
                 "Duration" => Type::Duration,
+                "Password" => Type::Password,
                 "Html" => Type::Html,
                 _ if is_entity_name(&n) => Type::Ref(n),
                 _ => return self.err(format!("unknown type {n}")),
@@ -371,6 +372,7 @@ impl Parser {
                 self.expect_kw("at")?;
                 let route = self.string()?;
                 let cold = self.eat_kw("cold");
+                let public = self.eat_kw("public");
                 let mut requires = vec![];
                 let mut cookies = vec![];
                 loop {
@@ -384,13 +386,21 @@ impl Parser {
                         break;
                     }
                 }
-                Ok(Decl::Screen { name, params, route, cold, requires, cookies, body: self.template()?, span })
+                Ok(Decl::Screen { name, params, route, cold, public, requires, cookies, body: self.template()?, span })
             }
             "action" => {
                 let name = self.ident()?;
                 let params = self.params()?;
+                let public = self.eat_kw("public");
                 let body = self.block()?;
-                Ok(Decl::Action { name, params, body, span })
+                Ok(Decl::Action { name, params, public, body, span })
+            }
+            "home" => {
+                let screen = self.ident()?;
+                self.expect("(")?;
+                let arg = self.expr()?;
+                self.expect(")")?;
+                Ok(Decl::Home { screen, arg, span })
             }
             _ => Err(Error { span, msg: format!("expected a declaration (entity, fn, view, screen, …), found `{kw}`") }),
         }
@@ -444,6 +454,18 @@ impl Parser {
         if self.eat_kw("delete") {
             return Ok(Stmt::Delete(self.expr()?, span));
         }
+        if self.eat_kw("let") {
+            let n = self.ident()?;
+            self.expect("=")?;
+            return Ok(Stmt::Let(n, self.expr()?, span));
+        }
+        if self.eat_kw("sign") {
+            if self.eat_kw("out") {
+                return Ok(Stmt::SignOut(span));
+            }
+            self.expect_kw("in")?;
+            return Ok(Stmt::SignIn(self.expr()?, span));
+        }
         if self.eat_kw("set") {
             let target = self.postfix()?;
             let (obj, field) = match target {
@@ -464,7 +486,7 @@ impl Parser {
             let body = self.block()?;
             return Ok(Stmt::ForEach(v, q, body, span));
         }
-        self.err(format!("expected a statement (require, create, set, touch, delete, for each), found {}", show(self.peek())))
+        self.err(format!("expected a statement (require, create, set, touch, delete, let, sign in, sign out, for each), found {}", show(self.peek())))
     }
 
     // ---- expressions, loosest first

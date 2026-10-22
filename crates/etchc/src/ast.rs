@@ -13,6 +13,8 @@ pub enum Type {
     Bool,
     Time,
     Duration,
+    /// a password's hash (PHC text): never shown; only `authenticates(hash, text)` reads it
+    Password,
     /// a reference to a row
     Ref(String),
     Opt(Box<Type>),
@@ -39,6 +41,7 @@ impl Type {
             Type::Bool => "Bool".into(),
             Type::Time => "Time".into(),
             Type::Duration => "Duration".into(),
+            Type::Password => "Password".into(),
             Type::Ref(e) => e.clone(),
             Type::Opt(t) => format!("{}?", t.show()),
             Type::List(t) => format!("list of {}", t.show()),
@@ -175,6 +178,12 @@ pub enum Stmt {
     ForEach(String, Query, Vec<Stmt>, Span),
     /// `delete x`: the row goes; rows referencing it must have gone first (the checker proves it)
     Delete(Expr, Span),
+    /// `let x = e`: a value read once (a row: `first(…)`), by name after
+    Let(String, Expr, Span),
+    /// `sign in u`: a new session for u (the viewer declaration's entity); its cookie is set
+    SignIn(Expr, Span),
+    /// `sign out`: the request's session is deleted; its cookie cleared
+    SignOut(Span),
 }
 
 #[derive(Clone, Debug)]
@@ -187,9 +196,13 @@ pub enum Decl {
     Const { name: String, value: Expr, span: Span },
     /// `per viewer`: keyed by the viewer (its memory per viewer is reported)
     Fragment { name: String, params: Vec<Param>, per_viewer: bool, body: Template, span: Span },
-    /// `cold`: rendered per request, outside the fast path
-    Screen { name: String, params: Vec<Param>, route: String, cold: bool, requires: Vec<Require>, cookies: Vec<(String, Expr)>, body: Template, span: Span },
-    Action { name: String, params: Vec<Param>, body: Vec<Stmt>, span: Span },
+    /// `cold`: rendered per request, outside the fast path; `public`: for anyone (no viewer, no
+    /// parameters: rendered per request)
+    Screen { name: String, params: Vec<Param>, route: String, cold: bool, public: bool, requires: Vec<Require>, cookies: Vec<(String, Expr)>, body: Template, span: Span },
+    /// `public`: run without a viewer (signing in)
+    Action { name: String, params: Vec<Param>, public: bool, body: Vec<Stmt>, span: Span },
+    /// `home <screen>(<row>)`: where "/" goes for a viewer
+    Home { screen: String, arg: Expr, span: Span },
 }
 
 pub struct App {

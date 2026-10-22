@@ -6,6 +6,8 @@ config vapid_public: Text                // the web-push public key (start time)
 
 entity User {
   name: Text
+  email: Text? max 254
+  password: Password?                    // an argon2id hash; only authenticates() reads it
   role: Text                             // "member" | "administrator"
   status: Text                           // "active" | "deactivated"
 }
@@ -42,6 +44,7 @@ entity Boost {
 }
 
 entity Account {
+  name: Text?
   logo: Text?
   restrict_room_creation: Bool
 }

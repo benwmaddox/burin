@@ -8,6 +8,7 @@ pub mod html;
 pub mod keys;
 pub mod http;
 pub mod out;
+pub mod pass;
 pub mod sign;
 pub mod store;
 pub mod time;

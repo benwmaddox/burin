@@ -179,6 +179,19 @@ pub unsafe extern "C" fn etch_str_eq(a: *const u8, an: i64, b: *const u8, bn: i6
     !a.is_null() && bytes(a, an) == bytes(b, bn)
 }
 
+/// `sign in`: the new session's token, for the reply's cookie. # Safety: live writer and text.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_sign_in(w: *mut Writer, token: *const Str) {
+    let t = &*token;
+    (*w).signed_in = Some(bytes(t.ptr, t.len).to_vec());
+}
+
+/// `sign out`: the reply clears the session's cookie. # Safety: a live writer.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_sign_out(w: *mut Writer) {
+    (*w).signed_out = true;
+}
+
 /// A text's length in characters (as SQLite's length() counts them): an action's `max N` check.
 /// # Safety: a live %Str.
 #[no_mangle]
@@ -346,11 +359,15 @@ pub struct Writer {
     pub seq: i64,
     next_ids: HashMap<String, i64>,
     arena: Arena,
+    /// the action signed a viewer in: the new session's token (its cookie)
+    pub signed_in: Option<Vec<u8>>,
+    /// the action signed the request's session out (its cookie cleared)
+    pub signed_out: bool,
 }
 
 impl Writer {
     pub fn new(seq: i64) -> Writer {
-        Writer { now: 0, seq, next_ids: HashMap::new(), arena: Arena::default() }
+        Writer { now: 0, seq, next_ids: HashMap::new(), arena: Arena::default(), signed_in: None, signed_out: false }
     }
     /// A new batch: its time; the arena emptied.
     pub fn begin(&mut self, now: i64) {

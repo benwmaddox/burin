@@ -147,6 +147,14 @@ impl<'a> Tx<'a> {
             Expr::Bool(b, _) => (*b as i32).to_string(),
             Expr::None(_) => "NULL".into(),
             Expr::Call(f, args, _) if f == "present" => format!("(trim(coalesce({}, '')) <> '')", self.expr(&args[0])?),
+            // `first(query).field`: a scalar subselect
+            Expr::Field(o, _, _) if matches!(&**o, Expr::Call(c, _, _) if c == "first") => scalar(self, e)?,
+            Expr::Call(f, args, _) if f == "either" => format!("coalesce({}, {})", self.expr(&args[0])?, self.expr(&args[1])?),
+            // a request's cookie: bound
+            Expr::Call(f, _, _) if f == "cookie" => {
+                self.binds.push(Bind::Path(e.clone()));
+                "?".into()
+            }
             Expr::Field(..) if self.param_path(e).is_some() => {
                 // a row parameter's field: a subselect by the parameter's id (bound)
                 let (root, ent, path) = self.param_path(e).unwrap();

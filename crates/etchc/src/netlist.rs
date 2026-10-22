@@ -688,7 +688,12 @@ fn collect_writes(m: &Model, body: &[Stmt], scope: &Scope, out: &mut Vec<(String
                     out.push((t, vec!["*".into()]));
                 }
             }
-            Stmt::Require(_) => {}
+            Stmt::SignIn(..) | Stmt::SignOut(_) => {
+                if let Some(Decl::Viewer { via_entity, .. }) = m.viewer {
+                    out.push((via_entity.clone(), vec!["*".into()]));
+                }
+            }
+            Stmt::Require(_) | Stmt::Let(..) => {}
         }
     }
 }

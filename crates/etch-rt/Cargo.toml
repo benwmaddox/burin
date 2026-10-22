@@ -20,3 +20,4 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 getrandom = "0.2"
 arc-swap = "1"
 p256 = { version = "0.13", features = ["arithmetic"] }
+argon2 = { version = "0.5", features = ["std"] }

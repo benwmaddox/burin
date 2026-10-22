@@ -1,0 +1,39 @@
+// Signing in and out, and where "/" goes.
+
+// Signs a person in with their email address and password (sessions_controller.rb). The password
+// is verified on the request's thread; the writer checks only that the hash is still the one
+// verified.
+action sign_in(email: Text, password: Text) public {
+  let user = first(User where .email == email and .status == "active")
+  require user != none and authenticates(user.password, password) else unauthenticated
+  sign in user
+}
+
+// Signs out of this browser session.
+action sign_out() {
+  sign out
+}
+
+// "/": the room last visited, if the viewer is still in it; else their first room.
+home room(either(first(Membership where .user == viewer and .room == cookie("last_room")).room,
+                 first(Membership where .user == viewer and visible(it) order by .created, .seq).room))
+
+screen sign_in() at "/session/new" public
+<<<{{sign_in_page()}}>>>
+
+fragment sign_in_page() <<<\
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
+<title>Sign in</title>{{for css in stylesheets}}<link rel="stylesheet" href="{{asset(css)}}">{{end}}</head>
+<body class="sign-in">
+<main id="main-content"><div class="panel shadow center flex flex-column gap align-center">\
+<img src="{{asset("campfire-icon.png")}}" width="96" height="96" alt="" class="sign-in__logo">\
+<h1 class="txt-large">{{if first(Account).name != none}}{{first(Account).name}}{{else}}Campfire{{end}}</h1>\
+<form method="post" action="/_do/sign_in" class="flex flex-column gap full-width">\
+<label class="flex align-center gap input input--actor">{{icon("email.svg")}}\
+<input type="email" name="email" class="input" required autofocus autocomplete="username" placeholder="Enter your email address"></label>\
+<label class="flex align-center gap input input--actor">{{icon("password.svg")}}\
+<input type="password" name="password" class="input" required autocomplete="current-password" placeholder="Enter your password"></label>\
+<button type="submit" class="btn btn--reversed center">{{icon("arrow-right.svg")}}<span class="for-screen-reader">Go</span></button></form>\
+</div></main>
+</body></html>
+>>>
