@@ -266,6 +266,7 @@ impl<'a> Tx<'a> {
             }
             Expr::Call(f, args, _) if f == "lower" => format!("lower({})", self.expr(&args[0])?),
             Expr::Call(f, args, _) if f == "max" => format!("max({}, {})", self.expr(&args[0])?, self.expr(&args[1])?),
+            Expr::Call(f, args, _) if f == "exists" && self.semijoin(&args[0])?.is_some() => self.semijoin(&args[0])?.unwrap(),
             Expr::Call(f, args, _) if f == "exists" || f == "count" => {
                 let (from, w) = self.subquery(&args[0])?;
                 let r = format!("(SELECT {} {from}{w})", if f == "exists" { "1" } else { "count(*)" });
@@ -284,6 +285,57 @@ impl<'a> Tx<'a> {
             }
             _ => return Err(format!("this can't be part of a query's SQL yet: {e:?}").chars().take(200).collect()),
         })
+    }
+
+    /// `exists(E where .f == <the outer row's path> and P)`, P not reading the outer row, as a
+    /// semi-join: `<path> IN (SELECT f FROM E WHERE P)`. SQLite evaluates an uncorrelated IN
+    /// once per query, where a correlated EXISTS runs once per outer row (thousands of lookups for
+    /// a list of people each checked against their memberships). None when it doesn't apply.
+    fn semijoin(&mut self, e: &Expr) -> Result<Option<String>, String> {
+        let qy = match e {
+            Expr::Query(qy) => (**qy).clone(),
+            _ => return Ok(None),
+        };
+        let ent = match &qy.source {
+            Source::Entity(en) => en.clone(),
+            _ => return Ok(None),
+        };
+        let Some(filter) = &qy.filter else { return Ok(None) };
+        let mut conj = vec![];
+        split_and(filter, &mut conj);
+        // the one conjunct that reads the outer row: `.f == outer`
+        let mut corr: Option<(String, Expr)> = None;
+        let mut rest = vec![];
+        for c in conj {
+            if !refs_outer(&c, 0) {
+                rest.push(c);
+                continue;
+            }
+            if corr.is_some() || self.rows.is_empty() {
+                return Ok(None);
+            }
+            match &c {
+                Expr::Bin(BinOp::Eq, l, r, _) => match (&**l, &**r) {
+                    (Expr::Dot(f, _), x) | (x, Expr::Dot(f, _)) if f != "id" && !refs_inner(x) => corr = Some((f.clone(), x.clone())),
+                    _ => return Ok(None),
+                },
+                _ => return Ok(None),
+            }
+        }
+        let Some((f, outer)) = corr else { return Ok(None) };
+        // the outer path, from where the exists is (one query out from inside it)
+        let lhs = self.expr(&unshift(&outer))?;
+        self.sub += 1;
+        let a = format!("s{}", self.sub);
+        note(&ent, "*");
+        note(&ent, &f);
+        self.rows.push((a.clone(), ent.clone()));
+        let mut w = format!("{a}.{} IS NOT NULL", q(&f));
+        for c in &rest {
+            w = format!("{w} AND {}", self.expr(c)?);
+        }
+        self.rows.pop();
+        Ok(Some(format!("({lhs} IN (SELECT {a}.{} FROM {} {a} WHERE {w}))", q(&f), q(&ent))))
     }
 
     /// A subquery's FROM and WHERE; its row is pushed (the caller pops it).
@@ -306,6 +358,57 @@ impl<'a> Tx<'a> {
             None => String::new(),
         };
         Ok((format!("FROM {} {a}", q(&ent)), w))
+    }
+}
+
+fn split_and(e: &Expr, out: &mut Vec<Expr>) {
+    if let Expr::Bin(BinOp::And, l, r, _) = e {
+        split_and(l, out);
+        split_and(r, out);
+    } else {
+        out.push(e.clone());
+    }
+}
+
+/// Whether `e` (in a subquery, `depth` queries further in) reads a row outside the subquery.
+fn refs_outer(e: &Expr, depth: usize) -> bool {
+    match e {
+        Expr::Name(n, _) if n.starts_with('^') => n[1..].parse::<usize>().map(|k| k > depth).unwrap_or(true),
+        Expr::Field(o, _, _) | Expr::Not(o, _) => refs_outer(o, depth),
+        Expr::Bin(_, l, r, _) => refs_outer(l, depth) || refs_outer(r, depth),
+        Expr::Call(_, a, _) | Expr::List(a, _) => a.iter().any(|x| refs_outer(x, depth)),
+        Expr::If(c, a, b, _) => refs_outer(c, depth) || refs_outer(a, depth) || refs_outer(b, depth),
+        Expr::Query(q) => {
+            q.filter.as_ref().map(|f| refs_outer(f, depth + 1)).unwrap_or(false)
+                || matches!(&q.source, Source::Expr(x) if refs_outer(x, depth))
+                || q.order.iter().any(|(k, _)| refs_outer(k, depth + 1))
+        }
+        Expr::Comp(_, x, q, _) => refs_outer(x, depth + 1) || refs_outer(&Expr::Query(q.clone()), depth),
+        _ => false,
+    }
+}
+
+/// Whether `e` reads the subquery's own row (`.f`, `it`).
+fn refs_inner(e: &Expr) -> bool {
+    match e {
+        Expr::Dot(..) => true,
+        Expr::Name(n, _) => n == "it",
+        Expr::Field(o, _, _) | Expr::Not(o, _) => refs_inner(o),
+        Expr::Bin(_, l, r, _) => refs_inner(l) || refs_inner(r),
+        Expr::Call(_, a, _) => a.iter().any(refs_inner),
+        _ => false,
+    }
+}
+
+/// An outer row's path seen from one query out: `^1` becomes `it`, `^k` becomes `^(k-1)`.
+fn unshift(e: &Expr) -> Expr {
+    match e {
+        Expr::Name(n, s) if n.starts_with('^') => {
+            let k: usize = n[1..].parse().unwrap_or(1);
+            Expr::Name(if k <= 1 { "it".into() } else { format!("^{}", k - 1) }, *s)
+        }
+        Expr::Field(o, f, s) => Expr::Field(Box::new(unshift(o)), f.clone(), *s),
+        other => other.clone(),
     }
 }
 

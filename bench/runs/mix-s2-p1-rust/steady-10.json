@@ -1,0 +1,1 @@
+{"app":"rust","conc":64,"people":117,"posts":{"ok":150,"p50_ms":14.9,"p99_ms":41.34,"sent":150},"reads":{"avg_bytes":24964,"checked":4017,"errors":0,"invalid":0,"ok":80966,"p50_ms":9.14,"p999_ms":56.8,"p99_ms":40.51,"people_reading":117,"per_s":5394.9,"rooms_read":60,"statuses":{"200":80966}},"secs":15.01}

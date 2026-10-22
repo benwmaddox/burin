@@ -1,0 +1,6 @@
+# The bundled SQLite (libsqlite3-sys), compiled for many threads each with its own connection:
+# no memory management (with it, every connection shares one page cache behind one lock, which
+# the request workers contend on when they render per-request fragments) and no memory statistics
+# (a process-wide lock on every allocation).
+[env]
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_MEMORY_MANAGEMENT -DSQLITE_DEFAULT_MEMSTATUS=0"

@@ -1261,6 +1261,15 @@ pub fn main<G: Glue>(configs: &[&str], session_cookie: &'static [u8]) {
         });
     }
     let verify = args.iter().any(|a| a == "--verify");
+    // SQLite, before any connection opens: no memory statistics (they take a process-wide lock on
+    // every allocation, which every worker rendering per-request fragments contends on), and
+    // multi-thread mode (each connection belongs to one thread: no per-connection locks)
+    let (a, b) = unsafe {
+        (rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 0 as std::os::raw::c_int), rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MULTITHREAD))
+    };
+    if a != 0 || b != 0 {
+        eprintln!("sqlite3_config refused ({a}, {b}): SQLite was already started");
+    }
     let start = std::time::Instant::now();
     let dir = std::path::Path::new(&data);
     let secret = crate::keys::secret(dir);
