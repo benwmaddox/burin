@@ -237,6 +237,8 @@ pub struct Stats {
     pub patched: AtomicU64,
     /// writes that cleared every screen (an edge the writer has no rule for): should stay 0
     pub cleared: AtomicU64,
+    /// screen instances rebuilt because their audience changed
+    pub audiences: AtomicU64,
 }
 
 pub struct App<G: Glue> {
@@ -456,8 +458,8 @@ impl<G: Glue> App<G> {
             let st = &self.stats;
             let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
             let s = format!(
-                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"patched":{},"cleared":{},"version":{}}}"#,
-                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.patched), g(&st.cleared), self.snap.load().version
+                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"patched":{},"cleared":{},"audiences":{},"version":{}}}"#,
+                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.patched), g(&st.cleared), g(&st.audiences), self.snap.load().version
             );
             return respond(out, 200, "application/json", &[], s.as_bytes());
         }
@@ -581,7 +583,7 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
         let mut dirty: HashSet<(usize, i64)> = HashSet::new();
         let mut forwarded: HashMap<i64, i64> = HashMap::new();
         let mut recheck: HashSet<(usize, i64)> = HashSet::new();
-        let (mut shared, mut relist, mut dropped): (HashSet<(usize, i64)>, HashSet<(usize, i64)>, HashSet<(usize, i64)>) = Default::default();
+        let (mut shared, mut relist, mut dropped, mut audiences): (HashSet<(usize, i64)>, HashSet<(usize, i64)>, HashSet<(usize, i64)>, HashSet<(usize, i64)>) = Default::default();
         for &(op, a, key, item) in &deltas.list {
             let a = a as usize;
             match op {
@@ -652,6 +654,10 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 9 => {
                     dropped.insert((a, key));
                 }
+                // what a screen's audience reads changed: its audience again (every key: i64::MIN)
+                12 => {
+                    audiences.insert((a, key));
+                }
                 // anything else: the screens rebuild on demand (counted: a write should never need it)
                 _ => {
                     stats.cleared.fetch_add(1, Ordering::Relaxed);
@@ -704,6 +710,22 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 }
                 None => {
                     next.regs[kind].remove(&key);
+                }
+            }
+        }
+        // audiences that may have changed: read again; a kept instance whose audience changed is
+        // rebuilt (its variants are indexed by place in the audience); a viewer who left can't be
+        // served it, one who joined can
+        for (s, key) in audiences {
+            let keys: Vec<i64> = if key == i64::MIN { next.screens[s].keys().copied().collect() } else { vec![key] };
+            for key in keys {
+                let Some(inst) = next.screens[s].get(&key).cloned() else { continue };
+                match G::screen(&c, s, key) {
+                    Some((aud, _)) if aud == inst.audience => {}
+                    _ => {
+                        stats.audiences.fetch_add(1, Ordering::Relaxed);
+                        build_screen::<G>(&c, &ctx, &mut next, &mut viewers, s, key);
+                    }
                 }
             }
         }

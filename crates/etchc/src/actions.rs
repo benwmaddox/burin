@@ -163,6 +163,53 @@ pub fn screen_lists(m: &Model) -> Result<Vec<ScreenList>, String> {
     Ok(out)
 }
 
+/// A screen's audience (its guard `exists(E where .F == viewer and …)`): the entity it reads,
+/// the column equal to the screen's parameter (its key), and every column its filter reads.
+#[derive(Clone)]
+pub struct Audience {
+    pub screen: usize,
+    pub entity: String,
+    pub key_col: Option<String>,
+    pub cols: Vec<String>,
+}
+
+/// Every screen's audience, by the screen's index.
+pub fn audiences(m: &Model) -> Vec<Audience> {
+    let mut out = vec![];
+    for (si, d) in m.screens.iter().enumerate() {
+        let Decl::Screen { params, requires, .. } = d else { continue };
+        for r in requires {
+            let cond = inline::expr(m, &r.cond, &inline::Env::new(), 0, 0);
+            let Expr::Call(f, a, _) = &cond else { continue };
+            let Some(Expr::Query(q)) = a.first() else { continue };
+            let (Source::Entity(ent), Some(filter)) = (&q.source, &q.filter) else { continue };
+            if f != "exists" || !mentions_viewer(filter) {
+                continue;
+            }
+            let mut eqs = vec![];
+            eq_conjuncts(filter, &mut eqs);
+            let key_col = eqs.iter().find(|(_, x)| matches!(x, Expr::Name(n, _) if params.iter().any(|p| &p.name == n))).map(|(c, _)| c.clone());
+            let mut paths = vec![];
+            row_paths(filter, &mut paths);
+            let mut cols: Vec<String> = paths.into_iter().filter_map(|p| p.first().cloned()).collect();
+            cols.sort();
+            cols.dedup();
+            out.push(Audience { screen: si, entity: ent.clone(), key_col, cols });
+        }
+    }
+    out
+}
+
+fn mentions_viewer(e: &Expr) -> bool {
+    match e {
+        Expr::Name(n, _) => n == "viewer",
+        Expr::Field(o, _, _) | Expr::Not(o, _) => mentions_viewer(o),
+        Expr::Bin(_, l, r, _) => mentions_viewer(l) || mentions_viewer(r),
+        Expr::Call(_, a, _) => a.iter().any(mentions_viewer),
+        _ => false,
+    }
+}
+
 struct Act<'a, 'b> {
     m: &'a Model<'a>,
     md: &'b mut Module,
@@ -180,6 +227,7 @@ struct Act<'a, 'b> {
     /// (register, list, reference field): kept lists searched for a row they reference
     finds: Vec<Patch>,
     edges: Vec<String>,
+    audiences: Vec<Audience>,
 }
 
 impl<'a, 'b> Act<'a, 'b> {
@@ -523,6 +571,25 @@ impl<'a, 'b> Act<'a, 'b> {
                 self.note(format!("set {ent}.{} → {reg_name}: READ (every kept one rebuilt)", cols.join(",")));
             }
         }
+        // the screens' audiences that read this entity: read again at the key (every key when
+        // the key column itself changes: op 12 with no key)
+        for a in self.audiences.clone() {
+            if a.entity != ent || !(rows_change || cols.iter().any(|c| a.cols.contains(c))) {
+                continue;
+            }
+            let moved = !rows_change && a.key_col.as_ref().map(|k| cols.contains(k)).unwrap_or(true);
+            let key = if moved { None } else { a.key_col.as_ref().and_then(|k| vals.get(k).cloned()) };
+            match key {
+                Some(k) => {
+                    self.delta(12, a.screen, &k, "0");
+                    self.note(format!("{verb} {ent} → the audience of screen {}: READ (the audience at its key; the page rebuilt if it changed)", a.screen));
+                }
+                None => {
+                    self.delta(12, a.screen, "-9223372036854775808", "0");
+                    self.note(format!("{verb} {ent} → the audience of screen {}: READ (every kept instance's audience)", a.screen));
+                }
+            }
+        }
         // the screens' lists of this entity
         for (si, s) in screens.iter().enumerate() {
             if s.entity != ent {
@@ -665,7 +732,8 @@ impl<'a, 'b> Act<'a, 'b> {
                     let filter = q.filter.as_ref().map(|f| inline::expr(self.m, f, &inline::Env::new(), 0, 0));
                     // the changed rows' columns the delta edges key by: lists' and screens' keys
                     let mut ret: Vec<String> = vec!["id".into()];
-                    let keys = lists.iter().filter(|l| l.entity == ent).filter_map(|l| l.keyed_by.clone()).chain(screens.iter().filter(|l| l.entity == ent).filter_map(|l| l.keyed_by.clone()));
+                    let audience_keys: Vec<String> = self.audiences.iter().filter(|a| a.entity == ent).filter_map(|a| a.key_col.clone()).collect();
+                    let keys = lists.iter().filter(|l| l.entity == ent).filter_map(|l| l.keyed_by.clone()).chain(screens.iter().filter(|l| l.entity == ent).filter_map(|l| l.keyed_by.clone())).chain(audience_keys);
                     for k in keys {
                         if !ret.contains(&k) {
                             ret.push(k);
@@ -765,6 +833,7 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
     let mut infos = vec![];
     let mut all_patches: Vec<Patch> = vec![];
     let mut all_finds: Vec<Patch> = vec![];
+    let auds = audiences(m);
     for d in &m.actions {
         if let Decl::Action { name, params, body, .. } = d {
             let args: Vec<(String, Shape)> = params.iter().map(|p| (p.name.clone(), if matches!(p.ty.strip_opt(), Type::Text) { Shape::Str } else { Shape::I64 })).collect();
@@ -774,7 +843,7 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
                 Some(Decl::Viewer { entity, .. }) => Some(("viewer".to_string(), entity.clone())),
                 _ => None,
             }).collect();
-            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![] };
+            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![], audiences: auds.clone() };
             a.stmts(body, &Scope::of(params), &regs, &lists, screens)?;
             let mut f = String::new();
             let parts: Vec<&str> = args.iter().map(|(_, s)| if *s == Shape::Str { "%Str" } else { "i64" }).collect();

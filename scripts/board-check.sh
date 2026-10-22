@@ -58,3 +58,14 @@ print("bob's panel:", re.search(r'Signed in as <b>([^<]*)</b>', b).group(1), '|'
 print("ada's panel:", re.search(r'Signed in as <b>([^<]*)</b>', a).group(1))
 print('escaped:', '&lt;script&gt;' in b and '<script>x' not in b)
 EOF
+# audiences kept current: bob joins Ada's board (then served fast), leaves the first (then refused)
+act() { curl -sS -o /dev/null -D - -H "Cookie: sid=$1" --data-urlencode "board=$2" http://127.0.0.1:$PORT/_do/$3 | grep -i x-etch-outcome | tr -d '\r'; }
+fast() { curl -sS http://127.0.0.1:$PORT/_etch/stats | sed 's/.*"fast":\([0-9]*\).*/\1/'; }
+echo "bob joins board 2: $(act bob-token 2 join); joins again: $(act bob-token 2 join)"
+sleep 0.2; f0=$(fast)
+echo "bob reads board 2: $(get bob-token 2 j1) $(get bob-token 2 j2 --compressed) (fast: $(( $(fast) - f0 )) of 2); ada: $(get ada-token 2 j3)"
+grep -q 'Signed in as <b>Bob' $D/j1.html && echo "  bob sees board 2 as himself"
+echo "bob leaves board 1: $(act bob-token 1 leave); leaves again: $(act bob-token 1 leave)"
+sleep 0.2; f0=$(fast)
+echo "bob reads board 1: $(get bob-token 1 l1) (fast: $(( $(fast) - f0 ))); ada: $(get ada-token 1 l2) $(get cy-token 1 l3 2>/dev/null || true)"
+curl -sS http://127.0.0.1:$PORT/_etch/stats; echo

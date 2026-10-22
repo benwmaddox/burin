@@ -70,3 +70,15 @@ action add_post(board: Board, text: Text) {
   require present(text) else invalid
   create Post { board: board, author: viewer, text: text }
 }
+
+// Joins a board (anyone signed in, for now).
+action join(board: Board) {
+  require not member(viewer, board) else invalid
+  create Member { board: board, user: viewer }
+}
+
+// Leaves a board.
+action leave(board: Board) {
+  require member(viewer, board) else not_found
+  for each mb in Member where .board == board and .user == viewer { delete mb }
+}
