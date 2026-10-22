@@ -173,6 +173,8 @@ pub enum Stmt {
     Touch(Expr, Span),
     Set(Expr, String, Expr, Span),
     ForEach(String, Query, Vec<Stmt>, Span),
+    /// `delete x`: the row goes; rows referencing it must have gone first (the checker proves it)
+    Delete(Expr, Span),
 }
 
 #[derive(Clone, Debug)]

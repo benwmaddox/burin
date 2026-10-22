@@ -683,6 +683,11 @@ fn collect_writes(m: &Model, body: &[Stmt], scope: &Scope, out: &mut Vec<(String
                     collect_writes(m, inner, &scope.with(v, Type::Ref(ent)), out);
                 }
             }
+            Stmt::Delete(e, _) => {
+                if let Ok(Type::Ref(t)) = m.type_of(e, scope) {
+                    out.push((t, vec!["*".into()]));
+                }
+            }
             Stmt::Require(_) => {}
         }
     }

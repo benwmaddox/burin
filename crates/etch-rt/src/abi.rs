@@ -179,6 +179,17 @@ pub unsafe extern "C" fn etch_str_eq(a: *const u8, an: i64, b: *const u8, bn: i6
     !a.is_null() && bytes(a, an) == bytes(b, bn)
 }
 
+/// A text's length in characters (as SQLite's length() counts them): an action's `max N` check.
+/// # Safety: a live %Str.
+#[no_mangle]
+pub unsafe extern "C" fn etch_str_chars(s: *const Str) -> i64 {
+    let s = &*s;
+    if s.ptr.is_null() {
+        return 0;
+    }
+    bytes(s.ptr, s.len).iter().filter(|&&b| b & 0xC0 != 0x80).count() as i64
+}
+
 // ---- queries: the generated loaders call SQLite's C API directly, through these few helpers
 
 use rusqlite::ffi;

@@ -170,6 +170,8 @@ struct Act<'a, 'b> {
     n: usize,
     qid: &'b mut usize,
     args: Vec<(String, Shape)>,
+    /// the parameters that are rows (name, entity): a guard reads their fields by their id
+    rows: Vec<(String, String)>,
     outcomes: Vec<String>,
     fails: Vec<(String, usize)>,
     /// the entities this action creates (a new row's lists of these may not be empty)
@@ -240,6 +242,34 @@ impl<'a, 'b> Act<'a, 'b> {
             }
             _ => Err(format!("an action can't compute `{}` yet", show(e))),
         }
+    }
+
+    fn outcome(&mut self, o: &str) -> usize {
+        if !self.outcomes.iter().any(|x| x == o) {
+            self.outcomes.push(o.to_string());
+        }
+        self.outcomes.iter().position(|x| x == o).unwrap()
+    }
+
+    /// Text written to a field with `max N`: at most N characters, else the outcome `invalid`
+    /// (checked here, before SQLite: the same rule as the table's CHECK).
+    fn check_max(&mut self, ent: &str, f: &str, e: &Expr) -> Result<(), String> {
+        let max = self.m.entities.get(ent).and_then(|x| x.fields.iter().find(|x| x.name == f)).and_then(|x| if matches!(x.ty.strip_opt(), Type::Text) { x.max } else { None });
+        let (Some(n), Expr::Name(a, _)) = (max, e) else { return Ok(()) };
+        if !self.args.iter().any(|(x, _)| x == a) {
+            return Ok(());
+        }
+        let (v, _) = self.value(e)?;
+        let (c, ok) = (self.v(), self.v());
+        self.line(&format!("{c} = call i64 @etch_str_chars(ptr {v})"));
+        self.line(&format!("{ok} = icmp sle i64 {c}, {n}"));
+        let code = self.outcome("invalid");
+        let (pass, fail) = (format!("pass{}", self.n), format!("fail{}", self.n));
+        self.n += 1;
+        let _ = writeln!(self.b, "  br i1 {ok}, label %{pass}, label %{fail}
+{pass}:");
+        self.fails.push((fail, code));
+        Ok(())
     }
 
     fn bind(&mut self, st: &str, i: usize, e: &Expr) -> Result<(), String> {
@@ -366,14 +396,21 @@ impl<'a, 'b> Act<'a, 'b> {
     /// The delta edges of a write to `ent`'s `cols` ("*": a new row), for each row it changed.
     /// `vals`: the row's columns known here, by name; `sets`: the values written (for patches).
     #[allow(clippy::too_many_arguments)]
-    fn edges(&mut self, ent: &str, cols: &[String], vals: &HashMap<String, String>, sets: &[(String, Expr)], regs: &[RegInfo], lists: &[ListRead], screens: &[ScreenList], new: Option<(&str, &str, &[(String, Expr)])>) -> Result<(), String> {
+    fn edges(&mut self, ent: &str, cols: &[String], vals: &HashMap<String, String>, sets: &[(String, Expr)], regs: &[RegInfo], lists: &[ListRead], screens: &[ScreenList], new: Option<(&str, &str, &[(String, Expr)])>, removed: bool) -> Result<(), String> {
         let created = new.is_some();
+        // rows enter or leave lists
+        let rows_change = created || removed;
+        let verb = if created { "create" } else if removed { "delete" } else { "set" };
         // registers keyed by a row of this entity
         for (ri, r) in regs.iter().enumerate() {
             if !r.root.as_ref().map(|(_, e)| e == ent).unwrap_or(false) {
                 continue;
             }
-            if let Some((id, seq, fields)) = new {
+            if removed {
+                let id = vals.get("id").cloned().ok_or("the deleted row's id")?;
+                self.delta(9, ri, &id, "0");
+                self.note(format!("delete {ent} → {}: dropped (no read)", r.name));
+            } else if let Some((id, seq, fields)) = new {
                 match self.forward(r, fields, id, seq)? {
                     Some(rec) => {
                         let x = self.v();
@@ -400,8 +437,9 @@ impl<'a, 'b> Act<'a, 'b> {
             let reg_name = regs[l.reg].name.clone();
             let reads_item = |c: &String| l.item_paths.iter().any(|p| p.len() == 1 && &p[0] == c);
             let reads_query = |c: &String| l.query_paths.iter().any(|p| p.len() == 1 && &p[0] == c);
-            let direct = l.entity == ent && (created || cols.iter().any(|c| reads_item(c) || reads_query(c)));
-            let via: Option<String> = if created || l.entity == ent {
+            let direct = l.entity == ent && (rows_change || cols.iter().any(|c| reads_item(c) || reads_query(c)));
+            // (a deleted row has no references left to it: the checker proved it)
+            let via: Option<String> = if rows_change || l.entity == ent {
                 None
             } else {
                 l.item_paths.iter().chain(l.query_paths.iter()).find(|p| {
@@ -413,13 +451,13 @@ impl<'a, 'b> Act<'a, 'b> {
             }
             if l.nested {
                 self.delta(4, l.reg, "0", "0");
-                self.note(format!("{} {ent} → {reg_name} (a nested list): READ (every kept one rebuilt)", if created { "create" } else { "set" }));
+                self.note(format!("{verb} {ent} → {reg_name} (a nested list): READ (every kept one rebuilt)"));
                 continue;
             }
             if direct {
                 let key = l.keyed_by.as_ref().and_then(|f| vals.get(f).cloned());
                 // a patch: only item fields change, nothing the list's filter or order reads
-                let patchable = !created
+                let patchable = !rows_change
                     && key.is_some()
                     && cols.iter().all(|c| !reads_query(c))
                     && cols.iter().filter(|c| reads_item(c)).all(|c| l.items.fields.iter().any(|(p, s)| p.split('.').skip(1).collect::<Vec<_>>() == [c.as_str()] && *s == Shape::I64));
@@ -442,11 +480,11 @@ impl<'a, 'b> Act<'a, 'b> {
                     }
                     (Some(k), false) => {
                         self.delta(3, l.reg, &k, "0");
-                        self.note(format!("{} {ent} → {reg_name}: READ (its list changes order or rows)", if created { "create" } else { "set" }));
+                        self.note(format!("{verb} {ent} → {reg_name}: READ (its list changes order or rows)"));
                     }
                     (None, _) => {
                         self.delta(4, l.reg, "0", "0");
-                        self.note(format!("{} {ent} → {reg_name}: READ (every kept one rebuilt)", if created { "create" } else { "set" }));
+                        self.note(format!("{verb} {ent} → {reg_name}: READ (every kept one rebuilt)"));
                     }
                 }
             } else if let Some((slot, pi)) = via.as_ref().and_then(|p0| {
@@ -490,6 +528,15 @@ impl<'a, 'b> Act<'a, 'b> {
             if s.entity != ent {
                 continue;
             }
+            if removed {
+                // a row left the list: the next row in its order may come in (a read)
+                if let Some(k) = s.keyed_by.as_ref().and_then(|f| vals.get(f).cloned()) {
+                    let id = vals.get("id").cloned().ok_or("the deleted row's id")?;
+                    self.delta(5, si, &k, &id);
+                    self.note(format!("delete {ent} → screen list {}: READ (the list again)", s.name));
+                }
+                continue;
+            }
             if let (Some((id, _, _)), Some(f)) = (new, &s.keyed_by) {
                 if let Some(k) = vals.get(f).cloned() {
                     let (op, how) = if s.monotone {
@@ -512,16 +559,11 @@ impl<'a, 'b> Act<'a, 'b> {
             match s {
                 Stmt::Require(r) => {
                     let code = match &r.otherwise {
-                        Else::Outcome(o) => {
-                            if !self.outcomes.contains(o) {
-                                self.outcomes.push(o.clone());
-                            }
-                            self.outcomes.iter().position(|x| x == o).unwrap()
-                        }
+                        Else::Outcome(o) => self.outcome(o),
                         _ => return Err("an action's require ends in an outcome (`else not_found`)".into()),
                     };
                     let cond = inline::expr(self.m, &r.cond, &inline::Env::new(), 0, 0);
-                    let sel = sql::cond_select(self.m, &cond)?;
+                    let sel = sql::cond_select_with(self.m, &cond, &self.rows)?;
                     let st = self.stmt(&sel)?;
                     let (x, ok) = (self.v(), self.v());
                     self.line(&format!("call i32 @sqlite3_step(ptr {st})"));
@@ -534,6 +576,9 @@ impl<'a, 'b> Act<'a, 'b> {
                     self.fails.push((fail, code));
                 }
                 Stmt::Create(ent, fields, _) => {
+                    for (f, v) in fields {
+                        self.check_max(ent, f, v)?;
+                    }
                     let gid = self.md.str_const_pub(ent.as_bytes());
                     let (id, seq) = (self.v(), self.v());
                     self.line(&format!("{id} = call i64 @etch_w_id(ptr %w, ptr %db, ptr {gid}, i64 {})", ent.len()));
@@ -567,7 +612,7 @@ impl<'a, 'b> Act<'a, 'b> {
                         }
                     }
                     self.line(&format!("call void @etch_exec(ptr {st})"));
-                    self.edges(ent, &["*".into()], &vals, &[], regs, lists, screens, Some((&id, &seq, &fixed)))?;
+                    self.edges(ent, &["*".into()], &vals, &[], regs, lists, screens, Some((&id, &seq, &fixed)), false)?;
                 }
                 Stmt::Touch(e, _) => {
                     let ent = match self.m.type_of(e, scope).map_err(|x| x.msg)? {
@@ -581,7 +626,22 @@ impl<'a, 'b> Act<'a, 'b> {
                     self.line(&format!("call void @etch_exec(ptr {st})"));
                     let mut vals = HashMap::new();
                     vals.insert("id".to_string(), id);
-                    self.edges(&ent, &["updated".into()], &vals, &[("updated".into(), Expr::Name("now".into(), Span::default()))], regs, lists, screens, None)?;
+                    self.edges(&ent, &["updated".into()], &vals, &[("updated".into(), Expr::Name("now".into(), Span::default()))], regs, lists, screens, None, false)?;
+                }
+                // `set x.f = v` and `delete x` on one row: a for each over its id
+                Stmt::Set(o, _, _, span) | Stmt::Delete(o, span) => {
+                    let ent = match self.m.type_of(o, scope).map_err(|x| x.msg)? {
+                        Type::Ref(t) => t,
+                        _ => return Err("set and delete take a row".into()),
+                    };
+                    let row = "__row".to_string();
+                    let filter = Expr::Bin(BinOp::Eq, Box::new(Expr::Dot("id".into(), *span)), Box::new(o.clone()), *span);
+                    let q = Query { source: Source::Entity(ent), filter: Some(filter), order: vec![], limit: None, window_last: None, span: *span };
+                    let inner = match s {
+                        Stmt::Set(_, f, v, sp) => Stmt::Set(Expr::Name(row.clone(), *sp), f.clone(), v.clone(), *sp),
+                        _ => Stmt::Delete(Expr::Name(row.clone(), *span), *span),
+                    };
+                    self.stmts(&[Stmt::ForEach(row, q, vec![inner], *span)], scope, regs, lists, screens)?;
                 }
                 Stmt::ForEach(var, q, inner, _) => {
                     let ent = match &q.source {
@@ -589,24 +649,33 @@ impl<'a, 'b> Act<'a, 'b> {
                         _ => return Err("for each over a view isn't lowered yet".into()),
                     };
                     let mut sets = vec![];
+                    let mut delete = false;
                     for s in inner {
                         match s {
                             Stmt::Set(Expr::Name(o, _), f, v, _) if o == var => {
                                 sets.push((f.clone(), v.clone()));
                             }
-                            _ => return Err("only `set x.f = v` is lowered inside for each".into()),
+                            Stmt::Delete(Expr::Name(o, _), _) if o == var && inner.len() == 1 => delete = true,
+                            _ => return Err("inside for each: `set x.f = v`s, or one `delete x`".into()),
                         }
+                    }
+                    for (f, v) in &sets {
+                        self.check_max(&ent, f, v)?;
                     }
                     let filter = q.filter.as_ref().map(|f| inline::expr(self.m, f, &inline::Env::new(), 0, 0));
+                    // the changed rows' columns the delta edges key by: lists' and screens' keys
                     let mut ret: Vec<String> = vec!["id".into()];
-                    for l in lists.iter().filter(|l| l.entity == ent) {
-                        if let Some(k) = &l.keyed_by {
-                            if !ret.contains(k) {
-                                ret.push(k.clone());
-                            }
+                    let keys = lists.iter().filter(|l| l.entity == ent).filter_map(|l| l.keyed_by.clone()).chain(screens.iter().filter(|l| l.entity == ent).filter_map(|l| l.keyed_by.clone()));
+                    for k in keys {
+                        if !ret.contains(&k) {
+                            ret.push(k);
                         }
                     }
-                    let sel = sql::update(self.m, &ent, filter.as_ref(), &sets, &ret)?;
+                    let sel = if delete {
+                        sql::delete(self.m, &ent, filter.as_ref().ok_or("delete needs a filter")?, &ret)?
+                    } else {
+                        sql::update(self.m, &ent, filter.as_ref(), &sets, &ret)?
+                    };
                     let st = self.stmt(&sel)?;
                     let (h, body, done) = (format!("uh{}", self.n), format!("ub{}", self.n), format!("ud{}", self.n));
                     self.n += 1;
@@ -618,12 +687,15 @@ impl<'a, 'b> Act<'a, 'b> {
                         self.line(&format!("{x} = call i64 @etch_col_i64(ptr {st}, i32 {i})"));
                         vals.insert(c.clone(), x);
                     }
-                    let cols: Vec<String> = sets.iter().map(|(c, _)| c.clone()).filter(|c| !c.ends_with("__seq")).collect();
-                    let real_sets: Vec<(String, Expr)> = sets.iter().filter(|(c, _)| !c.ends_with("__seq")).cloned().collect();
-                    self.edges(&ent, &cols, &vals, &real_sets, regs, lists, screens, None)?;
+                    if delete {
+                        self.edges(&ent, &["*".into()], &vals, &[], regs, lists, screens, None, true)?;
+                    } else {
+                        let cols: Vec<String> = sets.iter().map(|(c, _)| c.clone()).filter(|c| !c.ends_with("__seq")).collect();
+                        let real_sets: Vec<(String, Expr)> = sets.iter().filter(|(c, _)| !c.ends_with("__seq")).cloned().collect();
+                        self.edges(&ent, &cols, &vals, &real_sets, regs, lists, screens, None, false)?;
+                    }
                     let _ = writeln!(self.b, "  br label %{h}\n{done}:\n  call void @etch_done(ptr {st}, i32 {rc})");
                 }
-                Stmt::Set(..) => return Err("set is lowered inside for each only (for now)".into()),
             }
         }
         Ok(())
@@ -698,7 +770,11 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
             let args: Vec<(String, Shape)> = params.iter().map(|p| (p.name.clone(), if matches!(p.ty.strip_opt(), Type::Text) { Shape::Str } else { Shape::I64 })).collect();
             let mut creates = vec![];
             creates_of(body, &mut creates);
-            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![] };
+            let rows: Vec<(String, String)> = params.iter().filter_map(|p| if let Type::Ref(e) = p.ty.strip_opt() { Some((p.name.clone(), e.clone())) } else { None }).chain(match m.viewer {
+                Some(Decl::Viewer { entity, .. }) => Some(("viewer".to_string(), entity.clone())),
+                _ => None,
+            }).collect();
+            let mut a = Act { m, md: &mut *md, b: String::new(), n: 0, qid: &mut *qid, args: args.clone(), rows, outcomes: vec!["ok".into()], fails: vec![], creates, patches: vec![], finds: vec![], edges: vec![] };
             a.stmts(body, &Scope::of(params), &regs, &lists, screens)?;
             let mut f = String::new();
             let parts: Vec<&str> = args.iter().map(|(_, s)| if *s == Shape::Str { "%Str" } else { "i64" }).collect();

@@ -441,6 +441,9 @@ impl Parser {
         if self.eat_kw("touch") {
             return Ok(Stmt::Touch(self.expr()?, span));
         }
+        if self.eat_kw("delete") {
+            return Ok(Stmt::Delete(self.expr()?, span));
+        }
         if self.eat_kw("set") {
             let target = self.postfix()?;
             let (obj, field) = match target {
@@ -461,7 +464,7 @@ impl Parser {
             let body = self.block()?;
             return Ok(Stmt::ForEach(v, q, body, span));
         }
-        self.err(format!("expected a statement (require, create, set, touch, for each), found {}", show(self.peek())))
+        self.err(format!("expected a statement (require, create, set, touch, delete, for each), found {}", show(self.peek())))
     }
 
     // ---- expressions, loosest first

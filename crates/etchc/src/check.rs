@@ -656,14 +656,31 @@ pub fn check(m: &Model) -> R<()> {
                 }
                 m.check_nodes(&body.nodes, Html::Text, &scope, true)?;
             }
-            Decl::Action { params, body, .. } => check_stmts(m, body, &Scope::of(params))?,
+            Decl::Action { params, body, .. } => check_stmts(m, body, &Scope::of(params), &mut vec![])?,
             _ => {}
         }
     }
     Ok(())
 }
 
-fn check_stmts(m: &Model, body: &[Stmt], scope: &Scope) -> R<()> {
+/// `.f == x` among a filter's conjuncts: the field f compared with the name x.
+fn eq_fields(e: &Expr, out: &mut Vec<(String, String)>) {
+    match e {
+        Expr::Bin(BinOp::And, l, r, _) => {
+            eq_fields(l, out);
+            eq_fields(r, out);
+        }
+        Expr::Bin(BinOp::Eq, l, r, _) => match (&**l, &**r) {
+            (Expr::Dot(f, _), Expr::Name(x, _)) | (Expr::Name(x, _), Expr::Dot(f, _)) => out.push((f.clone(), x.clone())),
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+/// `cleared`: (entity, reference field, name) for each earlier `for each y in F where .f == x
+/// { delete y }` (or `{ set y.f = none }`): no F row refers to x through f any more.
+fn check_stmts(m: &Model, body: &[Stmt], scope: &Scope, cleared: &mut Vec<(String, String, String)>) -> R<()> {
     for s in body {
         match s {
             Stmt::Require(r) => {
@@ -702,7 +719,51 @@ fn check_stmts(m: &Model, body: &[Stmt], scope: &Scope) -> R<()> {
             Stmt::ForEach(v, q, inner, _) => {
                 let ent = m.query_entity(q, scope)?;
                 m.check_query(q, scope)?;
-                check_stmts(m, inner, &scope.with(v, Type::Ref(ent)))?;
+                check_stmts(m, inner, &scope.with(v, Type::Ref(ent.clone())), cleared)?;
+                let mut eqs = vec![];
+                if let Some(f) = &q.filter {
+                    eq_fields(f, &mut eqs);
+                }
+                for (f, x) in eqs {
+                    let clears = inner.iter().any(|s| match s {
+                        Stmt::Delete(Expr::Name(y, _), _) => y == v,
+                        Stmt::Set(Expr::Name(y, _), g, Expr::None(_), _) => y == v && *g == f,
+                        _ => false,
+                    });
+                    if clears {
+                        cleared.push((ent.clone(), f, x));
+                    }
+                }
+            }
+            Stmt::Delete(e, span) => {
+                let ent = match m.type_of(e, scope)? {
+                    Type::Ref(t) => t,
+                    t => return err(*span, format!("delete takes a row, not {}", t.show())),
+                };
+                let x = match e {
+                    Expr::Name(x, _) => x.clone(),
+                    _ => return err(*span, "delete takes a parameter or a loop's row by its name"),
+                };
+                // no row may be left referring to it
+                let mut ents: Vec<&&Entity> = m.entities.values().collect();
+                ents.sort_by(|a, b| a.name.cmp(&b.name));
+                for other in ents {
+                    for f in &other.fields {
+                        if matches!(f.ty.strip_opt(), Type::Ref(t) if *t == ent) && !cleared.iter().any(|(e2, f2, x2)| *e2 == other.name && *f2 == f.name && *x2 == x) {
+                            return err(
+                                *span,
+                                format!(
+                                    "deleting {x} would leave {}.{} referring to it: first `for each y in {} where .{} == {x} {{ delete y }}`{}",
+                                    other.name,
+                                    f.name,
+                                    other.name,
+                                    f.name,
+                                    if matches!(f.ty, Type::Opt(_)) { format!(" (or `set y.{} = none`)", f.name) } else { String::new() }
+                                ),
+                            );
+                        }
+                    }
+                }
             }
         }
     }

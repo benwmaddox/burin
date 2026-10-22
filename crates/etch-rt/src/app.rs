@@ -234,6 +234,8 @@ pub struct Stats {
     /// registers built from forwarded records, or patched kept records: no read
     pub forwarded: AtomicU64,
     pub patched: AtomicU64,
+    /// writes that cleared every screen (an edge the writer has no rule for): should stay 0
+    pub cleared: AtomicU64,
 }
 
 pub struct App<G: Glue> {
@@ -453,8 +455,8 @@ impl<G: Glue> App<G> {
             let st = &self.stats;
             let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
             let s = format!(
-                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"patched":{},"version":{}}}"#,
-                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.patched), self.snap.load().version
+                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"patched":{},"cleared":{},"version":{}}}"#,
+                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.patched), g(&st.cleared), self.snap.load().version
             );
             return respond(out, 200, "application/json", &[], s.as_bytes());
         }
@@ -473,7 +475,7 @@ impl<G: Glue> App<G> {
                     return respond(out, 503, "text/plain", &[], b"busy");
                 }
                 return match rx.recv() {
-                    Ok(Ok(to)) => redirect(out, &to, Some("ok")),
+                    Ok(Ok(to)) => redirect(out, &self.back(req).unwrap_or(to), Some("ok")),
                     Ok(Err(e)) => redirect(out, "/", Some(e)),
                     Err(_) => respond(out, 500, "text/plain", &[], b"writer stopped"),
                 };
@@ -508,6 +510,15 @@ impl<G: Glue> App<G> {
             }
         }
         respond(out, 404, "text/plain", &[], b"not found")
+    }
+
+    /// The page an action came from, to go back to: the Referer's path, only when it names this
+    /// host (never another site's address).
+    fn back(&self, req: &Req) -> Option<String> {
+        let r = std::str::from_utf8(req.referer).ok()?;
+        let rest = r.strip_prefix("http://").or_else(|| r.strip_prefix("https://"))?;
+        let (host, path) = rest.split_at(rest.find('/')?);
+        (host == self.host && !path.starts_with("//") && !path.contains('\\')).then(|| path.to_string())
     }
 
     fn viewer_of(&self, req: &Req) -> Option<i64> {
@@ -569,6 +580,7 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
         let mut dirty: HashSet<(usize, i64)> = HashSet::new();
         let mut forwarded: HashMap<i64, i64> = HashMap::new();
         let mut recheck: HashSet<(usize, i64)> = HashSet::new();
+        let (mut shared, mut relist, mut dropped): (HashSet<(usize, i64)>, HashSet<(usize, i64)>, HashSet<(usize, i64)>) = Default::default();
         for &(op, a, key, item) in &deltas.list {
             let a = a as usize;
             match op {
@@ -627,11 +639,70 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                 4 if G::per_viewer(a) => {
                     reload.extend(kept.keys().filter(|(k, _)| *k == a).copied());
                 }
-                // anything else: the screens rebuild on demand
+                // a shared register at a key: rebuilt for the audience of the screen showing it
+                3 => {
+                    shared.insert((a, key));
+                }
+                // a row left a screen list: the list again
+                5 => {
+                    relist.insert((a, key));
+                }
+                // a deleted row's register
+                9 => {
+                    dropped.insert((a, key));
+                }
+                // anything else: the screens rebuild on demand (counted: a write should never need it)
                 _ => {
+                    stats.cleared.fetch_add(1, Ordering::Relaxed);
                     for s in &mut next.screens {
                         s.clear();
                     }
+                }
+            }
+        }
+        for (list, key) in relist {
+            let s = G::list_screen(list);
+            let Some(inst) = next.screens[s].get(&key).cloned() else { continue };
+            let kind = G::list_item(list);
+            let Some((_, items)) = G::screen_lists(&c, s, key).into_iter().find(|(l, _)| *l == list) else { continue };
+            for u in &inst.audience {
+                viewers.entry(*u).or_insert_with(|| load_viewer::<G>(&c, &ctx, *u));
+            }
+            let vs: Vec<*const u8> = inst.audience.iter().map(|u| viewers[u].ptr()).collect();
+            for id in &items {
+                if !next.regs[kind].contains_key(id) {
+                    if let Some(rec) = load::<G>(&c, &ctx, kind, *id) {
+                        next.regs[kind].insert(*id, Arc::new(build::<G>(&ctx, kind, rec.ptr(), &vs)));
+                        stats.write_reads.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            next.lists[list].insert(key, Arc::new(items));
+            recheck.insert((s, key));
+        }
+        for (kind, key) in dropped {
+            next.regs[kind].remove(&key);
+            shared.remove(&(kind, key));
+        }
+        for (kind, key) in shared {
+            if !next.regs[kind].contains_key(&key) {
+                continue; // not kept: built when a screen needs it
+            }
+            let Some(audience) = audience_of::<G>(&next, kind, key) else {
+                next.regs[kind].remove(&key);
+                continue;
+            };
+            for u in &audience {
+                viewers.entry(*u).or_insert_with(|| load_viewer::<G>(&c, &ctx, *u));
+            }
+            let vs: Vec<*const u8> = audience.iter().map(|u| viewers[u].ptr()).collect();
+            stats.write_reads.fetch_add(1, Ordering::Relaxed);
+            match load::<G>(&c, &ctx, kind, key) {
+                Some(rec) => {
+                    next.regs[kind].insert(key, Arc::new(build::<G>(&ctx, kind, rec.ptr(), &vs)));
+                }
+                None => {
+                    next.regs[kind].remove(&key);
                 }
             }
         }
@@ -696,6 +767,29 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
         }
         let _ = &mut c;
     }
+}
+
+/// The audience a kept shared register is built for: the screen instance whose list holds it, or
+/// whose registers include it.
+fn audience_of<G: Glue>(snap: &Snap, kind: usize, key: i64) -> Option<Vec<i64>> {
+    for l in 0..G::LISTS {
+        if G::list_item(l) != kind {
+            continue;
+        }
+        for (sk, items) in &snap.lists[l] {
+            if items.contains(&key) {
+                return snap.screens[G::list_screen(l)].get(sk).map(|i| i.audience.clone());
+            }
+        }
+    }
+    for s in 0..G::SCREENS {
+        for (sk, inst) in &snap.screens[s] {
+            if G::screen_regs(s, *sk).contains(&(kind, key)) {
+                return Some(inst.audience.clone());
+            }
+        }
+    }
+    None
 }
 
 // ---- responses
@@ -774,9 +868,14 @@ fn unescape(s: &[u8]) -> String {
     String::from_utf8_lossy(&o).into_owned()
 }
 
-/// A form field's value: an action's argument by its name.
+/// A form field's value: an action's argument by its name, or as `__arg_<name>` (the pages'
+/// hidden fields), a row's id there with its `#` or `@` mark dropped.
 pub fn field<'a>(form: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    form.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+    if let Some((_, v)) = form.iter().find(|(k, _)| k == name) {
+        return Some(v.as_str());
+    }
+    let v = form.iter().find(|(k, _)| k.strip_prefix("__arg_") == Some(name)).map(|(_, v)| v.as_str())?;
+    Some(v.strip_prefix('#').or_else(|| v.strip_prefix('@')).unwrap_or(v))
 }
 
 // ---- a generated app's main

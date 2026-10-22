@@ -1,4 +1,4 @@
-// Campfire's rules for the room page and posting. Every entity has id, seq, created and updated.
+// Campfire's rules for the room page, posting, editing, deleting and boosting. Every entity has id, seq, created and updated.
 
 fn member(u: User, r: Room): Bool = exists(Membership where .room == r and .user == u)
 fn can_administer(u: User, creator: User): Bool = u.role == "administrator" or u == creator
@@ -44,4 +44,34 @@ action post_message(room: Room, body: Text) {
                               and (.connected_at == none or .connected_at < now - 60s) {
     set ms.unread_since = now
   }
+}
+
+// Changes a message's text: its author and administrators only.
+action edit_message(message: Message, body: Text) {
+  require member(viewer, message.room) else not_found
+  require can_administer(viewer, message.creator) else forbidden
+  require present(body) else invalid
+  set message.body = body
+}
+
+// Deletes a message and its boosts: its author and administrators only.
+action delete_message(message: Message) {
+  require member(viewer, message.room) else not_found
+  require can_administer(viewer, message.creator) else forbidden
+  for each b in Boost where .message == message { delete b }
+  delete message
+}
+
+// Adds a boost (a short reaction, often an emoji) to a message.
+action boost(message: Message, content: Text) {
+  require member(viewer, message.room) else not_found
+  require present(content) else invalid
+  create Boost { message: message, booster: viewer, content: content }
+}
+
+// Removes one of the viewer's boosts.
+action unboost(boost: Boost) {
+  require member(viewer, boost.message.room) else not_found
+  require boost.booster == viewer else not_found
+  delete boost
 }

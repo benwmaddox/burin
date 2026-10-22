@@ -358,6 +358,14 @@ pub fn update(m: &Model, ent: &str, filter: Option<&Expr>, sets: &[(String, Expr
     Ok(Select { sql: format!("UPDATE {} AS u0 SET {}{w}{ret}", q(ent), set_sql.join(", ")), binds: tx.binds })
 }
 
+/// `DELETE FROM E AS u0 WHERE … RETURNING …`: the deleted rows' columns the delta edges need.
+pub fn delete(m: &Model, ent: &str, filter: &Expr, returning: &[String]) -> Result<Select, String> {
+    let mut tx = Tx { m, joins: Joins { list: vec![], sql: String::new(), next: 0 }, binds: vec![], params: vec![], rows: vec![("u0".into(), ent.to_string())], sub: 0 };
+    let w = tx.expr(filter)?;
+    let ret = returning.iter().map(|c| if c == "id" { "id".to_string() } else { q(c) }).collect::<Vec<_>>().join(", ");
+    Ok(Select { sql: format!("DELETE FROM {} AS u0 WHERE {w} RETURNING {ret}", q(ent)), binds: tx.binds })
+}
+
 /// The keys of a list's rows that reach a written row through a reference: `SELECT F FROM L WHERE P = ?`.
 pub fn reach(ent: &str, key_col: &str, via: &str) -> String {
     format!("SELECT {} FROM {} WHERE {} = ?", q(key_col), q(ent), q(via))

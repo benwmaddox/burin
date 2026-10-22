@@ -66,3 +66,14 @@ fn a_template_ending_in_gt_keeps_it() {
         _ => panic!(),
     }
 }
+
+#[test]
+fn a_delete_leaving_references_is_refused() {
+    let e = verdict("action drop(u: User) {\n  delete u\n}").unwrap_err();
+    assert!(e.contains("would leave Post.author referring to it"), "{e}");
+}
+
+#[test]
+fn a_delete_after_its_references_go_passes() {
+    verdict("action drop(u: User) {\n  for each p in Post where .author == u { delete p }\n  for each s in Session where .user == u { delete s }\n  delete u\n}").unwrap();
+}
