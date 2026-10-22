@@ -202,7 +202,9 @@ pub enum Decl {
     View { name: String, params: Vec<Param>, query: Query, span: Span },
     Const { name: String, value: Expr, span: Span },
     /// `per viewer`: keyed by the viewer (its memory per viewer is reported)
-    Fragment { name: String, params: Vec<Param>, per_viewer: bool, body: Template, span: Span },
+    /// `varies by viewer, viewer.role`: what about the viewer a shared fragment's variants may
+    /// depend on (its cache key beyond its row); checked against what its conditions read
+    Fragment { name: String, params: Vec<Param>, per_viewer: bool, varies: Vec<String>, body: Template, span: Span },
     /// `cold`: rendered per request, outside the fast path; `public`: for anyone (no viewer, no
     /// parameters: rendered per request)
     /// `type "…"`: the response's content type (HTML when absent); `max_age N`: how long a browser

@@ -30,7 +30,7 @@ screen room(room: Room) at "/rooms/{room}"
 
 fragment icon(name: Text) <<<<img src="{{asset(name)}}" width="20" height="20" aria-hidden="true" class="colorize--black">>>>
 
-fragment room_head(room: Room) <<<\
+fragment room_head(room: Room) varies by viewer <<<\
 <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
 <title>{{display_name(room)}}</title>{{for css in stylesheets}}<link rel="stylesheet" href="{{asset(css)}}">{{end}}\
 <link rel="alternate" type="text/markdown" href="/llms.txt" title="For AI agents"></head>
@@ -43,7 +43,7 @@ fragment room_head(room: Room) <<<\
 
 <main id="main-content"><section class="message-area" id="message-area"><div class="messages" data-live-list>>>>
 
-fragment message(m: Message) <<<\
+fragment message(m: Message) varies by viewer, viewer.role <<<\
 <div id="message_{{m.client_id}}" class="message message--formatted{{if m.creator == viewer}} message--me{{end}}" data-mentioned="false" \
 data-message-id="{{m.id}}" data-user-id="{{m.creator.id}}"><div class="message__day-separator">\
 <time class="message__timestamp" datetime="{{iso(m.created)}}">{{date(m.created)}}</time></div>\

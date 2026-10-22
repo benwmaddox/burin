@@ -96,7 +96,7 @@ fn viewer_text_in_a_shared_fragment_is_refused() {
 
 #[test]
 fn viewer_conditions_in_a_shared_fragment_pass() {
-    lowered(r#"fragment p(x: Post) <<<{{if x.author == viewer}}<b>mine</b>{{end}}{{x.body}}>>>"#, "p").unwrap();
+    lowered(r#"fragment p(x: Post) varies by viewer <<<{{if x.author == viewer}}<b>mine</b>{{end}}{{x.body}}>>>"#, "p").unwrap();
 }
 
 #[test]
@@ -115,4 +115,18 @@ fn a_password_in_a_page_is_refused() {
 #[test]
 fn signing_in_and_out_pass() {
     verdict("entity Login { user: User  password: Password? }\naction sign_in(u: User, p: Text) public {\n  let l = first(Login where .user == u)\n  require l != none and authenticates(l.password, p) else unauthenticated\n  sign in u\n}\naction sign_out() {\n  sign out\n}").unwrap();
+}
+
+#[test]
+fn a_variant_its_key_doesnt_declare_is_refused() {
+    let e = lowered(r#"fragment p(x: Post) <<<{{if x.author == viewer}}<b>mine</b>{{end}}{{x.body}}>>>"#, "p").unwrap_err();
+    assert!(e.contains("which its key doesn't declare: add `varies by viewer`"), "{e}");
+    let e = lowered(r#"fragment p(x: Post) varies by viewer <<<{{if x.author.name == "Ada" or viewer.name == "Bo"}}<b>!</b>{{end}}>>>"#, "p").unwrap_err();
+    assert!(e.contains("`viewer.name`"), "{e}");
+}
+
+#[test]
+fn a_key_declaring_more_than_it_uses_is_refused() {
+    let e = lowered(r#"fragment p(x: Post) varies by viewer, viewer.name <<<{{if x.author == viewer}}<b>mine</b>{{end}}>>>"#, "p").unwrap_err();
+    assert!(e.contains("declares `varies by viewer.name`, but nothing it shows depends on"), "{e}");
 }

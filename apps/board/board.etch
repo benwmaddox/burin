@@ -45,7 +45,7 @@ fragment top(board: Board) <<<\
 <!doctype html><html><head><meta charset="utf-8"><title>{{board.title}}</title></head>
 <body><h1>{{board.title}}</h1><ol class="posts">>>>
 
-fragment post(p: Post) <<<\
+fragment post(p: Post) varies by viewer <<<\
 <li class="post{{if p.author == viewer}} mine{{end}}" id="post-{{p.id}}"><b>{{p.author.name}}</b> \
 <span>{{p.text}}</span> <time datetime="{{iso(p.created)}}">{{clock(p.created)}}</time></li>
 >>>

@@ -226,6 +226,8 @@ pub struct Module {
     pub registers: Vec<RegInfo>,
     /// what the viewer's record reads (its variant bits' inputs)
     pub viewer_reads: Vec<(String, String)>,
+    /// each register's viewer dependence, as read (the report)
+    pub keys: Vec<(String, Vec<String>)>,
 }
 
 impl Module {
@@ -265,6 +267,8 @@ struct Gen<'a, 'b> {
     splice_params: Vec<String>,
     /// the splices' expressions, in order
     splices: Vec<Expr>,
+    /// what about the viewer the variant key read (`viewer`: its identity; `viewer.role`)
+    viewer_uses: Vec<String>,
     /// the variant key's per-item viewer conditions over the record's own lists, recorded once
     /// at its start (however often and wherever the template checks them): their keys
     hoisted: Vec<String>,
@@ -336,6 +340,9 @@ impl<'a, 'b> Gen<'a, 'b> {
         let shape = shape_of(&ty);
         let key = std::iter::once(root.clone()).chain(path.iter().cloned()).collect::<Vec<_>>().join(".");
         if root == "viewer" {
+            if self.bits && !self.viewer_uses.contains(&key) {
+                self.viewer_uses.push(key.clone());
+            }
             let i = self.md.viewer.field(&key, shape);
             return Ok((self.gep_load("%viewer", "%Viewer", i, shape), shape));
         }
@@ -983,7 +990,7 @@ fn types(frag: &str, s: &Schema, at: &mut Vec<usize>, out: &mut String) {
 
 /// One register's functions: its variant key and its builder (its loader comes after, from the
 /// settled record). Its splices are registers too.
-fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[TNode], per_viewer: bool) -> Result<(), String> {
+fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[TNode], per_viewer: bool, varies: &[String]) -> Result<(), String> {
     let roots: HashMap<String, Root> = if per_viewer {
         HashMap::new()
     } else {
@@ -992,6 +999,7 @@ fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[T
     let mut schema = Schema::default();
     let mut out = (String::new(), String::new(), 0usize, 0usize);
     let mut splices = vec![];
+    let mut uses: Vec<String> = vec![];
     for pass in 0..2 {
         for bits in [true, false] {
             let mut g = Gen {
@@ -1013,6 +1021,7 @@ fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[T
                 splices: vec![],
                 hoisted: vec![],
                 prologue: String::new(),
+                viewer_uses: vec![],
             };
             if bits {
                 // the key starts with a 1: bit strings of different lengths stay different keys
@@ -1020,6 +1029,9 @@ fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[T
             }
             g.nodes(&roots, nodes, "%out")?;
             g.flush("%out");
+            if bits && pass == 1 {
+                uses = g.viewer_uses.clone();
+            }
             let (b, sch, tmps, maxb, sp) = (if bits { g.prologue + &g.body } else { g.body }, g.schema, g.tmps, g.max_bits, g.splices);
             if pass == 0 {
                 schema = sch;
@@ -1035,6 +1047,24 @@ fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[T
             }
         }
     }
+    // its declared cache key: what about the viewer its variants depend on, exactly
+    if !per_viewer && !name.contains("__s") {
+        uses.sort();
+        let mut want = varies.to_vec();
+        want.sort();
+        want.dedup();
+        if let Some(u) = uses.iter().find(|u| !want.contains(u)) {
+            return Err(format!(
+                "fragment {name}: its variants depend on {} (through its conditions), which its key doesn't declare: add `varies by {}`, or mark it `per viewer`",
+                if u == "viewer" { "who the viewer is".to_string() } else { format!("`{u}`") },
+                uses.join(", ")
+            ));
+        }
+        if let Some(w) = want.iter().find(|w| !uses.contains(w)) {
+            return Err(format!("fragment {name}: declares `varies by {w}`, but nothing it shows depends on {w} (drop it)"));
+        }
+    }
+    md.keys.push((name.to_string(), uses.clone()));
     if out.3 > 63 {
         return Err(format!("fragment {name}: its variant key needs up to {} bits; at most 63 (bound its lists, or mark it `per viewer`)", out.3));
     }
@@ -1060,7 +1090,7 @@ fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[T
         // the splice's own register: the hole alone, keyed by the parameter it reads
         let sname = format!("{name}__s{i}");
         let used: Vec<Param> = params.iter().filter(|p| Gen::mentions(e, std::slice::from_ref(&p.name))).cloned().collect();
-        register(m, md, &sname, &used, &[TNode::Hole(e.clone())], false)?;
+        register(m, md, &sname, &used, &[TNode::Hole(e.clone())], false, &[])?;
         names.push(sname);
     }
     md.registers.push(RegInfo { name: name.to_string(), schema, tmps: out.2, bits: out.3, per_viewer, root, splices: names, reads: vec![] });
@@ -1260,18 +1290,18 @@ declare void @etch_w_go(ptr, ptr, i64, i64, ptr, i64)
 
 /// The module for these registers, and a Rust header with the same records.
 pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> Result<(String, String), String> {
-    let mut md = Module { globals: String::new(), strs: HashMap::new(), viewer: Schema::default(), funcs: String::new(), registers: vec![], viewer_reads: vec![] };
+    let mut md = Module { globals: String::new(), strs: HashMap::new(), viewer: Schema::default(), funcs: String::new(), registers: vec![], viewer_reads: vec![], keys: vec![] };
     md.viewer.field("viewer", Shape::I64);
     // the registers: those named, or (by default) what the screens show
     let auto = crate::glue::registers_of(m);
     let registers: Vec<&str> = if registers.is_empty() { auto.iter().map(String::as_str).collect() } else { registers.to_vec() };
     for r in &registers {
         let (params, body, per_viewer) = match m.fragments.get(&r.to_string()) {
-            Some(Decl::Fragment { params, body, per_viewer, .. }) => (params, body, *per_viewer),
+            Some(Decl::Fragment { params, body, per_viewer, varies, .. }) => (params, body, (*per_viewer, varies)),
             _ => return Err(format!("no fragment {r}")),
         };
         let nodes = inline::nodes(m, &body.nodes, &HashMap::new());
-        register(m, &mut md, r, params, &nodes, per_viewer)?;
+        register(m, &mut md, r, params, &nodes, per_viewer.0, per_viewer.1)?;
     }
     let mut qid = 0usize;
     let regs = md.registers.clone();
@@ -1303,6 +1333,19 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
     // the viewer's loader last: forwarding may have added fields to the viewer's record
     let vl = viewer_loader(m, &mut md, &mut qid)?;
     md.funcs.push_str(&vl);
+    // each kept piece's cache key: its row (or the viewer, or nothing), and what about the
+    // viewer its variants depend on
+    eprintln!("cache keys:");
+    for r in &md.registers {
+        let row = match (&r.root, r.per_viewer) {
+            (_, true) => "the viewer".to_string(),
+            (Some((p, e)), _) => format!("{p} ({e})"),
+            (None, _) => "nothing (one for the app)".to_string(),
+        };
+        let uses = md.keys.iter().find(|(n, _)| *n == r.name).map(|(_, u)| u.clone()).unwrap_or_default();
+        let varies = if r.per_viewer || uses.is_empty() { String::new() } else { format!("; varies by {} ({} bits at most)", uses.join(", "), r.bits) };
+        eprintln!("  {}: keyed by {row}{varies}", r.name);
+    }
     for a in &acts {
         eprintln!("{}: delta edges", a.name);
         for e in &a.edges {

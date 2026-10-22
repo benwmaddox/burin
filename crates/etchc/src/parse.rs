@@ -364,7 +364,25 @@ impl Parser {
                 } else {
                     false
                 };
-                Ok(Decl::Fragment { name, params, per_viewer, body: self.template()?, span })
+                // `varies by viewer, viewer.role`
+                let mut varies = vec![];
+                if self.eat_kw("varies") {
+                    self.expect_kw("by")?;
+                    loop {
+                        let mut p = self.ident()?;
+                        if p != "viewer" {
+                            return self.err("varies by names the viewer or its fields (viewer, viewer.role)");
+                        }
+                        while self.eat(".") {
+                            p = format!("{p}.{}", self.ident()?);
+                        }
+                        varies.push(p);
+                        if !self.eat(",") {
+                            break;
+                        }
+                    }
+                }
+                Ok(Decl::Fragment { name, params, per_viewer, varies, body: self.template()?, span })
             }
             "screen" => {
                 let name = self.ident()?;
