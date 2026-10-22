@@ -26,6 +26,8 @@ pub struct Req<'a> {
     pub cookie: &'a [u8],
     pub content_type: &'a [u8],
     pub body: &'a [u8],
+    /// Accept-Encoding names gzip
+    pub gzip: bool,
     /// the worker's index, for per-worker state the handler keeps
     pub worker: usize,
 }
@@ -231,6 +233,7 @@ fn parse(buf: &[u8]) -> Parsed<'_> {
         _ => return Parsed::Bad,
     };
     let (mut host, mut cookie, mut ctype, mut clen): (&[u8], &[u8], &[u8], usize) = (b"", b"", b"", 0);
+    let mut gzip = false;
     for hd in r.headers.iter() {
         let n = hd.name.as_bytes();
         if n.eq_ignore_ascii_case(b"host") {
@@ -244,6 +247,8 @@ fn parse(buf: &[u8]) -> Parsed<'_> {
                 Some(v) => clen = v,
                 None => return Parsed::Bad,
             }
+        } else if n.eq_ignore_ascii_case(b"accept-encoding") {
+            gzip = hd.value.windows(4).any(|w| w.eq_ignore_ascii_case(b"gzip"));
         } else if n.eq_ignore_ascii_case(b"transfer-encoding") {
             return Parsed::Bad; // chunked bodies aren't taken
         }
@@ -258,7 +263,7 @@ fn parse(buf: &[u8]) -> Parsed<'_> {
         Some(q) => (&target[..q], &target[q + 1..]),
         None => (target, &target[target.len()..]),
     };
-    Parsed::Done(head + clen, Req { method, path, query, host, cookie, content_type: ctype, body: &buf[head..head + clen], worker: 0 })
+    Parsed::Done(head + clen, Req { method, path, query, host, cookie, content_type: ctype, body: &buf[head..head + clen], gzip, worker: 0 })
 }
 
 #[cfg(test)]

@@ -73,7 +73,7 @@ fn the_fast_path_allocates_and_frees_nothing_and_copies_only_headers() {
         wstats: Default::default(),
     };
     let cookie = format!("session_token={token}");
-    let req = Req { method: b"GET", path: b"/rooms/486777696", query: b"", host: HOST, cookie: cookie.as_bytes(), content_type: b"", body: b"", worker: 0 };
+    let req = Req { method: b"GET", path: b"/rooms/486777696", query: b"", host: HOST, cookie: cookie.as_bytes(), content_type: b"", body: b"", gzip: false, worker: 0 };
     let mut out = Out::default();
     // the first page grows the connection's buffers
     assert!(app.fast(&req, &mut out));

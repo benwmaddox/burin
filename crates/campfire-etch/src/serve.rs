@@ -92,13 +92,28 @@ impl App {
         let first = out.placeholder();
         // Safety: every borrowed range is owned by `snap`, which the response holds
         unsafe { out.push_borrowed(&room.headers) };
+        if req.gzip {
+            out.push_static(b"Content-Encoding: gzip\r\n");
+        }
         out.push_own(|b| {
             b.extend_from_slice(b"Date: ");
             etch_rt::http_date(b);
             b.extend_from_slice(b"\r\n\r\n");
         });
         let head_len = out.len();
-        state::assemble(room, place, side, &snap.end, |b| unsafe { out.push_borrowed(b) });
+        if req.gzip {
+            // the pieces' deflate bytes joined; the checksum combined from theirs
+            out.push_static(&etch_rt::gz::HEADER);
+            let mut crc = etch_rt::gz::Crc::default();
+            state::assemble(room, place, side, &snap.end, |s| {
+                unsafe { out.push_borrowed(&s.gz.deflate) };
+                crc.add(&s.gz);
+            });
+            out.push_static(&etch_rt::gz::FINAL);
+            out.push_own(|b| b.extend_from_slice(&crc.trailer()));
+        } else {
+            state::assemble(room, place, side, &snap.end, |s| unsafe { out.push_borrowed(&s.raw) });
+        }
         let body_len = out.len() - head_len;
         out.fill(first, |b| {
             b.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: ");
@@ -106,7 +121,7 @@ impl App {
             b.extend_from_slice(b"\r\n");
         });
         if self.verify {
-            self.check(&snap, uid, rid, req.host, out, body_len);
+            self.check(&snap, uid, rid, req.host, out, body_len, req.gzip);
         }
         out.hold(snap);
         self.counts.fast.fetch_add(1, Ordering::Relaxed);
@@ -114,9 +129,18 @@ impl App {
     }
 
     /// The golden-model check: the fast page must equal a fresh render from SQLite.
-    fn check(&self, snap: &Snap, uid: Id, rid: Id, host: &[u8], out: &Out, body_len: usize) {
+    fn check(&self, snap: &Snap, uid: Id, rid: Id, host: &[u8], out: &Out, body_len: usize, gzip: bool) {
         let all = out.to_vec();
-        let fast = &all[all.len() - body_len..];
+        let mut fast = all[all.len() - body_len..].to_vec();
+        if gzip {
+            use std::io::Read;
+            let mut plain = vec![];
+            if flate2::read::GzDecoder::new(&fast[..]).read_to_end(&mut plain).is_err() {
+                plain = b"(not valid gzip)".to_vec();
+            }
+            fast = plain;
+        }
+        let fast = &fast[..];
         let fresh = self.with_reader(|c| render_page(c, &self.ctx, &String::from_utf8_lossy(host), &snap.users, uid, rid));
         self.counts.verified.fetch_add(1, Ordering::Relaxed);
         match fresh {
@@ -240,7 +264,8 @@ pub fn render_page(c: &Connection, ctx: &Ctx, host: &str, users: &std::collectio
     let side = state::build_sidebar(c, ctx, users, uid)?;
     let end = crate::render::page_end(ctx);
     let mut page = Vec::with_capacity(400_000);
-    state::assemble(&room, place, &side, &end, |b| page.extend_from_slice(b));
+    let end = state::Seg::new(end);
+    state::assemble(&room, place, &side, &end, |s| page.extend_from_slice(&s.raw));
     Ok(Some(page))
 }
 

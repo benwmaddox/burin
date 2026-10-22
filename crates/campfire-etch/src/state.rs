@@ -18,7 +18,7 @@ pub struct Snap {
     pub users: HashMap<Id, User>,
     pub rooms: HashMap<Id, Arc<RoomView>>,
     pub sidebars: HashMap<Id, Arc<Sidebar>>,
-    pub end: Arc<Vec<u8>>,
+    pub end: Arc<Seg>,
 }
 
 impl Snap {
@@ -36,13 +36,28 @@ impl Snap {
     }
 }
 
+/// A piece of a page, as it is and precompressed (built once, at write time).
+pub struct Seg {
+    pub raw: Vec<u8>,
+    pub gz: etch_rt::gz::Piece,
+}
+
+impl Seg {
+    pub fn new(raw: Vec<u8>) -> Seg {
+        let gz = etch_rt::gz::Piece::new(&raw);
+        Seg { raw, gz }
+    }
+}
+
 pub struct RoomView {
     pub id: Id,
     /// the members' user ids, sorted: a viewer's place picks each message's variant
     pub members: Vec<Id>,
-    pub head: Vec<u8>,
-    pub tail: Vec<u8>,
+    pub head: Arc<Seg>,
+    pub tail: Arc<Seg>,
     pub tok: RoomTokens,
+    /// the page's plain token, spliced into the sidebar
+    pub tok_seg: Arc<Seg>,
     /// the response's headers after the length: type, the remembered room, Vary
     pub headers: Vec<u8>,
     pub msgs: Vec<Arc<MsgFrag>>,
@@ -51,14 +66,14 @@ pub struct RoomView {
 pub struct MsgFrag {
     pub data: MsgData,
     /// each distinct variant the room's members see
-    pub variants: Vec<Vec<u8>>,
+    pub variants: Vec<Seg>,
     /// for each member (in `RoomView::members` order), the variant they see
     pub by_member: Vec<u8>,
 }
 
 pub struct Sidebar {
     /// the sidebar between the page's plain tokens
-    pub pieces: Vec<Vec<u8>>,
+    pub pieces: Vec<Seg>,
 }
 
 /// What the room page needs that the snapshot doesn't keep per room: phase 1a precomputes only
@@ -90,7 +105,7 @@ pub fn build_msg(ctx: &Ctx, _room: Id, _host: &str, _tok: &RoomTokens, data: Msg
             Some(i) => i,
             None => {
                 kinds.push(k);
-                variants.push(gen::message(&ctx.abi, &data, &v));
+                variants.push(Seg::new(gen::message(&ctx.abi, &data, &v)));
                 kinds.len() - 1
             }
         };
@@ -140,7 +155,8 @@ pub fn build_room(c: &Connection, ctx: &Ctx, host: &str, users: &HashMap<Id, Use
         })
         .collect();
     let headers = format!("Content-Type: text/html; charset=utf-8\r\nSet-Cookie: last_room={room_id}; Path=/; Max-Age=31536000\r\nVary: Accept-Encoding\r\n").into_bytes();
-    Ok(Some(RoomView { id: room_id, members, head, tail, tok, headers, msgs: frags }))
+    let tok_seg = Arc::new(Seg::new(tok.plain.as_bytes().to_vec()));
+    Ok(Some(RoomView { id: room_id, members, head: Arc::new(Seg::new(head)), tail: Arc::new(Seg::new(tail)), tok, tok_seg, headers, msgs: frags }))
 }
 
 pub fn side_data(c: &Connection, users: &HashMap<Id, User>, uid: Id) -> rusqlite::Result<SideData> {
@@ -178,12 +194,12 @@ pub fn side_data(c: &Connection, users: &HashMap<Id, User>, uid: Id) -> rusqlite
 }
 
 pub fn build_sidebar(c: &Connection, ctx: &Ctx, users: &HashMap<Id, User>, uid: Id) -> rusqlite::Result<Sidebar> {
-    Ok(Sidebar { pieces: render::sidebar(ctx, &side_data(c, users, uid)?) })
+    Ok(Sidebar { pieces: render::sidebar(ctx, &side_data(c, users, uid)?).into_iter().map(Seg::new).collect() })
 }
 
 /// The page's body, piece by piece, for the member at `place` in the room's members.
 /// The fast path and the golden-model check both assemble pages with it.
-pub fn assemble<'a>(room: &'a RoomView, place: usize, side: &'a Sidebar, end: &'a [u8], mut push: impl FnMut(&'a [u8])) {
+pub fn assemble<'a>(room: &'a RoomView, place: usize, side: &'a Sidebar, end: &'a Seg, mut push: impl FnMut(&'a Seg)) {
     push(&room.head);
     for m in &room.msgs {
         push(&m.variants[m.by_member[place] as usize]);
@@ -191,7 +207,7 @@ pub fn assemble<'a>(room: &'a RoomView, place: usize, side: &'a Sidebar, end: &'
     push(&room.tail);
     for (i, p) in side.pieces.iter().enumerate() {
         if i > 0 {
-            push(room.tok.plain.as_bytes());
+            push(&room.tok_seg);
         }
         push(p);
     }

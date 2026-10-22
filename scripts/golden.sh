@@ -18,6 +18,8 @@ for who in david:$TOKEN jason:jasontokenjasontokenjasontoken00; do
   curl -sS -o $OUT/$name-1.html -H "Cookie: session_token=$tok" http://127.0.0.1:$PORT/rooms/486777696
   sleep 0.2
   curl -sS -D $OUT/$name.headers -o $OUT/$name-2.html -H "Cookie: session_token=$tok" http://127.0.0.1:$PORT/rooms/486777696
+  # gzip, decoded by curl: must be the same page
+  curl -sS --compressed -D $OUT/$name-gz.headers -o $OUT/$name-3.html -H "Cookie: session_token=$tok" http://127.0.0.1:$PORT/rooms/486777696
 done
 curl -sS http://127.0.0.1:$PORT/_etch/stats; echo
 cat $OUT/server.log
@@ -31,7 +33,7 @@ def norm(t):
 ok = True
 for name, g in [('david', 'room.html'), ('jason', 'room-jason.html')]:
     want = norm(open(f'{G}/{g}', encoding='utf-8').read())
-    for k in ('1', '2'):
+    for k in ('1', '2', '3'):
         got = open(f'{O}/{name}-{k}.html', encoding='utf-8').read()
         if got == want:
             print(f'{name}-{k}: identical ({len(got.encode())} bytes)')

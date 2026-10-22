@@ -108,6 +108,7 @@ pub fn run(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Recei
                     members: view.members.clone(),
                     head: view.head.clone(),
                     tail: view.tail.clone(),
+                    tok_seg: view.tok_seg.clone(),
                     tok: crate::render::RoomTokens { plain: view.tok.plain.clone(), composer: view.tok.composer.clone(), picker: view.tok.picker.clone() },
                     headers: view.headers.clone(),
                     msgs,

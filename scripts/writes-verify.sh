@@ -14,7 +14,8 @@ trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 100); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done
 DAVID=$(node -e "const {DatabaseSync}=require('node:sqlite');console.log(new DatabaseSync('$D/data/app.sqlite').prepare('select token from Session where id = 481019661').get().token)" 2>/dev/null)
 JASON=jasontokenjasontokenjasontoken00
-get() { curl -sS -o /dev/null -w "%{http_code} " -H "Cookie: session_token=$1" http://127.0.0.1:$PORT/rooms/$2; }
+# David asks for plain pages, Jason for gzip (the server's check decompresses and compares)
+get() { if [ "$1" = "$JASON" ]; then Z=(-H "Accept-Encoding: gzip"); else Z=(); fi; curl -sS -o /dev/null -w "%{http_code} " "${Z[@]}" -H "Cookie: session_token=$1" http://127.0.0.1:$PORT/rooms/$2; }
 post() { curl -sS -o /dev/null -w "%{http_code} " -H "Cookie: session_token=$1" --data-urlencode "room=$2" --data-urlencode "body=$3" http://127.0.0.1:$PORT/_do/post_message; }
 for r in 486777696 654632876; do get $DAVID $r; get $JASON $r; done; sleep 0.3; echo
 for i in $(seq 1 $N); do

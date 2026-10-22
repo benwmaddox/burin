@@ -2,6 +2,7 @@
 //! the same for every app; the compiler generates only the app's own layer.
 
 pub mod abi;
+pub mod gz;
 pub mod html;
 pub mod http;
 pub mod out;

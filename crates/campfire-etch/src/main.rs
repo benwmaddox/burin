@@ -50,7 +50,7 @@ fn main() {
         users,
         rooms: HashMap::new(),
         sidebars: HashMap::new(),
-        end: Arc::new(render::page_end(&ctx)),
+        end: Arc::new(state::Seg::new(render::page_end(&ctx))),
     }));
     drop(r);
 
