@@ -152,7 +152,7 @@ pub fn build<G: Glue>(ctx: &Ctx, kind: usize, rec: *const u8, viewers: &[*const 
             at = s;
         }
         variants.push(Seg::new(out[at..].to_vec()));
-        return Reg { variants, by_place: sites };
+        return Reg { variants, by_place: sites, overflow: false };
     }
     let mut keys: Vec<i64> = vec![];
     let mut variants = vec![];
@@ -178,7 +178,8 @@ pub fn build<G: Glue>(ctx: &Ctx, kind: usize, rec: *const u8, viewers: &[*const 
         unsafe { G::build(kind, ctx, rec, none.as_ptr() as *const u8, &mut out, &ptrs, &mut splits) };
         variants.push(Seg::new(out));
     }
-    Reg { variants, by_place: by }
+    let overflow = variants.len() > 256;
+    Reg { variants, by_place: if overflow { vec![] } else { by }, overflow }
 }
 
 /// Builds a screen instance into `snap` from SQLite: its audience and headers, the registers keyed

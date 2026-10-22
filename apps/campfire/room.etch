@@ -24,7 +24,6 @@ fn original_room(): Room = first(Room order by .created, .seq)
 
 screen room(room: Room) at "/rooms/{room}"
   require member(viewer, room) else go "/"
-  require room.type != "direct" else unsupported                       // phase 2: the title depends on the viewer
   require not (room == original_room() and count(Message where .room == room) <= 40) else unsupported   // phase 2: the invitation
   cookie last_room = text(room.id)
 <<<{{room_head(room)}}{{for m in room_messages(room)}}{{message(m)}}{{end}}{{room_tail(room)}}{{sidebar(room)}}{{page_end()}}>>>
@@ -33,11 +32,11 @@ fragment icon(name: Text) <<<<img src="{{asset(name)}}" width="20" height="20" a
 
 fragment room_head(room: Room) <<<\
 <!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark">
-<title>{{room.name}}</title>{{for css in stylesheets}}<link rel="stylesheet" href="{{asset(css)}}">{{end}}\
+<title>{{display_name(room)}}</title>{{for css in stylesheets}}<link rel="stylesheet" href="{{asset(css)}}">{{end}}\
 <link rel="alternate" type="text/markdown" href="/llms.txt" title="For AI agents"></head>
 <body class="sidebar">
 <a href="#main-content" class="skip-navigation btn">Skip to main content</a>
-<nav id="nav"><div class="btn btn--reversed btn--faux room--current"><h1 class="room__contents txt-medium overflow-ellipsis">{{room.name}}</h1></div>\
+<nav id="nav"><div class="btn btn--reversed btn--faux room--current"><h1 class="room__contents txt-medium overflow-ellipsis">{{display_name(room)}}</h1></div>\
 <a href="/rooms/{{room.id}}/edit" class="btn">{{icon("menu-dots-horizontal.svg")}}<span class="for-screen-reader">Settings for this room</span></a>\
 <button type="button" class="btn" hidden data-push-subscribe="/_do/subscribe_push" data-push-params="endpoint,p256dh_key,auth_key" data-push-key="{{config.vapid_public}}">\
 {{icon("notification-bell-alert.svg")}}<span data-push-label class="for-screen-reader">Notification settings for this room</span></button></nav>

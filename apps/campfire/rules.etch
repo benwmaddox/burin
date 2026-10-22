@@ -75,3 +75,15 @@ action unboost(boost: Boost) {
   require boost.booster == viewer else not_found
   delete boost
 }
+
+// A room's members by when they joined Campfire (a direct room's title names them).
+view members_by_user(r: Room) = Membership where .room == r order by .user.created, .user.seq limit 20
+
+// A room's name as a viewer sees it: a direct room is named for its other members (or, with
+// nobody else in it, for the viewer: then its only member). The viewer conditions are checked
+// per member when the page is built: variant bits, no per-viewer copy of the page.
+fn display_name(r: Room): Text =
+  if r.type == "direct" {
+    if count(members_by_user(r) where .user != viewer) > 0 { sentence(list(.user.name for members_by_user(r) where .user != viewer)) }
+    else { sentence(list(.user.name for members_by_user(r))) }
+  } else { r.name }

@@ -77,3 +77,24 @@ fn a_delete_leaving_references_is_refused() {
 fn a_delete_after_its_references_go_passes() {
     verdict("action drop(u: User) {\n  for each p in Post where .author == u { delete p }\n  for each s in Session where .user == u { delete s }\n  delete u\n}").unwrap();
 }
+
+/// The registers' lowering of a spec (the BASE, a fragment): its error, if any.
+fn lowered(extra: &str, frag: &str) -> Result<(), String> {
+    let src = format!("{BASE}\n{extra}");
+    let decls = parse::parse_file(&src, 0).map_err(|e| format!("parse: {}", e.msg))?;
+    let app = App { files: vec!["t.etch".into()], decls };
+    let m = check::Model::new(&app).map_err(|e| e.msg)?;
+    check::check(&m).map_err(|e| e.msg)?;
+    crate::llvm::module(&m, &[frag], "", "").map(|_| ())
+}
+
+#[test]
+fn viewer_text_in_a_shared_fragment_is_refused() {
+    let e = lowered(r#"fragment p(x: Post) <<<<b>{{viewer.name}}</b>{{x.body}}>>>"#, "p").unwrap_err();
+    assert!(e.contains("depends on the viewer"), "{e}");
+}
+
+#[test]
+fn viewer_conditions_in_a_shared_fragment_pass() {
+    lowered(r#"fragment p(x: Post) <<<{{if x.author == viewer}}<b>mine</b>{{end}}{{x.body}}>>>"#, "p").unwrap();
+}
