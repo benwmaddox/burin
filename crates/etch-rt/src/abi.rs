@@ -267,6 +267,9 @@ pub struct Arena {
 }
 
 impl Arena {
+    pub fn new() -> Arena {
+        Arena::default()
+    }
     fn take(&mut self, n: usize) -> *mut u8 {
         let words = n.div_ceil(8).max(1);
         let fits = self.chunks.last().map(|c| c.len() - self.used >= words).unwrap_or(false);
@@ -349,6 +352,32 @@ impl Writer {
 #[derive(Default)]
 pub struct Deltas {
     pub list: Vec<(i32, i64, i64, i64)>,
+    /// (register, key, item id, list, field, value): set a field of an item in a kept record
+    pub patches: Vec<(i64, i64, i64, i64, i64, i64)>,
+    /// (register, row, list, field): kept records whose list holds an item referencing the row
+    pub finds: Vec<(i64, i64, i64, i64)>,
+}
+
+/// # Safety: a live Deltas.
+#[no_mangle]
+pub unsafe extern "C" fn etch_delta_patch(d: *mut Deltas, reg: i64, key: i64, item: i64, list: i64, field: i64, value: i64) {
+    (*d).patches.push((reg, key, item, list, field, value));
+}
+
+/// # Safety: a live Deltas.
+#[no_mangle]
+pub unsafe extern "C" fn etch_delta_find(d: *mut Deltas, reg: i64, row: i64, list: i64, field: i64) {
+    let d = &mut *d;
+    if !d.finds.contains(&(reg, row, list, field)) {
+        d.finds.push((reg, row, list, field));
+    }
+}
+
+/// `size` zeroed bytes from the writer's arena (a forwarded record), kept until the next batch.
+/// # Safety: a live Writer.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_alloc(w: *mut Writer, size: i64) -> *mut u8 {
+    etch_alloc(&mut (*w).arena, size)
 }
 
 /// # Safety: a live Deltas.
@@ -428,4 +457,19 @@ pub unsafe extern "C" fn etch_done(st: *mut ffi::sqlite3_stmt, rc: i32) {
         let msg = std::ffi::CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy();
         panic!("a generated write failed ({rc}): {msg}");
     }
+}
+
+/// Copies text into the writer's arena (a forwarded record's text outlives the action's
+/// arguments). # Safety: a live Writer; `src` a live Str; `dst` writable.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_copy(w: *mut Writer, src: *const Str, dst: *mut Str) {
+    let s = &*src;
+    if s.ptr.is_null() {
+        *dst = Str::NONE;
+        return;
+    }
+    let n = s.len as usize;
+    let p = (*w).arena.take(n);
+    std::ptr::copy_nonoverlapping(s.ptr, p, n);
+    *dst = Str { ptr: p, len: s.len };
 }

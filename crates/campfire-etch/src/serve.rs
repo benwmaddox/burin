@@ -171,10 +171,11 @@ impl App {
                 let c = &self.counts;
                 let w = &self.wstats;
                 let s = format!(
-                    r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"posts":{},"rebuilt_sidebars":{},"version":{}}}"#,
+                    r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"posts":{},"rebuilt_sidebars":{},"version":{},"write_reads":{},"forwarded":{},"patched":{}}}"#,
                     c.fast.load(Ordering::Relaxed), c.cold.load(Ordering::Relaxed), c.verified.load(Ordering::Relaxed),
                     c.mismatched.load(Ordering::Relaxed), c.refused.load(Ordering::Relaxed), w.batches.load(Ordering::Relaxed),
-                    w.posts.load(Ordering::Relaxed), w.rebuilt_sidebars.load(Ordering::Relaxed), self.snap.load().version
+                    w.posts.load(Ordering::Relaxed), w.rebuilt_sidebars.load(Ordering::Relaxed), self.snap.load().version,
+                    w.reads.load(Ordering::Relaxed), w.forwarded.load(Ordering::Relaxed), w.patched.load(Ordering::Relaxed)
                 );
                 respond(out, 200, "application/json", &[], s.as_bytes());
             }

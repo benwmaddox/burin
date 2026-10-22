@@ -13,7 +13,7 @@ use crate::render::Ctx;
 use crate::state::{self, Snap};
 use arc_swap::ArcSwap;
 use rusqlite::Connection;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -33,6 +33,11 @@ pub struct Stats {
     pub batches: AtomicU64,
     pub posts: AtomicU64,
     pub rebuilt_sidebars: AtomicU64,
+    /// registers loaded from SQLite after a commit (a read after the write)
+    pub reads: AtomicU64,
+    /// registers built from records the action forwarded, or from patched kept records: no read
+    pub forwarded: AtomicU64,
+    pub patched: AtomicU64,
 }
 
 /// Sends a command, refusing when the queue is full (backpressure: the caller answers 503).
@@ -53,6 +58,9 @@ pub fn run(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Recei
         .expect("max seq")
         .unwrap_or(0);
     let mut w = Writer::new(seq);
+    // what the writer keeps between batches: viewers' records, and sidebars' records (patched in place)
+    let mut viewers: HashMap<Id, gen::Kept<gen::Viewer>> = HashMap::new();
+    let mut sides: HashMap<Id, gen::Kept<gen::In_sidebar>> = HashMap::new();
     let mut batch = Vec::with_capacity(256);
     while let Ok(first) = rx.recv() {
         batch.push(first);
@@ -73,7 +81,8 @@ pub fn run(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Recei
         for cmd in batch.drain(..) {
             match cmd {
                 Cmd::Post { actor, room, body, reply } => {
-                    let r = gen::post_message(&tx, &ctx.abi, &mut w, actor, room, &body, &mut deltas);
+                    let vrec = viewers.entry(actor).or_insert_with(|| gen::kept_viewer(&tx, &ctx.abi, actor));
+                    let r = gen::post_message(&tx, &ctx.abi, &mut w, actor, &vrec.rec, room, &body, &mut deltas);
                     replies.push((reply, r.map(|_| 0)));
                 }
                 Cmd::WarmRoom(r) => {
@@ -87,20 +96,38 @@ pub fn run(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Recei
         tx.commit().expect("commit");
         // ---- the delta edges the actions reported, built into the next snapshot
         let mut next = cur.next();
-        let mut rebuild: HashSet<Id> = HashSet::new();
+        let mut reload: HashSet<Id> = HashSet::new();
+        let mut dirty: HashSet<Id> = HashSet::new();
+        let mut forwarded: HashMap<Id, i64> = HashMap::new();
         let mut touched_rooms: HashSet<Id> = HashSet::new();
         for &(op, a, key, item) in &deltas.list {
             let reg = |a: i64| gen::REGISTERS.get(a as usize).copied().unwrap_or("");
             match op {
-                // a new row's register: built where a screen list shows it (op 2)
                 1 => {}
+                // a new row's record, filled by the action: no read
+                6 => {
+                    forwarded.insert(key, item);
+                }
                 2 => {
-                    // appended to the room's messages: its fragment for the room's members
                     touched_rooms.insert(key);
                     if let Some(view) = next.rooms.get(&key).cloned() {
-                        let frag = match state::build_msgs(&c, &ctx, &[item], &view.members).pop() {
-                            Some(f) => Arc::new(f),
-                            None => continue,
+                        let frag = match forwarded.get(&item) {
+                            Some(rec) => {
+                                for u in &view.members {
+                                    viewers.entry(*u).or_insert_with(|| gen::kept_viewer(&c, &ctx.abi, *u));
+                                }
+                                let vs: Vec<&gen::Viewer> = view.members.iter().map(|u| &*viewers[u].rec).collect();
+                                let (variants, by_member) = gen::message_from(&ctx.abi, *rec as *const gen::In_message, &vs);
+                                stats.forwarded.fetch_add(1, Ordering::Relaxed);
+                                Arc::new(state::MsgFrag { id: item, variants: variants.into_iter().map(state::Seg::new).collect(), by_member })
+                            }
+                            None => {
+                                stats.reads.fetch_add(1, Ordering::Relaxed);
+                                match state::build_msgs(&c, &ctx, &[item], &view.members).pop() {
+                                    Some(f) => Arc::new(f),
+                                    None => continue,
+                                }
+                            }
                         };
                         let mut msgs = view.msgs.clone();
                         msgs.push(frag);
@@ -120,15 +147,38 @@ pub fn run(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Recei
                     }
                 }
                 3 if reg(a) == "sidebar" => {
-                    if next.sidebars.contains_key(&key) {
-                        rebuild.insert(key);
+                    if sides.contains_key(&key) {
+                        reload.insert(key);
                     }
                 }
                 4 if reg(a) == "sidebar" => {
-                    rebuild.extend(next.sidebars.keys().copied());
+                    reload.extend(sides.keys().copied());
                 }
-                // anything else (not reported by today's actions): let the rooms rebuild on demand
                 _ => next.rooms.clear(),
+            }
+        }
+        // patches of kept records: the item's field set in place, then the bytes rebuilt
+        // (an item is in one of the lists a patch may name: reloaded only if none holds it)
+        let mut found: HashMap<(Id, i64), bool> = HashMap::new();
+        for &(reg, key, item, list, field, value) in &deltas.patches {
+            if let Some(k) = sides.get_mut(&key) {
+                let hit = unsafe { gen::patch(reg, list, field, &mut *k.rec as *mut gen::In_sidebar as *mut u8, item, value) };
+                *found.entry((key, item)).or_insert(false) |= hit;
+            }
+        }
+        for ((key, _), hit) in found {
+            if hit {
+                dirty.insert(key);
+            } else {
+                reload.insert(key);
+            }
+        }
+        // a written row that orders kept lists: only the kept records holding it are reloaded
+        for &(reg, row, list, field) in &deltas.finds {
+            for (uid, k) in sides.iter_mut() {
+                if unsafe { gen::find(reg, list, field, &mut *k.rec as *mut gen::In_sidebar as *mut u8, row) } {
+                    reload.insert(*uid);
+                }
             }
         }
         // a room whose page might now differ for another reason (the invitation) is rebuilt
@@ -149,14 +199,26 @@ pub fn run(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Recei
             }
         }
         for u in warm_sidebars {
-            if !next.sidebars.contains_key(&u) {
-                rebuild.insert(u);
+            if !sides.contains_key(&u) {
+                reload.insert(u);
             }
         }
-        for u in rebuild {
-            if let Ok(s) = state::build_sidebar(&c, &ctx, &next.users, u) {
-                next.sidebars.insert(u, Arc::new(s));
+        for u in &reload {
+            if let Some(k) = gen::kept_sidebar(&c, &ctx.abi, *u) {
+                sides.insert(*u, k);
+                dirty.insert(*u);
+                stats.reads.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        for u in dirty {
+            if let Some(k) = sides.get(&u) {
+                let v = viewers.entry(u).or_insert_with(|| gen::kept_viewer(&c, &ctx.abi, u));
+                let pieces = gen::sidebar_bytes(&ctx.abi, k, &v.rec);
+                next.sidebars.insert(u, Arc::new(state::Sidebar { pieces: pieces.into_iter().map(state::Seg::new).collect() }));
                 stats.rebuilt_sidebars.fetch_add(1, Ordering::Relaxed);
+                if !reload.contains(&u) {
+                    stats.patched.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         snap.store(Arc::new(next));
