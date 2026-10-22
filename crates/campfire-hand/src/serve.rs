@@ -51,7 +51,7 @@ impl App {
     }
 
     /// The fast path; false when the request isn't one it answers.
-    fn fast(&self, req: &Req, out: &mut Out) -> bool {
+    pub fn fast(&self, req: &Req, out: &mut Out) -> bool {
         if req.method != b"GET" || !req.query.is_empty() || req.cookie(b"flash").is_some() {
             return false;
         }

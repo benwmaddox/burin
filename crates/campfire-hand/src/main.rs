@@ -5,13 +5,7 @@
 //!
 //! The time zone is TZ's, fixed at start. --verify compares every fast page with a fresh render.
 
-mod consts;
-mod db;
-mod keys;
-mod render;
-mod serve;
-mod state;
-mod writer;
+use campfire_hand::{db, keys, render, serve, state, writer};
 
 use arc_swap::ArcSwap;
 use etch_rt::sign::Signer;

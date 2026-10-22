@@ -176,6 +176,11 @@ impl Out {
     pub fn segments(&self) -> usize {
         self.segs.len()
     }
+
+    /// The bytes this response made itself, rather than borrowed: what it wrote or copied.
+    pub fn own_bytes(&self) -> usize {
+        self.scratch.len()
+    }
 }
 
 /// Writes n in decimal.
