@@ -63,7 +63,7 @@ fn main() {
 
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap();
-    let total = (page * pages) as u64;
+    let total = ((page + if method == "hybrid" { 200 } else { 0 }) * pages) as u64;
     let reader = std::thread::spawn(move || {
         pin(5);
         let (mut s, _) = l.accept().unwrap();
@@ -87,7 +87,7 @@ fn main() {
     let mut copied = 0u64;
     let mut completions = 0u64;
     // a memfd holding the ranges (for sendfile), and their offsets
-    let (mfd, offs) = if method.starts_with("sendfile") {
+    let (mfd, offs) = if method.starts_with("sendfile") || method == "hybrid" {
         let name = std::ffi::CString::new("page").unwrap();
         let m = unsafe { libc::memfd_create(name.as_ptr(), 0) };
         let mut offs = vec![];
@@ -151,6 +151,37 @@ fn main() {
                 }
                 if method == "zerocopy" {
                     reap(fd, &mut completions, &mut copied, false);
+                }
+            }
+            "hybrid" => {
+                // the best a real page could do: headers (MSG_MORE), the shared prefix (gzip header,
+                // head, 40 messages, tail) as one sendfile, the per-viewer rest as one writev
+                let hdr = [0u8; 200];
+                let n = unsafe { libc::send(fd, hdr.as_ptr() as *const _, hdr.len(), libc::MSG_MORE) };
+                assert_eq!(n, 200);
+                let cut = 42 + gz as usize;
+                let mut off = 0i64;
+                let mut left: usize = segs[..cut].iter().map(|s| s.len()).sum();
+                while left > 0 {
+                    let n = unsafe { libc::sendfile(fd, mfd, &mut off, left) };
+                    assert!(n > 0, "sendfile");
+                    left -= n as usize;
+                }
+                let mut v = iov[cut..].to_vec();
+                let mut at = 0;
+                while at < v.len() {
+                    let mut n = unsafe { libc::writev(fd, v[at..].as_ptr(), (v.len() - at) as i32) };
+                    assert!(n > 0, "writev");
+                    while n > 0 && at < v.len() {
+                        if (n as usize) >= v[at].iov_len {
+                            n -= v[at].iov_len as isize;
+                            at += 1;
+                        } else {
+                            v[at].iov_base = unsafe { (v[at].iov_base as *mut u8).add(n as usize) } as *mut _;
+                            v[at].iov_len -= n as usize;
+                            n = 0;
+                        }
+                    }
                 }
             }
             "sendfile5" => {

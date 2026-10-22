@@ -92,6 +92,29 @@ branches it can mispredict.* (The owner's rule, 22 Oct 2026.)
 - **Formatting** happens once too: a message's time ("1:44 PM") is formatted when the message is
   stored in a fragment. The time zone is configuration, fixed at start.
 
+**Zero-copy sends: measured, not adopted (22 Oct 2026).** The one copy left is the kernel's
+copy of the page into the socket. `crates/sendlab` (`scripts/sendlab.sh`) times the sender's
+CPU per page over loopback, with page shapes like the room page:
+
+| method | raw 345 KB, 53 ranges | gzip 74 KB, 57 ranges |
+|---|---|---|
+| writev (what etch does) | 42 µs | 13.8 µs |
+| sendmsg MSG_ZEROCOPY | 58 µs (the kernel copied every send anyway) | 27.5 µs |
+| sendfile from a memfd, one call per range | 147 µs (67 µs corked) | 147 µs (39 µs corked) |
+| vmsplice + splice | 33 µs | 23 µs |
+| sendfile, page as 5 ranges | 25 µs | 12.1 µs |
+| sendfile, page as 1 range (unreachable best case) | 20–22 µs | 7.8–8.4 µs |
+| headers + sendfile of a shared prefix + writev of the rest | 26 µs | 12.4 µs, but the reader +2.8 µs |
+
+- sendfile costs per call, not per byte. So the lever is contiguous layout, not the send
+  primitive.
+- Layout can't be made contiguous here. A message's bytes depend on the viewer (`message--me`,
+  edit and boost controls). A contiguous block would be needed per viewer pattern, rebuilt on
+  every post.
+- Even the best case saves the sender 1.4 µs per gzip page and costs the receiver more.
+- MSG_ZEROCOPY can't be judged on loopback or veth, which always copy. It may pay on a real NIC
+  for large raw bodies; retest there.
+
 Rust helps here: a per-request arena with a lifetime lets the borrow checker prove that nothing
 outlives the request, which crudspec's Go runtime can't prove (its bench README: "nothing proves
 it here").
