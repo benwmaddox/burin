@@ -66,7 +66,11 @@ fn main() -> ExitCode {
                 Ok((ll, rs)) => {
                     let _ = std::fs::create_dir_all(out);
                     std::fs::write(out.join("app.ll"), ll).unwrap();
-                    std::fs::write(out.join("app_gen.rs"), rs).unwrap();
+                    // the header only when it changed: a template's edit doesn't recompile the glue
+                    let hp = out.join("app_gen.rs");
+                    if std::fs::read_to_string(&hp).ok().as_deref() != Some(rs.as_str()) {
+                        std::fs::write(&hp, rs).unwrap();
+                    }
                     println!("wrote {}", out.display());
                     ExitCode::SUCCESS
                 }

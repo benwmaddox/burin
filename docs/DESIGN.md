@@ -27,7 +27,7 @@ Measured with crudspec's fair protocol (`bench/crudspec-lifetime.sh` and
 | Reads/s with a writer posting 5 msg/s into the same room | ≥ 3× crudspec | < 1.5× crudspec |
 | Post latency (p99) at 50 msg/s | ≤ crudspec's | > 2× crudspec's |
 | Memory (PSS) after load | ≤ crudspec's | > 2× crudspec's |
-| Spec to binary, after a one-line change | ≤ 15 s | > 60 s |
+| Spec to binary, after a one-line change | < 2 min (the owner, 22 Oct 2026; was 15 s) | > 5 min |
 | Every maintained fragment equals a fresh render (test mode, after every write) | always | any mismatch that isn't fixed |
 
 Phase 1 is Campfire's room page plus posting a message, nothing else. The rest of the language
