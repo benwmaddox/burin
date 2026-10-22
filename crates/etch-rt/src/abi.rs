@@ -178,3 +178,110 @@ pub unsafe extern "C" fn etch_config(ctx: *const Ctx, out: *mut Vec<u8>, k: i64,
 pub unsafe extern "C" fn etch_str_eq(a: *const u8, an: i64, b: *const u8, bn: i64) -> bool {
     !a.is_null() && bytes(a, an) == bytes(b, bn)
 }
+
+// ---- queries: the generated loaders call SQLite's C API directly, through these few helpers
+
+use rusqlite::ffi;
+
+/// A connection and its prepared statements, by the generated query's id.
+pub struct Db {
+    conn: *mut ffi::sqlite3,
+    stmts: Vec<*mut ffi::sqlite3_stmt>,
+}
+
+impl Db {
+    /// # Safety: `conn` outlives the Db (a rusqlite Connection's handle).
+    pub unsafe fn new(conn: *mut ffi::sqlite3) -> Db {
+        Db { conn, stmts: vec![] }
+    }
+}
+
+impl Drop for Db {
+    fn drop(&mut self) {
+        for s in self.stmts.drain(..) {
+            if !s.is_null() {
+                unsafe { ffi::sqlite3_finalize(s) };
+            }
+        }
+    }
+}
+
+/// The prepared statement for query `qid` (prepared on first use, kept). # Safety: live Db; SQL valid.
+#[no_mangle]
+pub unsafe extern "C" fn etch_stmt(db: *mut Db, qid: i64, sql: *const u8, len: i64) -> *mut ffi::sqlite3_stmt {
+    let db = &mut *db;
+    let k = qid as usize;
+    if db.stmts.len() <= k {
+        db.stmts.resize(k + 1, std::ptr::null_mut());
+    }
+    if db.stmts[k].is_null() {
+        let mut st = std::ptr::null_mut();
+        let rc = ffi::sqlite3_prepare_v3(db.conn, sql as *const _, len as i32, ffi::SQLITE_PREPARE_PERSISTENT as u32, &mut st, std::ptr::null_mut());
+        if rc != ffi::SQLITE_OK {
+            let msg = std::ffi::CStr::from_ptr(ffi::sqlite3_errmsg(db.conn)).to_string_lossy();
+            panic!("a generated query doesn't prepare: {msg}: {}", std::str::from_utf8_unchecked(bytes(sql, len)));
+        }
+        db.stmts[k] = st;
+    }
+    db.stmts[k]
+}
+
+/// # Safety: a live statement on a row.
+#[no_mangle]
+pub unsafe extern "C" fn etch_col_i64(st: *mut ffi::sqlite3_stmt, i: i32) -> i64 {
+    if ffi::sqlite3_column_type(st, i) == ffi::SQLITE_NULL {
+        i64::MIN
+    } else {
+        ffi::sqlite3_column_int64(st, i)
+    }
+}
+
+/// A text column, copied into the arena (none: a null pointer). # Safety: live statement, arena, dst.
+#[no_mangle]
+pub unsafe extern "C" fn etch_col_str(st: *mut ffi::sqlite3_stmt, i: i32, arena: *mut Arena, dst: *mut Str) {
+    if ffi::sqlite3_column_type(st, i) == ffi::SQLITE_NULL {
+        *dst = Str::NONE;
+        return;
+    }
+    let p = ffi::sqlite3_column_text(st, i);
+    let n = ffi::sqlite3_column_bytes(st, i) as usize;
+    let copy = (*arena).take(n);
+    std::ptr::copy_nonoverlapping(p, copy, n);
+    *dst = Str { ptr: copy, len: n as i64 };
+}
+
+/// `size` zeroed bytes from the arena, 8-aligned. # Safety: a live arena.
+#[no_mangle]
+pub unsafe extern "C" fn etch_alloc(arena: *mut Arena, size: i64) -> *mut u8 {
+    let p = (*arena).take(size as usize);
+    std::ptr::write_bytes(p, 0, size as usize);
+    p
+}
+
+/// A bump allocator for the records a build reads: chunks never move, so pointers into them stay
+/// valid until `reset`.
+#[derive(Default)]
+pub struct Arena {
+    chunks: Vec<Vec<u64>>,
+    used: usize,
+}
+
+impl Arena {
+    fn take(&mut self, n: usize) -> *mut u8 {
+        let words = n.div_ceil(8).max(1);
+        let fits = self.chunks.last().map(|c| c.len() - self.used >= words).unwrap_or(false);
+        if !fits {
+            self.chunks.push(vec![0u64; words.max(8192)]);
+            self.used = 0;
+        }
+        let c = self.chunks.last_mut().unwrap();
+        let p = c[self.used..].as_mut_ptr() as *mut u8;
+        self.used += words;
+        p
+    }
+    /// Lets go of everything taken (keeps the first chunk).
+    pub fn reset(&mut self) {
+        self.chunks.truncate(1);
+        self.used = 0;
+    }
+}

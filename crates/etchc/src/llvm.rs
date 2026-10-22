@@ -633,6 +633,149 @@ fn register(m: &Model, md: &mut Module, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `etch_load_<f>(ctx, db, key, rec, arena) -> i1`: fills the register's record from SQLite (its
+/// row by id, then each list with its own query, items in an array of the list's bound, allocated
+/// once from the arena). False when the row is gone.
+fn loader(m: &Model, md: &mut Module, name: &str, schema: &Schema, qid: &mut usize) -> Result<String, String> {
+    let params = match m.fragments.get(name) {
+        Some(Decl::Fragment { params, .. }) => params,
+        _ => return Err(format!("no fragment {name}")),
+    };
+    let (root, ent) = match params.first().map(|p| (p.name.clone(), p.ty.strip_opt().clone())) {
+        Some((r, Type::Ref(e))) if params.len() == 1 => (r, e),
+        _ => return Err(format!("fragment {name}: a register's loader needs one row parameter")),
+    };
+    let mut b = String::new();
+    let mut n = 0usize;
+    let mut v = || {
+        n += 1;
+        format!("%l{n}")
+    };
+    let ty = type_name(name, &[]);
+    let _ = writeln!(b, "define i1 @etch_load_{name}(ptr noalias %ctx, ptr noalias %db, i64 %key, ptr noalias %rec, ptr noalias %arena) {{\nentry:");
+    // the record's own fields: its row's id, or a SELECT by id
+    let only_id = schema.fields.iter().all(|(p, _)| p == &root);
+    if only_id {
+        for (i, _) in schema.fields.iter().enumerate() {
+            let p = v();
+            let _ = writeln!(b, "  {p} = getelementptr inbounds {ty}, ptr %rec, i32 0, i32 {i}\n  store i64 %key, ptr {p}");
+        }
+    } else {
+        let paths: Vec<String> = schema.fields.iter().map(|(p, _)| p.clone()).collect();
+        let sel = crate::sql::row_select(m, &ent, &root, &paths)?;
+        let g = md.str_const(sel.sql.as_bytes());
+        *qid += 1;
+        let (st, rc, ok) = (v(), v(), v());
+        let _ = writeln!(b, "  ; {}", sel.sql);
+        let _ = writeln!(b, "  {st} = call ptr @etch_stmt(ptr %db, i64 {qid}, ptr {g}, i64 {})", sel.sql.len());
+        let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr {st}, i32 1, i64 %key)");
+        let _ = writeln!(b, "  {rc} = call i32 @sqlite3_step(ptr {st})\n  {ok} = icmp eq i32 {rc}, 100\n  br i1 {ok}, label %row, label %gone");
+        let _ = writeln!(b, "gone:\n  call i32 @sqlite3_reset(ptr {st})\n  ret i1 false\nrow:");
+        for (i, (_, sh)) in schema.fields.iter().enumerate() {
+            let p = v();
+            let _ = writeln!(b, "  {p} = getelementptr inbounds {ty}, ptr %rec, i32 0, i32 {i}");
+            match sh {
+                Shape::I64 => {
+                    let x = v();
+                    let _ = writeln!(b, "  {x} = call i64 @etch_col_i64(ptr {st}, i32 {i})\n  store i64 {x}, ptr {p}");
+                }
+                Shape::Str => {
+                    let _ = writeln!(b, "  call void @etch_col_str(ptr {st}, i32 {i}, ptr %arena, ptr {p})");
+                }
+            }
+        }
+        let _ = writeln!(b, "  call i32 @sqlite3_reset(ptr {st})");
+    }
+    // each list: its query, bound to the root (its key) or to constants
+    let nf = schema.fields.len();
+    for (k, (list_src, var, items)) in schema.lists.iter().enumerate() {
+        let list_expr = list_expr_of(m, name, list_src).ok_or_else(|| format!("can't find the list {list_src} in {name}"))?;
+        let paths: Vec<String> = items.fields.iter().map(|(p, _)| p.clone()).collect();
+        let scope = Scope::of(params);
+        let sel = crate::sql::list_select(m, &list_expr, var, &paths, &scope)?;
+        if !items.lists.is_empty() {
+            return Err(format!("{name}: a list inside a list's items isn't lowered yet"));
+        }
+        let bound = m.bound_of(&list_expr, &scope).ok_or("an unbounded list")?;
+        let ity = type_name(name, &[k]);
+        let g = md.str_const(sel.sql.as_bytes());
+        *qid += 1;
+        let (st, size, arr) = (v(), v(), v());
+        let _ = writeln!(b, "  ; {}", sel.sql);
+        let _ = writeln!(b, "  {st} = call ptr @etch_stmt(ptr %db, i64 {qid}, ptr {g}, i64 {})", sel.sql.len());
+        for (bi, bind) in sel.binds.iter().enumerate() {
+            match bind {
+                crate::sql::Bind::Path(Expr::Name(r, _)) if *r == root => {
+                    let _ = writeln!(b, "  call i32 @sqlite3_bind_int64(ptr {st}, i32 {}, i64 %key)", bi + 1);
+                }
+                other => return Err(format!("{name}: this query's parameter isn't lowered yet: {other:?}")),
+            }
+        }
+        // the array, sized by the list's bound: allocated once
+        let _ = writeln!(b, "  {size} = getelementptr {ity}, ptr null, i64 {bound}");
+        let sz = v();
+        let _ = writeln!(b, "  {sz} = ptrtoint ptr {size} to i64\n  {arr} = call ptr @etch_alloc(ptr %arena, i64 {sz})");
+        let idx = format!("%li{k}");
+        let _ = writeln!(b, "  {idx} = alloca i64\n  store i64 0, ptr {idx}\n  br label %lhead{k}");
+        let (rc, ok, i, full, it) = (v(), v(), v(), v(), v());
+        let _ = writeln!(b, "lhead{k}:\n  {i} = load i64, ptr {idx}\n  {full} = icmp sge i64 {i}, {bound}\n  br i1 {full}, label %ldone{k}, label %lstep{k}");
+        let _ = writeln!(b, "lstep{k}:\n  {rc} = call i32 @sqlite3_step(ptr {st})\n  {ok} = icmp eq i32 {rc}, 100\n  br i1 {ok}, label %litem{k}, label %ldone{k}");
+        let _ = writeln!(b, "litem{k}:\n  {it} = getelementptr inbounds {ity}, ptr {arr}, i64 {i}");
+        for (fi, (_, sh)) in items.fields.iter().enumerate() {
+            let p = v();
+            let _ = writeln!(b, "  {p} = getelementptr inbounds {ity}, ptr {it}, i32 0, i32 {fi}");
+            match sh {
+                Shape::I64 => {
+                    let x = v();
+                    let _ = writeln!(b, "  {x} = call i64 @etch_col_i64(ptr {st}, i32 {fi})\n  store i64 {x}, ptr {p}");
+                }
+                Shape::Str => {
+                    let _ = writeln!(b, "  call void @etch_col_str(ptr {st}, i32 {fi}, ptr %arena, ptr {p})");
+                }
+            }
+        }
+        let nx = v();
+        let _ = writeln!(b, "  {nx} = add i64 {i}, 1\n  store i64 {nx}, ptr {idx}\n  br label %lhead{k}");
+        let (lp, cnt, l1, l2) = (v(), v(), v(), v());
+        let _ = writeln!(b, "ldone{k}:\n  call i32 @sqlite3_reset(ptr {st})\n  {cnt} = load i64, ptr {idx}");
+        let _ = writeln!(b, "  {l1} = insertvalue %List undef, ptr {arr}, 0\n  {l2} = insertvalue %List {l1}, i64 {cnt}, 1");
+        let _ = writeln!(b, "  {lp} = getelementptr inbounds {ty}, ptr %rec, i32 0, i32 {}\n  store %List {l2}, ptr {lp}", nf + k);
+    }
+    let _ = writeln!(b, "  ret i1 true\n}}\n");
+    Ok(b)
+}
+
+/// The list expression a schema's list came from (its text is the key): found again in the
+/// fragment's inlined template.
+fn list_expr_of(m: &Model, frag: &str, key: &str) -> Option<Expr> {
+    let body = match m.fragments.get(frag) {
+        Some(Decl::Fragment { body, .. }) => body,
+        _ => return None,
+    };
+    fn find(ns: &[TNode], key: &str) -> Option<Expr> {
+        for n in ns {
+            match n {
+                TNode::For(_, l, _, body) => {
+                    if show(l) == key {
+                        return Some(l.clone());
+                    }
+                    if let Some(e) = find(body, key) {
+                        return Some(e);
+                    }
+                }
+                TNode::If(_, a, b) => {
+                    if let Some(e) = find(a, key).or_else(|| find(b, key)) {
+                        return Some(e);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    find(&inline::nodes(m, &body.nodes, &HashMap::new()), key)
+}
+
 const DECLS: &str = r#"%Str = type { ptr, i64 }
 %List = type { ptr, i64 }
 declare void @etch_put(ptr, ptr, i64)
@@ -650,6 +793,13 @@ declare void @etch_replace(ptr, ptr, ptr, i64, ptr, i64, i64)
 declare void @etch_time(ptr, i64, i64, i64)
 declare void @etch_config(ptr, ptr, i64, i64)
 declare i1 @etch_str_eq(ptr, i64, ptr, i64)
+declare ptr @etch_stmt(ptr, i64, ptr, i64)
+declare i64 @etch_col_i64(ptr, i32)
+declare void @etch_col_str(ptr, i32, ptr, ptr)
+declare ptr @etch_alloc(ptr, i64)
+declare i32 @sqlite3_bind_int64(ptr, i32, i64)
+declare i32 @sqlite3_step(ptr)
+declare i32 @sqlite3_reset(ptr)
 "#;
 
 /// The module for these registers, and a Rust header with the same records.
@@ -658,6 +808,13 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
     md.viewer.field("viewer", Shape::I64);
     for r in registers {
         register(m, &mut md, r)?;
+    }
+    // each register's loader, now that its record's layout is settled
+    let mut qid = 0usize;
+    let regs = md.registers.clone();
+    for (name, schema, _, _) in &regs {
+        let f = loader(m, &mut md, name, schema, &mut qid)?;
+        md.funcs.push_str(&f);
     }
     let mut ll = String::new();
     let _ = writeln!(ll, "; generated by etchc from the app's spec: do not edit\n{datalayout}\n{triple}\n");
@@ -699,6 +856,7 @@ fn rust_header(md: &Module) -> String {
     let _ = writeln!(s, "extern \"C\" {{");
     for (name, _, _, _) in &md.registers {
         let _ = writeln!(s, "    pub fn etch_bits_{name}(input: *const In_{name}, viewer: *const Viewer) -> i64;");
+        let _ = writeln!(s, "    pub fn etch_load_{name}(ctx: *const etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, rec: *mut In_{name}, arena: *mut etch_rt::abi::Arena) -> bool;");
         let _ = writeln!(s, "    pub fn etch_build_{name}(ctx: *const etch_rt::abi::Ctx, input: *const In_{name}, viewer: *const Viewer, out: *mut Vec<u8>, tmps: *const *mut Vec<u8>);");
     }
     let _ = writeln!(s, "}}\n");

@@ -5,7 +5,7 @@
 
 use crate::db::{self, Id, User};
 use crate::gen;
-use crate::render::{self, Ctx, MsgData, RoomTokens, SideData, SideDirect};
+use crate::render::{self, Ctx, RoomTokens, SideData, SideDirect};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,7 +64,7 @@ pub struct RoomView {
 }
 
 pub struct MsgFrag {
-    pub data: MsgData,
+    pub id: Id,
     /// each distinct variant the room's members see
     pub variants: Vec<Seg>,
     /// for each member (in `RoomView::members` order), the variant they see
@@ -89,41 +89,17 @@ pub fn precomputable(c: &Connection, room: &db::Room) -> rusqlite::Result<bool> 
     Ok(true)
 }
 
-pub fn build_msg(ctx: &Ctx, _room: Id, _host: &str, _tok: &RoomTokens, data: MsgData, members: &[Id], users: &HashMap<Id, User>) -> MsgFrag {
-    // the variant key and the bytes come from the generated code (etch_bits_message,
-    // etch_build_message): one variant per distinct key among the audience
-    let mut kinds: Vec<i64> = vec![];
-    let mut variants = vec![];
-    let mut by_member = Vec::with_capacity(members.len());
-    for uid in members {
-        let v = match users.get(uid) {
+/// A message's fragment for a room's members: loaded, keyed and built by the generated code.
+pub fn build_msg(c: &Connection, ctx: &Ctx, id: Id, members: &[Id], users: &HashMap<Id, User>) -> Option<MsgFrag> {
+    let viewers: Vec<gen::Viewer> = members
+        .iter()
+        .map(|uid| match users.get(uid) {
             Some(u) => gen::viewer(u),
             None => gen::Viewer { viewer: *uid, viewer_role: etch_rt::abi::Str::NONE },
-        };
-        let k = gen::message_key(&data, &v);
-        let i = match kinds.iter().position(|x| *x == k) {
-            Some(i) => i,
-            None => {
-                kinds.push(k);
-                variants.push(Seg::new(gen::message(&ctx.abi, &data, &v)));
-                kinds.len() - 1
-            }
-        };
-        assert!(i < 256, "at most 256 variants of a message");
-        by_member.push(i as u8);
-    }
-    MsgFrag { data, variants, by_member }
-}
-
-pub fn msg_data(ctx: &Ctx, room: Id, m: db::Message, boosts: Vec<db::Boost>, users: &HashMap<Id, User>) -> MsgData {
-    assert!(!m.has_attachment, "phase 1a: attachments aren't supported");
-    let name = |id: Id| users.get(&id).map(|u| u.name.clone()).unwrap_or_default();
-    MsgData {
-        creator_name: name(m.creator),
-        boosts: boosts.into_iter().map(|b| { let n = name(b.booster); (b, n) }).collect(),
-        edit_token: render::edit_token(ctx, room, m.id),
-        m,
-    }
+        })
+        .collect();
+    let (variants, by_member) = gen::message_variants(c, &ctx.abi, id, &viewers)?;
+    Some(MsgFrag { id, variants: variants.into_iter().map(Seg::new).collect(), by_member })
 }
 
 /// The room's view, from SQLite; None when phase 1a doesn't precompute it.
@@ -139,21 +115,11 @@ pub fn build_room(c: &Connection, ctx: &Ctx, host: &str, users: &HashMap<Id, Use
     let members = db::members(c, room_id)?;
     let tok = render::room_tokens(ctx, room_id);
     assert!(!account.has_logo, "phase 1: an account logo isn't supported");
-    let head = gen::room_head(&ctx.abi, room_id, room.name.as_deref());
-    let tail = gen::room_tail(&ctx.abi, room_id);
+    let _ = host;
+    let head = gen::room_head(c, &ctx.abi, room_id).expect("the room");
+    let tail = gen::room_tail(c, &ctx.abi, room_id).expect("the room");
     let msgs = db::last_messages(c, room_id)?;
-    let ids: Vec<Id> = msgs.iter().map(|m| m.id).collect();
-    let mut boosts: HashMap<Id, Vec<db::Boost>> = HashMap::new();
-    for b in db::boosts(c, &ids)? {
-        boosts.entry(b.message).or_default().push(b);
-    }
-    let frags = msgs
-        .into_iter()
-        .map(|m| {
-            let bs = boosts.remove(&m.id).unwrap_or_default();
-            Arc::new(build_msg(ctx, room_id, host, &tok, msg_data(ctx, room_id, m, bs, users), &members, users))
-        })
-        .collect();
+    let frags = msgs.iter().filter_map(|m| build_msg(c, ctx, m.id, &members, users).map(Arc::new)).collect();
     let headers = format!("Content-Type: text/html; charset=utf-8\r\nSet-Cookie: last_room={room_id}; Path=/; Max-Age=31536000\r\nVary: Accept-Encoding\r\n").into_bytes();
     let tok_seg = Arc::new(Seg::new(tok.plain.as_bytes().to_vec()));
     Ok(Some(RoomView { id: room_id, members, head: Arc::new(Seg::new(head)), tail: Arc::new(Seg::new(tail)), tok, tok_seg, headers, msgs: frags }))

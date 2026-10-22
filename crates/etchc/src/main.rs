@@ -9,6 +9,7 @@ mod inline;
 mod llvm;
 mod netlist;
 mod parse;
+mod sql;
 #[cfg(test)]
 mod tests;
 

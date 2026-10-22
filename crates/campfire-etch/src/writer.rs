@@ -96,8 +96,10 @@ pub fn run(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Recei
             let rid = m.room;
             touched_rooms.insert(rid);
             if let Some(view) = next.rooms.get(&rid).cloned() {
-                let data = state::msg_data(&ctx, rid, m, vec![], &next.users);
-                let frag = Arc::new(state::build_msg(&ctx, rid, &next.host, &view.tok, data, &view.members, &next.users));
+                let frag = match state::build_msg(&c, &ctx, m.id, &view.members, &next.users) {
+                    Some(f) => Arc::new(f),
+                    None => continue,
+                };
                 let mut msgs = view.msgs.clone();
                 msgs.push(frag);
                 if msgs.len() > 40 {

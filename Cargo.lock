@@ -257,6 +257,7 @@ dependencies = [
  "httpdate",
  "jiff",
  "mio",
+ "rusqlite",
  "sha2",
  "socket2",
 ]
