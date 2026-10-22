@@ -6,3 +6,4 @@ bench/*.log
 tools/loadgen
 data/campfire/
 data/campfire-golden/
+tools/mixload/target/

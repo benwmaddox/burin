@@ -1,0 +1,22 @@
+[package]
+name = "mixload"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "The mixed benchmark's load: many people reading many rooms at different rates, some posting"
+
+# standalone: bench tooling, not part of etch's workspace
+[workspace]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+hdrhistogram = { version = "7", default-features = false }
+serde_json = "1"
+flate2 = "1"
+
+[profile.release]
+debug = false

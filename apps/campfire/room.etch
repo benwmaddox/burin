@@ -24,9 +24,8 @@ fn original_room(): Room = first(Room order by .created, .seq)
 
 screen room(room: Room) at "/rooms/{room}"
   require member(viewer, room) else go "/"
-  require not (room == original_room() and count(Message where .room == room) <= 40) else unsupported   // phase 2: the invitation
   cookie last_room = text(room.id)
-<<<{{room_head(room)}}{{for m in room_messages(room)}}{{message(m)}}{{end}}{{room_tail(room)}}{{sidebar(room)}}{{page_end()}}>>>
+<<<{{room_head(room)}}{{invitation(room)}}<div class="messages" data-live-list>{{for m in room_messages(room)}}{{message(m)}}{{end}}{{room_tail(room)}}{{sidebar(room)}}{{page_end()}}>>>
 
 fragment icon(name: Text) <<<<img src="{{asset(name)}}" width="20" height="20" aria-hidden="true" class="colorize--black">>>>
 
@@ -41,7 +40,7 @@ fragment room_head(room: Room) varies by viewer <<<\
 <button type="button" class="btn" hidden data-push-subscribe="/_do/subscribe_push" data-push-params="endpoint,p256dh_key,auth_key" data-push-key="{{config.vapid_public}}">\
 {{icon("notification-bell-alert.svg")}}<span data-push-label class="for-screen-reader">Notification settings for this room</span></button></nav>
 
-<main id="main-content"><section class="message-area" id="message-area"><div class="messages" data-live-list>>>>
+<main id="main-content"><section class="message-area" id="message-area">>>>
 
 fragment message(m: Message) varies by viewer, viewer.role <<<\
 <div id="message_{{m.client_id}}" class="message message--formatted{{if m.creator == viewer}} message--me{{end}}" data-mentioned="false" \
@@ -138,3 +137,18 @@ fragment sidebar(page_room: Room) per viewer <<<\
 fragment page_end() <<<\
 <a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="{{asset("campfire-icon.png")}}" alt="Campfire logo"></a>
 </body></html>>>>
+
+// The account's first room, while it's new (40 messages or fewer): the invitation to join
+// (rooms/show/_invitation.html.erb). Its own small register: a post re-reads at most 41 ids.
+fragment invitation(room: Room) <<<\
+{{if room.id == first(Room order by .created, .seq).id and count(first_messages(room)) <= 40}}\
+<div class="message message--formatted txt-align-center center" id="system_welcome"><div class="message__body center">\
+<div class="message__body-content position-relative"><img src="{{asset("campfire-icon.png")}}" width="64" height="64" class="account-logo center margin-block-end" alt="">\
+<div class="flex align-center gap"><div class="flex flex-column"><strong>Welcome to Campfire</strong>\
+<span>To invite people to chat, share the join link below.</span></div></div>\
+<div class="flex flex-column align-center gap"><div class="flex flex-column gap full-width"><strong class="invite-label">Share to invite more people</strong>\
+<div class="flex align-center gap input input--actor fill-white">{{icon("person-add.svg")}}\
+<input type="text" class="input" readonly aria-label="Share to invite more people" value="{{"http://" + config.host + "/join/" + first(Account).join_code}}"></div></div>\
+<div class="flex align-center gap"><button type="button" class="btn" onclick="navigator.clipboard.writeText({{json("http://" + config.host + "/join/" + first(Account).join_code)}})">\
+{{icon("copy-paste.svg")}}<span class="for-screen-reader">Copy join link</span></button></div></div>\
+</div></div></div>{{end}}>>>

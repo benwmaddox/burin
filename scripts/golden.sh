@@ -3,7 +3,7 @@
 # gzip), and compares them byte for byte with etch's expected pages (data/golden-pages).
 #   bash /mnt/d/code/etch/scripts/golden.sh [--verify]
 set -e
-BIN=${ETCH_BIN:-$HOME/etch-target/release/campfire-hand}
+BIN=${ETCH_BIN:-$HOME/hw/etch-gen-release}
 G=/mnt/d/code/etch/data/golden-pages
 OUT=/tmp/etch-golden; mkdir -p $OUT
 PORT=13790

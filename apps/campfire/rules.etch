@@ -79,6 +79,9 @@ action unboost(boost: Boost) {
 // A room's members by when they joined Campfire (a direct room's title names them).
 view members_by_user(r: Room) = Membership where .room == r order by .user.created, .user.seq limit 20
 
+// A room's first 41 messages: enough to know whether it has more than 40 (the invitation).
+view first_messages(r: Room) = Message where .room == r order by .created, .seq limit 41
+
 // A room's name as a viewer sees it: a direct room is named for its other members (or, with
 // nobody else in it, for the viewer: then its only member). The viewer conditions are checked
 // per member when the page is built: variant bits, no per-viewer copy of the page.

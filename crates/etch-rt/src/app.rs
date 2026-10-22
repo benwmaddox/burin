@@ -269,6 +269,11 @@ pub struct Stats {
     /// kept pages the scrubber compared with a fresh build, and the ones it found different (and
     /// rebuilt): a missed edge
     pub scrubbed: AtomicU64,
+    /// verified pages a concurrent write made incomparable (not counted as verified)
+    pub verify_raced: AtomicU64,
+    /// the writer's commits, and the commits its published snapshot includes
+    pub commits: AtomicU64,
+    pub published: AtomicU64,
     pub scrub_fixed: AtomicU64,
 }
 
@@ -365,6 +370,8 @@ impl<G: Glue> App<G> {
             Some(t) => t,
             None => return false,
         };
+        // (verifying: the writer's commits and publishes before the page, to tell a race from a miss)
+        let marks = if self.verify { (self.stats.commits.load(Ordering::SeqCst), self.stats.published.load(Ordering::SeqCst)) } else { (0, 0) };
         let snap = self.snap.load_full();
         if req.host != self.host.as_bytes() {
             return false;
@@ -421,7 +428,7 @@ impl<G: Glue> App<G> {
             b.extend_from_slice(b"\r\n");
         });
         if self.verify {
-            self.check(s, key, uid, out, body_len, req.gzip, &inst.headers);
+            self.check(s, key, uid, out, body_len, req.gzip, marks);
         }
         out.hold(snap);
         self.stats.fast.fetch_add(1, Ordering::Relaxed);
@@ -429,7 +436,7 @@ impl<G: Glue> App<G> {
     }
 
     /// The golden-model check: the fast page must equal a fresh build from SQLite.
-    fn check(&self, s: usize, key: i64, uid: i64, out: &Out, body_len: usize, gzip: bool, _headers: &[u8]) {
+    fn check(&self, s: usize, key: i64, uid: i64, out: &Out, body_len: usize, gzip: bool, (c0, p0): (u64, u64)) {
         let all = out.to_vec();
         let mut fast = all[all.len() - body_len..].to_vec();
         if gzip {
@@ -441,6 +448,12 @@ impl<G: Glue> App<G> {
             fast = plain;
         }
         let fresh = self.with_reader(|c| self.fresh(c, s, key, uid));
+        // a write committed while this page was served or built afresh (or committed but not yet
+        // published when it was served): the two can't be compared
+        if c0 != p0 || self.stats.commits.load(Ordering::SeqCst) != c0 {
+            self.stats.verify_raced.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         self.stats.verified.fetch_add(1, Ordering::Relaxed);
         match fresh {
             Some((page, _)) if page == fast => {}
@@ -489,8 +502,8 @@ impl<G: Glue> App<G> {
             let st = &self.stats;
             let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
             let s = format!(
-                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"patched":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"version":{}}}"#,
-                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.patched), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), self.snap.load().version
+                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"patched":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"version":{}}}"#,
+                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.patched), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced), self.snap.load().version
             );
             return respond(out, 200, "application/json", &[], s.as_bytes());
         }
@@ -760,6 +773,7 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             }
         }
         tx.commit().expect("commit");
+        stats.commits.fetch_add(1, Ordering::SeqCst);
         let t_commit = t0.elapsed();
         let mut next = cur.next();
         let mut reload: HashSet<(usize, i64)> = HashSet::new();
@@ -1034,6 +1048,7 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             }
         }
         snap.store(Arc::new(next));
+        stats.published.store(stats.commits.load(Ordering::SeqCst), Ordering::SeqCst);
         // a slow batch, logged with where its time went (the bench keeps the server's log)
         let took = t0.elapsed();
         if took.as_millis() >= 20 {

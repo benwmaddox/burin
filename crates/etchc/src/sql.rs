@@ -320,6 +320,10 @@ pub fn list_select(m: &Model, list: &Expr, fields: &[String], scope: &Scope) -> 
         let p: Vec<String> = f.split('.').skip(1).map(String::from).filter(|s| s != "id").collect();
         cols.push(tx.joins.column(m, "t0", &ent, &p)?);
     }
+    // a list only counted reads no field: its rows' ids
+    if cols.is_empty() {
+        cols.push("t0.id".into());
+    }
     let w = match &qy.filter {
         Some(f) => format!(" WHERE {}", tx.expr(f)?),
         None => String::new(),

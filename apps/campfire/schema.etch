@@ -47,6 +47,7 @@ entity Boost {
 
 entity Account {
   name: Text?
+  join_code: Text
   logo: Text?
   restrict_room_creation: Bool
 }
