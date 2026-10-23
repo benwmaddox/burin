@@ -107,6 +107,14 @@ impl<'a> Model<'a> {
         Ok(m)
     }
 
+    /// An `extern fn`'s name in the C ABI.
+    pub fn extern_symbol(&self, f: &str) -> String {
+        match self.externs.get(f) {
+            Some(Decl::Extern { symbol, .. }) => symbol.clone(),
+            _ => f.to_string(),
+        }
+    }
+
     pub fn viewer_entity(&self) -> Option<&str> {
         match self.viewer {
             Some(Decl::Viewer { entity, .. }) => Some(entity),

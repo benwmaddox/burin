@@ -337,6 +337,24 @@ crate). `apps/notes` and `scripts/notes-check.sh` use every form.
   zero allocations for its pages (C's allocations aren't even counted by the hot-path test).
 - **Not yet:** linking system libraries (`-lfoo`), Lists and records across the ABI.
 
+## The standard library (23 Oct 2026)
+
+Every app has `lang/std.etch`: text (`length`, `contains`, `starts_with`, `ends_with`,
+`index_of`, `trim`, `truncate`, `slice`, `replace_all`, `repeat`, `pad_start`, `pad_end`,
+`capitalize`, `plural`), numbers (`decimal`, `percent`, `round_to`) and time (`format_time`,
+`weekday`). Each is Rust in the runtime (`crates/etch-rt/src/stdlib.rs`), called as an external
+function, so adding one is a declaration and a Rust function, not compiler work. All are pure.
+
+- **The same answer everywhere:** text is counted in characters, as SQLite counts it. The ten
+  with a SQL form (`lang/std_sql.rs`, included by the compiler and by the runtime's test) also
+  run inside queries (`Note where length(.body) > 30`); a test checks each form against its Rust
+  on thousands of inputs (multi-byte text, emoji, tabs, empty text, negative counts). A function
+  without a SQL form can't run on a query's rows.
+- **A template's own names:** `{{let t = trim(n.title)}}` names a value for the rest of its block
+  (and blocks inside it); the parser puts the value in place, so nothing after it changes.
+- **Not yet:** lists as values (`split`, `join` with a separator, sums over a list), records,
+  Decimal as a type.
+
 ## Lessons kept from crudspec and AgentLang
 
 - **The whole app is one program, checked as a whole** (crudspec): names, types, permissions,

@@ -109,3 +109,17 @@ mod tests {
         assert_eq!(grouped(i64::MIN + 1), "-9,223,372,036,854,775,807");
     }
 }
+
+/// `format_time`: strftime's patterns in the server's time zone; None for a pattern jiff refuses.
+pub fn format(ms: i64, pattern: &str) -> Option<String> {
+    let z = Timestamp::from_millisecond(ms).ok()?.to_zoned(zone().clone());
+    jiff::fmt::strtime::format(pattern, &z).ok()
+}
+
+/// `weekday`: 0 Monday to 6 Sunday, in the server's time zone.
+pub fn weekday(ms: i64) -> i64 {
+    match Timestamp::from_millisecond(ms) {
+        Ok(t) => t.to_zoned(zone().clone()).weekday().to_monday_zero_offset() as i64,
+        Err(_) => i64::MIN,
+    }
+}

@@ -338,7 +338,8 @@ impl Parser {
                 let params = self.params()?;
                 self.expect(":")?;
                 let ret = self.ty()?;
-                Ok(Decl::Extern { name, params, ret, effect, span })
+                let symbol = if self.eat_kw("from") { self.string()? } else { name.clone() };
+                Ok(Decl::Extern { name, params, ret, effect, symbol, span })
             }
             "fn" => {
                 let name = self.ident()?;
@@ -846,6 +847,10 @@ fn parse_template(raw: &str, span: Span) -> R<Vec<TNode>> {
         For(String, Expr, Vec<TNode>),
     }
     let mut stack = vec![Frame::Root(vec![])];
+    // `{{let x = e}}`: names for the rest of the block they're in (and blocks inside it), put in
+    // place where they're used: the passes after parsing never see them. A `for`'s variable
+    // hides a name of the same name (None).
+    let mut lets: Vec<Vec<(String, Option<Expr>)>> = vec![vec![]];
     fn push(stack: &mut [Frame], n: TNode) {
         match stack.last_mut().unwrap() {
             Frame::Root(v) | Frame::For(_, _, v) => v.push(n),
@@ -863,16 +868,32 @@ fn parse_template(raw: &str, span: Span) -> R<Vec<TNode>> {
             Piece::Hole(code, line) => {
                 let sp = Span { file: span.file, line };
                 let herr = |msg: String| Error { span: sp, msg };
-                if let Some(c) = code.strip_prefix("if ") {
+                if let Some(c) = code.strip_prefix("let ") {
                     let mut p = parse_code(c, sp)?;
-                    let e = p.expr()?;
+                    let name = p.ident()?;
+                    p.expect("=")?;
+                    let e = with_lets(&p.expr()?, &lets);
+                    if p.peek() != &Tok::Eof {
+                        return p.err("unexpected text after the value in {{let}}");
+                    }
+                    lets.last_mut().unwrap().push((name, Some(e)));
+                } else if let Some(c) = code.strip_prefix("if ") {
+                    let mut p = parse_code(c, sp)?;
+                    let e = with_lets(&p.expr()?, &lets);
                     stack.push(Frame::If(e, vec![], None));
+                    lets.push(vec![]);
                 } else if code == "else" {
                     match stack.last_mut() {
                         Some(Frame::If(_, _, b)) if b.is_none() => *b = Some(vec![]),
                         _ => return Err(herr("{{else}} outside an {{if}}".into())),
                     }
+                    // the then-branch's names end with it
+                    lets.last_mut().unwrap().clear();
                 } else if code == "end" {
+                    lets.pop();
+                    if lets.is_empty() {
+                        return Err(herr("{{end}} with nothing open".into()));
+                    }
                     let f = stack.pop().unwrap();
                     let n = match f {
                         Frame::If(c, a, b) => TNode::If(c, a, b.unwrap_or_default()),
@@ -887,14 +908,15 @@ fn parse_template(raw: &str, span: Span) -> R<Vec<TNode>> {
                     let mut p = parse_code(c, sp)?;
                     let v = p.ident()?;
                     p.expect_kw("in")?;
-                    let e = p.expr()?;
+                    let e = with_lets(&p.expr()?, &lets);
                     if p.peek() != &Tok::Eof {
                         return p.err("unexpected text after the list in {{for}}");
                     }
+                    lets.push(vec![(v.clone(), None)]);
                     stack.push(Frame::For(v, e, vec![]));
                 } else {
                     let mut p = parse_code(&code, sp)?;
-                    let e = p.expr()?;
+                    let e = with_lets(&p.expr()?, &lets);
                     if p.peek() != &Tok::Eof {
                         return p.err(format!("unexpected {} in a hole", show(p.peek())));
                     }
@@ -906,6 +928,41 @@ fn parse_template(raw: &str, span: Span) -> R<Vec<TNode>> {
     match stack.pop() {
         Some(Frame::Root(v)) if stack.is_empty() => Ok(v),
         _ => Err(Error { span, msg: "an {{if}} or {{for}} isn't closed with {{end}}".into() }),
+    }
+}
+
+/// `e` with the template's `{{let}}` names in scope put in place (the innermost first).
+fn with_lets(e: &Expr, lets: &[Vec<(String, Option<Expr>)>]) -> Expr {
+    let find = |n: &str| lets.iter().rev().flat_map(|f| f.iter().rev()).find(|(k, _)| k == n).map(|(_, v)| v.clone());
+    subst_names(e, &|n| find(n).flatten())
+}
+
+/// `e` with each name `f` gives a value for replaced by it (also inside queries).
+fn subst_names(e: &Expr, f: &dyn Fn(&str) -> Option<Expr>) -> Expr {
+    let go = |x: &Expr| subst_names(x, f);
+    let q = |q: &Query| Query {
+        source: match &q.source {
+            Source::Expr(x) => Source::Expr(go(x)),
+            s => s.clone(),
+        },
+        filter: q.filter.as_ref().map(go),
+        order: q.order.iter().map(|(k, d)| (go(k), *d)).collect(),
+        limit: q.limit.as_ref().map(go),
+        window_last: q.window_last.as_ref().map(go),
+        span: q.span,
+    };
+    match e {
+        Expr::Name(n, _) => f(n).unwrap_or_else(|| e.clone()),
+        Expr::Field(o, n, s) => Expr::Field(Box::new(go(o)), n.clone(), *s),
+        Expr::Call(n, a, s) => Expr::Call(n.clone(), a.iter().map(go).collect(), *s),
+        Expr::Bin(op, l, r, s) => Expr::Bin(op.clone(), Box::new(go(l)), Box::new(go(r)), *s),
+        Expr::Not(x, s) => Expr::Not(Box::new(go(x)), *s),
+        Expr::If(c, a, b, s) => Expr::If(Box::new(go(c)), Box::new(go(a)), Box::new(go(b)), *s),
+        Expr::List(i, s) => Expr::List(i.iter().map(go).collect(), *s),
+        Expr::Record(fs, s) => Expr::Record(fs.iter().map(|(n, v)| (n.clone(), go(v))).collect(), *s),
+        Expr::Query(x) => Expr::Query(Box::new(q(x))),
+        Expr::Comp(n, x, qy, s) => Expr::Comp(n.clone(), Box::new(go(x)), Box::new(q(qy)), *s),
+        other => other.clone(),
     }
 }
 
@@ -940,11 +997,22 @@ pub fn parse_app(dir: &std::path::Path) -> Result<App, (Vec<String>, Error)> {
         .filter(|p| p.extension().map(|x| x == "etch").unwrap_or(false))
         .collect();
     paths.sort();
-    let files: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    let mut files: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
     let mut decls = vec![];
     for (i, p) in paths.iter().enumerate() {
         let src = std::fs::read_to_string(p).map_err(|e| (files.clone(), Error { span: Span { file: i as u32, line: 0 }, msg: e.to_string() }))?;
         decls.extend(parse_file(&src, i as u32).map_err(|e| (files.clone(), e))?);
     }
+    files.push(PRELUDE_NAME.into());
+    decls.extend(prelude(files.len() as u32 - 1).map_err(|e| (files.clone(), e))?);
     Ok(App { files, decls })
+}
+
+/// The standard library every app has (lang/std.etch, built into the compiler).
+pub const PRELUDE: &str = include_str!("../../../lang/std.etch");
+pub const PRELUDE_NAME: &str = "lang/std.etch";
+
+/// The standard library's declarations, as file `file`.
+pub fn prelude(file: u32) -> R<Vec<Decl>> {
+    parse_file(PRELUDE, file)
 }

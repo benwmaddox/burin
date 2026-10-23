@@ -399,12 +399,12 @@ impl<'a, 'b> Act<'a, 'b> {
                 if matches!(ret, Type::Text) {
                     let (o, d) = (self.v(), self.v());
                     let sep = if list.is_empty() { "" } else { ", " };
-                    self.line(&format!("{o} = call ptr @etch_w_ext_out(ptr %w)\n  call void @{f}({}{sep}ptr {o})", list.join(", ")));
+                    self.line(&format!("{o} = call ptr @etch_w_ext_out(ptr %w)\n  call void @{}({}{sep}ptr {o})", self.m.extern_symbol(f), list.join(", ")));
                     self.line(&format!("{d} = alloca %Str\n  call void @etch_w_ext_take(ptr %w, ptr {d})"));
                     Ok((d, Shape::Str))
                 } else {
                     let r = self.v();
-                    self.line(&format!("{r} = call i64 @{f}({})", list.join(", ")));
+                    self.line(&format!("{r} = call i64 @{}({})", self.m.extern_symbol(f), list.join(", ")));
                     Ok((r, Shape::I64))
                 }
             }

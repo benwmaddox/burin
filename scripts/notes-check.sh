@@ -62,6 +62,26 @@ for i, ((title, body), (s, w, serial, h2, live, count, long_)) in enumerate(zip(
     want(f'note {i}: slug of title and body (C, in the cached piece)', live, html.escape(slug(title + ' ' + body, 24)))
     want(f'note {i}: word count (C, in the cached piece)', int(count), words(body))
     want(f'note {i}: long (a C flag in an if)', bool(long_), words(body) > 5)
+# the standard library in the page, against Python's
+import datetime
+std = re.findall(r'<li data-len="(\d+)" data-trunc="([^"]*)" data-cap="([^"]*)" data-dec="([^"]*)" data-pct="(-?\d+)" data-round="(-?\d+)" data-plural="([^"]*)" data-pad="([^"]*)" data-slice="([^"]*)" data-at="(-?\d+)" data-rep="([^"]*)" data-year="(\d+)" data-starts="(yes|no)"></li>', page)
+want('std: a row per note', len(std), 2)
+def trunc(t, n): return t[:n] + '…' if len(t) > n else t
+def round_to(n, step):  # halves away from zero (n >= 0 here)
+    r = n % step
+    return n - r + step if r * 2 >= step else n - r
+for i, ((title, body), row) in enumerate(zip(notes, std)):
+    t = title.strip(' \t\n\r'); w = words(body)
+    exp = (str(len(t)), html.escape(trunc(body, 12)), html.escape(t.lower()[:1].upper() + t.lower()[1:]),
+           f"{w * 125 // 100}.{w * 125 % 100:02d}", str(w * 100 // 40), str(round_to(w, 5)),
+           f"{w} {'word' if w == 1 else 'words'}", str(i + 1).zfill(4), html.escape(t[1:4]), str(t.find('o')),
+           html.escape(t.replace(' ', '_')), str(datetime.date.today().year), 'yes' if t.startswith('Hello') else 'no')
+    for name, g, e in zip(['length', 'truncate', 'capitalize', 'decimal', 'percent', 'round_to', 'plural', 'pad_start', 'slice', 'index_of', 'replace_all', 'format_time', 'starts_with'], row, exp):
+        want(f'std note {i}: {name}', g, e)
+wordy = re.search(r'<ul class="wordy">(.*?)</ul>', page).group(1)
+ids = re.findall(r'<li id="note-(\d+)"', page)
+exp_ids = [ids[i] for i, (t, b) in enumerate(notes) if len(b) > 30 and 'words' in b]
+want('std in SQL: the wordy view (length and contains in its WHERE)', re.findall(r'<li>(\d+)</li>', wordy), exp_ids)
 me = re.search(r'<p class="me">(.*?) has (\d+) word\(s\)</p>', page)
 want('per viewer: capitals (Rust)', me and me.group(1), 'ADA LOVELACE')
 want('per viewer: word count (C)', me and int(me.group(2)), 2)

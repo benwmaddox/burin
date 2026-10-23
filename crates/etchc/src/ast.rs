@@ -208,7 +208,9 @@ pub enum Decl {
     /// `extern "C"`), from `apps/<app>/ext/`. It must be pure (the same result for the same
     /// arguments, no effects): cached pieces call it once and keep the result. `extern effect fn`
     /// may have effects: only actions call it (on the writer, not undone if the action fails).
-    Extern { name: String, params: Vec<Param>, ret: Type, effect: bool, span: Span },
+    /// `from "symbol"`: its name in the C ABI (else its own name); the standard library's are
+    /// the runtime's `etch_std_…`.
+    Extern { name: String, params: Vec<Param>, ret: Type, effect: bool, symbol: String, span: Span },
     View { name: String, params: Vec<Param>, query: Query, span: Span },
     Const { name: String, value: Expr, span: Span },
     /// `per viewer`: keyed by the viewer (its memory per viewer is reported)

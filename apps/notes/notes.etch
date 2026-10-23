@@ -31,10 +31,12 @@ extern fn shout(text: Text): Text
 extern effect fn next_serial(): Int
 
 view notes(u: User) = Note where .owner == u order by .created, .seq limit 50
+// the standard library in SQL: notes with long bodies that mention "words"
+view wordy(u: User) = Note where .owner == u and length(.body) > 30 and contains(.body, "words") order by .created, .seq limit 50
 
 screen notes_page(u: User) at "/users/{u}/notes"
   require exists(Session where .user == viewer and .user == u) else go "/"
-<<<{{top()}}{{for n in notes(u)}}{{note(n)}}{{end}}{{me()}}>>>
+<<<{{top()}}{{for n in notes(u)}}{{note(n)}}{{end}}{{std_list(u)}}{{me()}}>>>
 
 fragment top() <<<<!doctype html><html><head><meta charset="utf-8"><title>Notes</title></head><body><ol>
 >>>
@@ -44,6 +46,10 @@ fragment note(n: Note) <<<\
 <li id="note-{{n.id}}" data-slug="{{n.slug}}" data-words="{{n.words}}" data-serial="{{n.serial}}">\
 <h2>{{shout(n.title)}}</h2><p class="live-slug">{{slug(n.title + " " + n.body, 24)}}</p>\
 <p class="count">{{word_count(n.body)}}</p>{{if is_long(n.body, 5)}}<p class="long">long</p>{{end}}</li>
+>>>
+
+// the standard library in a page (and a template's own names)
+fragment std_list(u: User) <<<</ol><ul class="std">{{for n in notes(u)}}{{let t = trim(n.title)}}{{let w = n.words}}<li data-len="{{length(t)}}" data-trunc="{{truncate(n.body, 12)}}" data-cap="{{capitalize(lower(t))}}" data-dec="{{decimal(w * 125, 2)}}" data-pct="{{percent(w, 40)}}" data-round="{{round_to(w, 5)}}" data-plural="{{w}} {{plural(w, "word", "words")}}" data-pad="{{pad_start(text(n.serial), 4, "0")}}" data-slice="{{slice(t, 1, 3)}}" data-at="{{index_of(t, "o")}}" data-rep="{{replace_all(t, " ", "_")}}" data-year="{{format_time(n.created, "%Y")}}" data-starts="{{if starts_with(t, "Hello")}}yes{{else}}no{{end}}"></li>{{end}}</ul><ul class="wordy">{{for n in wordy(u)}}<li>{{n.id}}</li>{{end}}</ul><ol>
 >>>
 
 // per viewer: rendered for each request

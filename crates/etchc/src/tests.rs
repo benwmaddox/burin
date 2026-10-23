@@ -12,10 +12,16 @@ view recent() = Post order by .created window 20 last
 view all_posts() = Post order by .created
 "#;
 
+/// A spec's app, with the standard library every app has.
+fn app_of(src: &str) -> Result<App, String> {
+    let mut decls = parse::parse_file(src, 0).map_err(|e| format!("parse: {}", e.msg))?;
+    decls.extend(parse::prelude(1).map_err(|e| format!("the prelude: {}", e.msg))?);
+    Ok(App { files: vec!["t.etch".into(), parse::PRELUDE_NAME.into()], decls })
+}
+
 fn verdict(extra: &str) -> Result<(), String> {
     let src = format!("{BASE}\n{extra}");
-    let decls = parse::parse_file(&src, 0).map_err(|e| format!("parse: {}", e.msg))?;
-    let app = App { files: vec!["t.etch".into()], decls };
+    let app = app_of(&src)?;
     let m = check::Model::new(&app).map_err(|e| e.msg)?;
     check::check(&m).map_err(|e| e.msg)
 }
@@ -81,8 +87,7 @@ fn a_delete_after_its_references_go_passes() {
 /// The registers' lowering of a spec (the BASE, a fragment): its error, if any.
 fn lowered(extra: &str, frag: &str) -> Result<(), String> {
     let src = format!("{BASE}\n{extra}");
-    let decls = parse::parse_file(&src, 0).map_err(|e| format!("parse: {}", e.msg))?;
-    let app = App { files: vec!["t.etch".into()], decls };
+    let app = app_of(&src)?;
     let m = check::Model::new(&app).map_err(|e| e.msg)?;
     check::check(&m).map_err(|e| e.msg)?;
     crate::llvm::module(&m, &[frag], "", "").map(|_| ())
@@ -266,4 +271,34 @@ fn an_extern_with_the_wrong_arguments_is_refused() {
     let e = verdict(&format!(r#"{EXTERNS}
 fragment p() <<<{{{{for p in recent()}}}}{{{{slug(p.body)}}}}{{{{end}}}}>>>"#)).unwrap_err();
     assert!(e.contains("arguments") || e.contains("takes"), "{e}");
+}
+
+#[test]
+fn a_template_let_names_a_value_for_the_rest_of_its_block() {
+    let decls = parse::parse_file(r#"fragment f(p: Post) <<<{{let n = p.body}}{{if present(n)}}{{let m = upper(n)}}<b>{{m}}</b>{{end}}{{n}}{{for n in recent()}}{{n.body}}{{end}}>>>"#, 0).ok().unwrap();
+    let crate::ast::Decl::Fragment { body, .. } = &decls[0] else { panic!() };
+    let shown = format!("{:?}", body.nodes);
+    // the names are gone: each use is the value it named, and the for's own `n` is its row
+    assert!(!shown.contains(r#"Name("m""#), "{shown}");
+    assert!(shown.contains(r#"Call("upper", [Field(Name("p""#), "{shown}");
+    assert!(shown.contains(r#"Field(Name("n", Span { file: 0, line: 1 }), "body""#), "{shown}");
+    // and the template checks
+    verdict(r#"fragment f(p: Post) <<<{{let n = p.body}}{{if present(n)}}{{let m = upper(n)}}<b>{{m}}</b>{{end}}{{n}}>>>"#).unwrap();
+}
+
+#[test]
+fn the_standard_library_is_in_every_app() {
+    verdict(r#"fragment p() <<<{{for p in recent()}}{{if contains(p.body, "x") and length(p.body) > 3}}{{truncate(p.body, 10)}} {{plural(length(p.body), "char", "chars")}}{{end}}{{end}}>>>"#).unwrap();
+    let e = verdict("extern fn length(t: Text): Int").unwrap_err();
+    assert!(e.contains("declared twice"), "{e}");
+}
+
+#[test]
+fn a_standard_function_with_a_sql_form_runs_in_a_query() {
+    lowered(r#"view long_ones() = Post where length(.body) > 3 and contains(.body, "x") order by .created window 20 last
+fragment f() <<<{{for p in long_ones()}}<p>{{p.body}}</p>{{end}}>>>"#, "f").unwrap();
+    // one without a SQL form, on the query's rows, can't
+    let e = lowered(r#"view padded() = Post where pad_start(.body, 3, "0") == "007" order by .created window 20 last
+fragment f() <<<{{for p in padded()}}<p>{{p.body}}</p>{{end}}>>>"#, "f").unwrap_err();
+    assert!(e.contains("can't run inside a query"), "{e}");
 }

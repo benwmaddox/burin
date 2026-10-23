@@ -305,6 +305,16 @@ impl<'a> Tx<'a> {
             }
             // an external function of values from outside the query (an action's arguments): the
             // caller computes it and binds the result; one of the rows' fields can't reach it
+            // a standard function with a SQL form (lang/std_sql.rs): SQLite runs it
+            Expr::Call(f, args, _) if self.m.externs.contains_key(f) && std_sql(self.m, f).is_some() => {
+                let mut form = std_sql(self.m, f).unwrap().to_string();
+                // (the highest first: $1 isn't a prefix of $10)
+                for (i, a) in args.iter().enumerate().rev() {
+                    let x = self.expr(a)?;
+                    form = form.replace(&format!("${}", i + 1), &x);
+                }
+                form
+            }
             Expr::Call(f, args, _) if self.m.externs.contains_key(f) => {
                 if args.iter().any(reads_row) {
                     return Err(format!("`{f}` is an external function: it can't run inside a query on the query's rows (SQLite runs those); use it in a template or an action, or keep its result in a field"));
@@ -671,5 +681,16 @@ fn reads_row(e: &Expr) -> bool {
         Expr::If(c, a, b, _) => reads_row(c) || reads_row(a) || reads_row(b),
         Expr::Call(_, a, _) => a.iter().any(reads_row),
         _ => false,
+    }
+}
+
+include!("../../../lang/std_sql.rs");
+
+/// A standard library function's SQL form (only the prelude's: an app's own extern of the same
+/// name couldn't exist, it would be declared twice).
+fn std_sql(m: &Model, f: &str) -> Option<&'static str> {
+    match m.externs.get(f) {
+        Some(Decl::Extern { symbol, .. }) if symbol.starts_with("etch_std_") => STD_SQL.iter().find(|(n, _)| *n == f).map(|(_, s)| *s),
+        _ => None,
     }
 }

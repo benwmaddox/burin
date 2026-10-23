@@ -555,7 +555,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 let (list, n) = self.extern_args(roots, f, a)?;
                 let v = self.v();
-                self.line(&format!("{v} = call i64 @{f}({list})"));
+                self.line(&format!("{v} = call i64 @{}({list})", self.m.extern_symbol(f)));
                 for _ in 0..n {
                     self.untmp();
                 }
@@ -683,7 +683,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     let r = self.tmp();
                     if !self.bits {
                         let sep = if list.is_empty() { "" } else { ", " };
-                        self.line(&format!("call void @{f}({list}{sep}ptr {r})"));
+                        self.line(&format!("call void @{}({list}{sep}ptr {r})", self.m.extern_symbol(f)));
                         self.line(&format!("call void @etch_emit(ptr {out}, ptr {r}, i64 {e1})"));
                     }
                     self.untmp();
@@ -1589,7 +1589,7 @@ pub fn extern_decls(m: &Model) -> String {
     names.sort();
     let mut out = String::new();
     for name in names {
-        let Some(Decl::Extern { params, ret, .. }) = m.externs.get(name) else { continue };
+        let Some(Decl::Extern { params, ret, symbol, .. }) = m.externs.get(name) else { continue };
         let mut args: Vec<&str> = params.iter().flat_map(|p| if matches!(p.ty, Type::Text) { vec!["ptr", "i64"] } else { vec!["i64"] }).collect();
         let r = if matches!(ret, Type::Text) {
             args.push("ptr");
@@ -1597,7 +1597,7 @@ pub fn extern_decls(m: &Model) -> String {
         } else {
             "i64"
         };
-        let _ = writeln!(out, "declare {r} @{name}({})", args.join(", "));
+        let _ = writeln!(out, "declare {r} @{symbol}({})", args.join(", "));
     }
     out
 }

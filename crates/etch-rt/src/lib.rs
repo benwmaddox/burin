@@ -12,6 +12,7 @@ pub mod http;
 pub mod out;
 pub mod pass;
 pub mod sign;
+pub mod stdlib;
 pub mod store;
 pub mod time;
 
