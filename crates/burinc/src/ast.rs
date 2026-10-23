@@ -197,6 +197,17 @@ pub enum Stmt {
     If(Expr, Vec<Stmt>, Vec<Stmt>, Span),
     /// `go screen(row)`: where the action goes when it's done
     Go(String, Expr, Span),
+    /// `signal name(arg) to …`: open pages get a Turbo Stream action `name` (its target the
+    /// argument's id), once the action has committed; their script does what it means
+    Signal(String, Option<Expr>, SignalTo, Span),
+}
+
+#[derive(Clone, Debug)]
+pub enum SignalTo {
+    Everyone,
+    Viewer,
+    /// a screen instance's audience: whoever can see `screen(arg)`
+    Screen(String, Expr),
 }
 
 #[derive(Clone, Debug)]

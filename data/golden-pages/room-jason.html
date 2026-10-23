@@ -12,6 +12,8 @@ document.querySelectorAll(".message[data-user-id]").forEach(function(m){var mine
 document.querySelectorAll(".boost__remove").forEach(function(f){if(f.dataset.boosterId===me)f.hidden=false})};window.burinDecorate();
 window.burinReading=function(){var r=meta("current-room-id");if(r)document.querySelectorAll('#user_sidebar a[href="/rooms/'+r+'"]').forEach(function(a){a.classList.remove("unread")})};window.burinReading();
 if(!window.burinHooked){window.burinHooked=true;document.addEventListener("turbo:frame-load",function(e){if(e.target.id==="user_sidebar")window.burinReading()});
-document.addEventListener("turbo:before-stream-render",function(e){var render=e.detail.render;e.detail.render=function(el){render(el);window.burinDecorate()}})}})()</script>
+var links=function(id){return document.querySelectorAll('#user_sidebar a[href="/rooms/'+id+'"]')},sidebar=function(){var f=document.getElementById("user_sidebar");if(f&&f.reload)f.reload()};
+var signals={unread:function(id){if(meta("current-room-id")!==id)links(id).forEach(function(a){a.classList.add("unread")})},read:function(id){links(id).forEach(function(a){a.classList.remove("unread")})},sidebar:sidebar,missed:sidebar};
+document.addEventListener("turbo:before-stream-render",function(e){var s=signals[e.target.getAttribute("action")];if(s){e.detail.render=function(el){s(el.getAttribute("target"))};return}var render=e.detail.render;e.detail.render=function(el){render(el);window.burinDecorate()}})}})()</script>
 <a href="https://once.com" id="app-logo" target="_blank" aria-label="Once software from 37signals home page"><img src="/assets/campfire-icon.png?v=f91df2931f89" alt="Campfire logo"></a>
 </body></html>

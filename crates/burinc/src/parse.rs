@@ -512,6 +512,27 @@ impl Parser {
             self.expect(")")?;
             return Ok(Stmt::Go(screen, arg, span));
         }
+        if self.eat_kw("signal") {
+            let name = self.ident()?;
+            self.expect("(")?;
+            let arg = if self.is(")") { None } else { Some(self.expr()?) };
+            self.expect(")")?;
+            self.expect_kw("to")?;
+            let who = self.ident()?;
+            let to = if self.is("(") {
+                self.expect("(")?;
+                let a = self.expr()?;
+                self.expect(")")?;
+                SignalTo::Screen(who, a)
+            } else {
+                match who.as_str() {
+                    "everyone" => SignalTo::Everyone,
+                    "viewer" => SignalTo::Viewer,
+                    _ => return self.err("a signal goes to everyone, viewer or a screen's audience: screen(arg)"),
+                }
+            };
+            return Ok(Stmt::Signal(name, arg, to, span));
+        }
         if self.eat_kw("sign") {
             if self.eat_kw("out") {
                 return Ok(Stmt::SignOut(span));

@@ -302,3 +302,15 @@ fragment f() <<<{{for p in long_ones()}}<p>{{p.body}}</p>{{end}}>>>"#, "f").unwr
 fragment f() <<<{{for p in padded()}}<p>{{p.body}}</p>{{end}}>>>"#, "f").unwrap_err();
     assert!(e.contains("can't run inside a query"), "{e}");
 }
+
+#[test]
+fn a_signal_goes_to_a_screen_of_its_type_and_targets_a_row_or_number() {
+    let page = "screen post_page(post: Post) at \"/posts/{post}\"\n<<<x>>>\n";
+    verdict(&format!("{page}action post(b: Text) {{\n  create Post {{ author: viewer, body: b }} as p\n  signal posted(p) to post_page(p)\n  signal seen() to viewer\n  signal any(1) to everyone\n}}")).unwrap();
+    let e = verdict(&format!("{page}action post(b: Text) {{\n  signal posted(b) to everyone\n}}")).unwrap_err();
+    assert!(e.contains("a row or a number"), "{e}");
+    let e = verdict(&format!("{page}action post(u: User) {{\n  signal posted(u) to post_page(u)\n}}")).unwrap_err();
+    assert!(e.contains("post_page takes"), "{e}");
+    let e = verdict(&format!("{page}action post(u: User) {{\n  signal posted(u) to nowhere(u)\n}}")).unwrap_err();
+    assert!(e.contains("a screen with one parameter"), "{e}");
+}

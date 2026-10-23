@@ -269,6 +269,19 @@ pub unsafe extern "C" fn burin_w_go(w: *mut Writer, pre: *const u8, pre_n: i64, 
     (*w).go = Some(s);
 }
 
+/// `signal`: `to` 0 everyone, 1 the viewer (the runtime fills in who), 2 the audience of screen
+/// `screen`'s instance `key`; `has_arg` 0: no target. # Safety: a live writer, `name` readable.
+#[no_mangle]
+pub unsafe extern "C" fn burin_w_signal(w: *mut Writer, name: *const u8, name_n: i64, has_arg: i64, arg: i64, to: i64, screen: i64, key: i64) {
+    let to = match to {
+        0 => SignalTo::Everyone,
+        1 => SignalTo::Viewer(0),
+        _ => SignalTo::Screen(screen as usize, key),
+    };
+    let target = if has_arg != 0 { arg.to_string() } else { String::new() };
+    (*w).signals.push(Signal { name: String::from_utf8_lossy(bytes(name, name_n)).into_owned(), target, to });
+}
+
 /// `sign out`: the reply clears the session's cookie. # Safety: a live writer.
 #[no_mangle]
 pub unsafe extern "C" fn burin_w_sign_out(w: *mut Writer) {
@@ -470,11 +483,28 @@ pub struct Writer {
     pub go: Option<String>,
     /// an external function's text result, before it's kept in the arena
     ext: Vec<u8>,
+    /// what the batch's actions signalled (`signal`), for the pages their audiences have open
+    pub signals: Vec<Signal>,
+}
+
+/// `signal name(arg) to …`: a Turbo Stream action named `name` (its target the argument), sent
+/// to the open pages of whoever it's to.
+pub struct Signal {
+    pub name: String,
+    pub target: String,
+    pub to: SignalTo,
+}
+
+pub enum SignalTo {
+    Everyone,
+    Viewer(i64),
+    /// a screen instance's audience (screen, key)
+    Screen(usize, i64),
 }
 
 impl Writer {
     pub fn new(seq: i64) -> Writer {
-        Writer { now: 0, seq, next_ids: HashMap::new(), arena: Arena::default(), signed_in: None, signed_out: false, go: None, ext: Vec::new() }
+        Writer { now: 0, seq, next_ids: HashMap::new(), arena: Arena::default(), signed_in: None, signed_out: false, go: None, ext: Vec::new(), signals: Vec::new() }
     }
     /// A new batch: its time; the arena emptied.
     pub fn begin(&mut self, now: i64) {

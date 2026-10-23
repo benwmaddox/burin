@@ -1011,6 +1011,22 @@ impl<'a, 'b> Act<'a, 'b> {
                     let (id, _) = self.value(arg)?;
                     self.line(&format!("call void @burin_w_go(ptr %w, ptr {gp}, i64 {}, i64 {id}, ptr {gs}, i64 {})", pre.len(), post.len()));
                 }
+                Stmt::Signal(name, arg, to, _) => {
+                    let gn = self.md.str_const_pub(name.as_bytes());
+                    let (has, id) = match arg {
+                        Some(a) => (1, self.value(a)?.0),
+                        None => (0, "0".to_string()),
+                    };
+                    let (kind, si, key) = match to {
+                        SignalTo::Everyone => (0, 0, "0".to_string()),
+                        SignalTo::Viewer => (1, 0, "0".to_string()),
+                        SignalTo::Screen(screen, a) => {
+                            let si = self.m.screens.iter().position(|d| matches!(d, Decl::Screen { name, .. } if name == screen)).ok_or("signal's screen")?;
+                            (2, si, self.value(a)?.0)
+                        }
+                    };
+                    self.line(&format!("call void @burin_w_signal(ptr %w, ptr {gn}, i64 {}, i64 {has}, i64 {id}, i64 {kind}, i64 {si}, i64 {key})", name.len()));
+                }
                 Stmt::SignOut(span) => {
                     let Some(Decl::Viewer { via_entity, via_field, .. }) = self.m.viewer else { return Err("sign out needs a viewer".into()) };
                     let filter = Expr::Bin(BinOp::Eq, Box::new(Expr::Dot(via_field.clone(), *span)), Box::new(Expr::Name("__session".into(), *span)), *span);

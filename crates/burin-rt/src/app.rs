@@ -784,9 +784,10 @@ impl<G: Glue> App<G> {
 /// isn't in its audience or its guards don't hold.
 fn fresh<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, uid: i64) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
-    // the live events it includes: read before the database is, so one that commits meanwhile is
-    // sent again (harmless: Turbo replaces an element of the same id) rather than missed
-    snap.live_seq = crate::live::HUB.last();
+    // the live events it includes, as the published snapshot does: read before the database is,
+    // so one that commits meanwhile is sent again (harmless: Turbo replaces an element of the
+    // same id) rather than missed (a quiet batch's signals come after it: sent again too)
+    snap.live_seq = crate::live::HUB.published();
     if !build_screen::<G>(c, ctx, &mut snap, s, key) {
         return None;
     }
@@ -799,7 +800,7 @@ fn fresh<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, uid: i64) -> Op
 /// A page built per request (a cold screen, a public one): its cached pieces built now too.
 fn per_request<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, viewer: i64) -> Result<(Vec<u8>, Vec<u8>), Option<String>> {
     let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
-    snap.live_seq = crate::live::HUB.last();
+    snap.live_seq = crate::live::HUB.published();
     for (kind, k) in G::screen_regs(s, key) {
         let rec = load::<G>(c, ctx, kind, k, 0).ok_or(None)?;
         snap.regs[kind].insert(k, Arc::new(build::<G>(ctx, kind, rec.ptr())));
@@ -873,11 +874,17 @@ impl<G: Glue> crate::Handler for App<G> {
         let snap = self.snap.load();
         let inst = snap.screens[s].get(&key)?;
         inst.audience.binary_search(&viewer).ok()?;
-        let topics: Vec<u64> = (0..G::LISTS).filter(|&l| G::list_screen(l) == s && G::list_live(l).is_some()).map(|l| crate::live::list_topic(l, key)).collect();
+        let mut topics: Vec<u64> = (0..G::LISTS).filter(|&l| G::list_screen(l) == s && G::list_live(l).is_some()).map(|l| crate::live::list_topic(l, key)).collect();
+        topics.push(crate::live::SIGNALS);
         let since = since.max(req.last_event_id);
         let mut head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Accel-Buffering: no\r\n\r\nretry: 2000\n\n".to_vec();
-        let last = match crate::live::HUB.replay(&topics, since) {
-            crate::live::Replay::Events(es) => {
+        let last = match crate::live::HUB.replay(&topics, since, viewer) {
+            crate::live::Replay::Events(es, missed) => {
+                // signals it missed and can't be sent: `missed` (the page's script reloads what
+                // they'd have changed)
+                if missed {
+                    head.extend_from_slice(&crate::live::unnumbered(&crate::live::turbo_stream("missed", "", None)));
+                }
                 let mut last = since;
                 for e in es {
                     head.extend_from_slice(&e.bytes);
@@ -915,6 +922,47 @@ impl<G: Glue> crate::Handler for App<G> {
 /// The writer: actions in batches (group commit), then their delta edges into the next snapshot.
 /// It keeps only cached pieces: nothing per viewer, so a write's work doesn't grow with the
 /// people who can see it.
+/// A batch's signals, as Turbo Streams on the signals topic, each with its audience: everyone,
+/// the viewer, or a screen instance's (as `snap` has it after the batch, or read when it isn't
+/// built; a signal to an instance no one can see goes to no one).
+fn signal_streams<G: Glue>(c: &Connection, snap: &Snap, sigs: Vec<crate::abi::Signal>) -> Vec<(u64, Vec<u8>, Option<Arc<Vec<i64>>>)> {
+    use crate::abi::SignalTo;
+    let mut seen: HashMap<(usize, i64), Arc<Vec<i64>>> = HashMap::new();
+    sigs.into_iter()
+        .map(|sig| {
+            let audience = match sig.to {
+                SignalTo::Everyone => None,
+                SignalTo::Viewer(v) => Some(Arc::new(vec![v])),
+                SignalTo::Screen(s, key) => Some(
+                    seen.entry((s, key))
+                        .or_insert_with(|| match snap.screens.get(s).and_then(|m| m.get(&key)) {
+                            Some(inst) => Arc::new(inst.audience.clone()),
+                            None => Arc::new(G::screen(c, s, key).map(|(a, _)| a).unwrap_or_default()),
+                        })
+                        .clone(),
+                ),
+            };
+            (crate::live::SIGNALS, crate::live::turbo_stream(&sig.name, &sig.target, None), audience)
+        })
+        .collect()
+}
+
+/// Events numbered, in order (the snapshot that includes them records the last number).
+fn number(streams: Vec<(u64, Vec<u8>, Option<Arc<Vec<i64>>>)>) -> Vec<crate::live::Event> {
+    if streams.is_empty() {
+        return vec![];
+    }
+    let first = crate::live::HUB.reserve(streams.len());
+    streams
+        .into_iter()
+        .enumerate()
+        .map(|(i, (topic, stream, audience))| {
+            let id = first + i as u64;
+            crate::live::Event { id, topic, bytes: crate::live::event_bytes(id, &stream), audience }
+        })
+        .collect()
+}
+
 fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Receiver<Cmd>, stats: Arc<Stats>, seq: i64, scrub_ms: u64) {
     let mut w = Writer::new(seq);
     // viewers' records: an action's viewer (forwarding copies values from it)
@@ -962,7 +1010,7 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     // each action is all or nothing: a savepoint, rolled back (with its delta
                     // edges) when it doesn't end ok, a failed require after a write or a write
                     // a constraint refused
-                    let marks = deltas.list.len();
+                    let (marks, signals) = (deltas.list.len(), w.signals.len());
                     tx.execute_batch("SAVEPOINT act").expect("savepoint");
                     let mut r = with_db(&tx, |db| G::act(&name, &tx, &ctx, db, &mut w, viewer, vrec, &form, &mut deltas));
                     if let Some(e) = crate::abi::take_write_failure() {
@@ -977,9 +1025,15 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     let go = w.go.take();
                     if r.is_ok() {
                         tx.execute_batch("RELEASE act").expect("release");
+                        for sig in &mut w.signals[signals..] {
+                            if let crate::abi::SignalTo::Viewer(v) = &mut sig.to {
+                                *v = viewer;
+                            }
+                        }
                     } else {
                         tx.execute_batch("ROLLBACK TO act; RELEASE act").expect("rollback");
                         deltas.list.truncate(marks);
+                        w.signals.truncate(signals);
                     }
                     replies.push((reply, r.map(|_| Done { to: G::after_act(&name, &form), cookie, go })));
                 }
@@ -1003,6 +1057,11 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     }
                 }
             }
+            // its signals (a room read: the viewer's other pages): after the published snapshot
+            // (pages built since replay them, which signals allow)
+            let events = number(signal_streams::<G>(&c, &cur, std::mem::take(&mut w.signals)));
+            stats.live.fetch_add(events.len() as u64, Ordering::Relaxed);
+            crate::live::HUB.publish(events, vec![]);
             stats.published.store(stats.commits.load(Ordering::SeqCst), Ordering::SeqCst);
             stats.batches.fetch_add(1, Ordering::Relaxed);
             stats.quiet.fetch_add(1, Ordering::Relaxed);
@@ -1273,21 +1332,14 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
         }
         // the live events, numbered: the snapshot includes up to the last (its pages' streams get
         // what comes after)
-        let events: Vec<crate::live::Event> = if live.is_empty() {
-            vec![]
-        } else {
-            let first = crate::live::HUB.reserve(live.len());
-            live.into_iter()
-                .enumerate()
-                .map(|(i, (topic, stream))| {
-                    let id = first + i as u64;
-                    crate::live::Event { id, topic, bytes: crate::live::event_bytes(id, &stream) }
-                })
-                .collect()
-        };
+        let mut streams: Vec<(u64, Vec<u8>, Option<Arc<Vec<i64>>>)> = live.into_iter().map(|(t, s)| (t, s, None)).collect();
+        streams.extend(signal_streams::<G>(&c, &next, std::mem::take(&mut w.signals)));
+        let events = number(streams);
         next.live_seq = crate::live::HUB.last();
         stats.live.fetch_add(events.len() as u64, Ordering::Relaxed);
+        let seq = next.live_seq;
         snap.store(Arc::new(next));
+        crate::live::HUB.set_published(seq);
         crate::live::HUB.publish(events, revokes);
         stats.published.store(stats.commits.load(Ordering::SeqCst), Ordering::SeqCst);
         // a slow batch, logged with where its time went (the bench keeps the server's log)

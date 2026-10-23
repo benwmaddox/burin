@@ -2,11 +2,12 @@
 // edits, boosts and deletes from his page; Jason's page shows each change without reloading
 // (Turbo applies what the stream sends), and David's own page marks his new message as his,
 // with its edit controls, as the page's script does for messages served with the page.
-//   node live.mjs <base url> <David's token> <Jason's token> <room id>
+// With another room both are in: Jason's sidebar follows the signals (unread, a new room).
+//   node live.mjs <base url> <David's token> <Jason's token> <room id> [other room id]
 import { chromium } from "playwright-core";
 import { homedir } from "node:os";
 
-const [base, davidToken, jasonToken, room] = process.argv.slice(2);
+const [base, davidToken, jasonToken, room, other] = process.argv.slice(2);
 const chrome = process.env.CHROME || `${homedir()}/.cache/ms-playwright/chromium-1208/chrome-linux64/chrome`;
 let failed = false;
 const want = (what, ok, detail = "") => {
@@ -53,6 +54,21 @@ try {
   want("Jason sees the boost", await jason.page.waitForFunction((i) => document.querySelector(`.message[data-message-id="${i}"] .boost`)?.textContent.includes("🎉"), id, { timeout: 8000 }).then(() => true, () => false));
   await post("/_do/delete_message", { __arg_message: `#${id}` });
   want("Jason sees the delete", await gone(jason.page, text));
+  // the sidebar's signals: a post in another room marks it unread on Jason's sidebar; a new open
+  // room appears on it (its frame reloads, not the page)
+  if (other) {
+    const link = `#user_sidebar a[href="/rooms/${other}"]`;
+    await jason.page.waitForSelector(link, { timeout: 8000 });
+    await jason.page.evaluate((l) => document.querySelector(l).classList.remove("unread"), link);
+    await post("/_do/post_message", { room: other, body: `elsewhere ${Date.now()}` });
+    want("Jason's sidebar marks the other room unread", await jason.page.waitForFunction((l) => document.querySelector(l)?.classList.contains("unread"), link, { timeout: 8000 }).then(() => true, () => false));
+    await post("/_do/post_message", { room, body: `here ${Date.now()}` });
+    await jason.page.waitForTimeout(500);
+    want("…but not the room he's in", await jason.page.evaluate((r) => !document.querySelector(`#user_sidebar a[href="/rooms/${r}"]`)?.classList.contains("unread"), room));
+    const name = `Signalled ${Date.now()}`;
+    await post("/_do/create_open_room", { name });
+    want("a new open room appears on Jason's sidebar", await jason.page.waitForFunction((n) => document.querySelector("#user_sidebar")?.textContent.includes(n), name, { timeout: 8000 }).then(() => true, () => false));
+  }
   want("neither page reloaded", (await jason.page.evaluate(() => window.__burinSameDocument === true)) && (await david.page.evaluate(() => window.__burinSameDocument === true)));
   want("no script errors", jason.errors.length + david.errors.length === 0, [...jason.errors, ...david.errors].slice(0, 3).join(" | "));
 } catch (e) {

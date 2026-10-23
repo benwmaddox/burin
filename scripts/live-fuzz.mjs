@@ -48,7 +48,7 @@ async function page(who, room) {
 
 // a watcher: its list, kept up to date from its stream
 async function watch(who, room) {
-  const w = { who, room, items: [], events: 0, refreshes: 0, ctrl: new AbortController() };
+  const w = { who, room, items: [], events: 0, refreshes: 0, signals: 0, ctrl: new AbortController() };
   const load = async () => {
     const p = await page(who, room);
     const src = p && p.match(/<turbo-stream-source src="([^"]*)"/)?.[1]?.replaceAll("&amp;", "&");
@@ -105,6 +105,13 @@ async function apply(w, stream, load) {
     case "refresh":
       w.refreshes++;
       await load();
+      break;
+    // the sidebar's signals: not the list's
+    case "unread":
+    case "read":
+    case "sidebar":
+    case "missed":
+      w.signals++;
       break;
     default:
       throw new Error(`an unknown action ${action}`);
@@ -177,6 +184,7 @@ for (const w of watchers) {
 }
 const events = watchers.reduce((s, w) => s + w.events, 0);
 const refreshes = watchers.reduce((s, w) => s + w.refreshes, 0);
-console.log(JSON.stringify({ watchers: watchers.length, steps, events, refreshes }));
+const signals = watchers.reduce((s, w) => s + w.signals, 0);
+console.log(JSON.stringify({ watchers: watchers.length, steps, events, refreshes, signals }));
 console.log(ok && events > 0 ? "PASS" : "FAIL");
 process.exit(ok && events > 0 ? 0 : 1);

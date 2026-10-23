@@ -46,14 +46,15 @@ sleep 0.5
 kill %2 2>/dev/null || true
 sleep 0.2
 actions=$(grep -o 'data: <turbo-stream action="[a-z]*" target="[^"]*"' $D/stream.txt | sed 's/.*action="//; s/" target="/ /; s/"$//' | tr '\n' ',')
-want "the stream's events" "$actions" "append live_room_messages,replace message_$CID,replace message_$CID,remove message_$CID,"
+want "the stream's events (the list's, and the sidebar's signals)" "$actions" "read $ROOM,append live_room_messages,unread $ROOM,replace message_$CID,replace message_$CID,remove message_$CID,"
 want "the append carries the message" "$(grep -c 'data: .*live hello' $D/stream.txt)" 1
 want "the edit's replace carries the new text" "$(grep -c 'data: .*live edited' $D/stream.txt)" 2
-want "events have ids" "$(grep -c '^id: [0-9]' $D/stream.txt)" 4
-# a reconnect from before the post gets what it missed (and nothing earlier)
-FIRST=$(grep -m1 '^id: ' $D/stream.txt | sed 's/id: //')
-curl -sSN -m 1 -H "Cookie: session_token=$JASON" -H "Last-Event-ID: $FIRST" "$U$SRC" > $D/replay.txt || true
-want "a reconnect gets the events after its Last-Event-ID" "$(grep -c '^id: ' $D/replay.txt)" 3
+want "events have ids" "$(grep -c '^id: [0-9]' $D/stream.txt)" 6
+# a reconnect from the post gets what it missed after it (and nothing earlier): the first stream's
+# closing read the room (read), and so does its own opening
+POST=$(grep -B2 'data: <turbo-stream action="append"' $D/stream.txt | grep -m1 '^id: ' | sed 's/id: //')
+curl -sSN -m 1 -H "Cookie: session_token=$JASON" -H "Last-Event-ID: $POST" "$U$SRC" > $D/replay.txt || true
+want "a reconnect gets the events after its Last-Event-ID" "$(grep -o 'data: <turbo-stream action="[a-z]*"' $D/replay.txt | sed 's/.*action="//; s/"$//' | tr '\n' ',')" "unread,replace,replace,remove,read,read,"
 # not a member: refused
 OUT=$(sql "select r.id from Room r where r.type = 'closed' and r.id not in (select room from Membership where user = $JU) limit 1")
 if [ -n "$OUT" ]; then

@@ -19,13 +19,15 @@ use std::sync::{Arc, Mutex};
 /// Events kept per topic for replay.
 const RING: usize = 256;
 
-/// A topic: a screen list's instance (list index, key), or a viewer's signals.
+/// A topic: a screen list's instance (list index, key).
 pub fn list_topic(list: usize, key: i64) -> u64 {
     ((list as u64) << 56) ^ (key as u64 & 0x00ff_ffff_ffff_ffff) ^ 0x1000_0000_0000_0000
 }
-pub fn viewer_topic(viewer: i64) -> u64 {
-    (viewer as u64 & 0x00ff_ffff_ffff_ffff) ^ 0x2000_0000_0000_0000
-}
+
+/// The actions' signals (`signal`): one topic every stream is on, each event for its audience
+/// only. A signal is one event however many it's for (no write fan-out); each worker checks its
+/// own streams' viewers.
+pub const SIGNALS: u64 = 0x2000_0000_0000_0000;
 
 /// One event, as sent: `id: N\nevent: message\ndata: …\n\n`.
 #[derive(Clone)]
@@ -33,6 +35,14 @@ pub struct Event {
     pub id: u64,
     pub topic: u64,
     pub bytes: Arc<[u8]>,
+    /// who it's for (sorted), when not everyone on its topic
+    pub audience: Option<Arc<Vec<i64>>>,
+}
+
+impl Event {
+    pub fn is_for(&self, viewer: i64) -> bool {
+        self.audience.as_ref().is_none_or(|a| a.binary_search(&viewer).is_ok())
+    }
 }
 
 /// What a worker is told: events, or that a topic's audience changed (its connections whose
@@ -56,6 +66,8 @@ struct State {
 }
 
 pub struct Hub {
+    /// the last event the published snapshot includes (pages built fresh carry it too)
+    published: std::sync::atomic::AtomicU64,
     state: Mutex<State>,
     workers: Mutex<Vec<Inbox>>,
 }
@@ -66,12 +78,13 @@ struct Inbox {
 }
 
 /// The process's hub.
-pub static HUB: std::sync::LazyLock<Hub> = std::sync::LazyLock::new(|| Hub { state: Mutex::default(), workers: Mutex::default() });
+pub static HUB: std::sync::LazyLock<Hub> = std::sync::LazyLock::new(|| Hub { published: Default::default(), state: Mutex::default(), workers: Mutex::default() });
 
 /// What a new stream gets first.
 pub enum Replay {
-    /// the events it missed, in order (possibly none)
-    Events(Vec<Event>),
+    /// the events it missed, in order (possibly none), and whether it missed signals the ring
+    /// no longer has (its page reloads what signals keep up to date: the stream gets `missed`)
+    Events(Vec<Event>, bool),
     /// it missed more than the rings keep: reload
     Refresh,
 }
@@ -87,6 +100,16 @@ impl Hub {
     /// The last event's number (a new snapshot includes everything up to it).
     pub fn last(&self) -> u64 {
         self.state.lock().unwrap().last
+    }
+
+    /// The last event the published snapshot includes.
+    pub fn published(&self) -> u64 {
+        self.published.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A snapshot that includes up to event `seq` is published.
+    pub fn set_published(&self, seq: u64) {
+        self.published.store(seq, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The next `n` events' numbers: the first.
@@ -122,20 +145,23 @@ impl Hub {
         }
     }
 
-    /// What a stream on `topics` missed after event `since`.
-    pub fn replay(&self, topics: &[u64], since: u64) -> Replay {
+    /// What `viewer`'s stream on `topics` missed after event `since`.
+    pub fn replay(&self, topics: &[u64], since: u64, viewer: i64) -> Replay {
         let s = self.state.lock().unwrap();
-        let mut out = vec![];
+        let (mut out, mut missed) = (vec![], false);
         for t in topics {
             if let Some(topic) = s.topics.get(t) {
                 if since < topic.from {
-                    return Replay::Refresh;
+                    if *t != SIGNALS {
+                        return Replay::Refresh;
+                    }
+                    missed = true;
                 }
-                out.extend(topic.ring.iter().filter(|e| e.id > since).cloned());
+                out.extend(topic.ring.iter().filter(|e| e.id > since && e.is_for(viewer)).cloned());
             }
         }
         out.sort_by_key(|e| e.id);
-        Replay::Events(out)
+        Replay::Events(out, missed)
     }
 }
 
@@ -152,6 +178,13 @@ pub fn event_bytes(id: u64, stream: &[u8]) -> Arc<[u8]> {
     }
     b.push(b'\n');
     b.into()
+}
+
+/// An event without a number (the browser's Last-Event-ID stays the one before).
+pub fn unnumbered(stream: &[u8]) -> Vec<u8> {
+    let mut b = event_bytes(0, stream).to_vec();
+    b.drain(..b"id: 0\n".len());
+    b
 }
 
 /// A Turbo Stream: `action` on `target` (an element's id), with `content` (append, prepend,
@@ -181,12 +214,37 @@ mod tests {
     use super::*;
 
     fn hub() -> Hub {
-        Hub { state: Mutex::default(), workers: Mutex::default() }
+        Hub { published: Default::default(), state: Mutex::default(), workers: Mutex::default() }
     }
 
     fn ev(h: &Hub, topic: u64) -> Event {
         let id = h.reserve(1);
-        Event { id, topic, bytes: event_bytes(id, b"x") }
+        Event { id, topic, bytes: event_bytes(id, b"x"), audience: None }
+    }
+
+    fn ids(r: Replay) -> (Vec<u64>, bool) {
+        match r {
+            Replay::Events(es, missed) => (es.iter().map(|e| e.id).collect(), missed),
+            Replay::Refresh => panic!("in the ring"),
+        }
+    }
+
+    #[test]
+    fn signals_replay_only_to_their_audience_and_past_the_ring_are_missed_not_refreshed() {
+        let h = hub();
+        let a = list_topic(0, 7);
+        let mut s1 = ev(&h, SIGNALS);
+        s1.audience = Some(Arc::new(vec![3, 5]));
+        let s2 = ev(&h, SIGNALS);
+        let e3 = ev(&h, a);
+        h.publish(vec![s1, s2, e3], vec![]);
+        assert_eq!(ids(h.replay(&[a, SIGNALS], 0, 5)), (vec![1, 2, 3], false));
+        assert_eq!(ids(h.replay(&[a, SIGNALS], 0, 4)), (vec![2, 3], false), "not in its audience");
+        let more: Vec<Event> = (0..RING + 5).map(|_| ev(&h, SIGNALS)).collect();
+        h.publish(more, vec![]);
+        let (got, missed) = ids(h.replay(&[a, SIGNALS], 0, 4));
+        assert!(missed && got.len() == RING + 1, "the list's event, the signals the ring has, and missed");
+        assert_eq!(unnumbered(b"<x>"), b"event: message\ndata: <x>\n\n");
     }
 
     #[test]
@@ -197,18 +255,12 @@ mod tests {
         let e2 = ev(&h, b);
         let e3 = ev(&h, a);
         h.publish(vec![e1, e2, e3], vec![]);
-        match h.replay(&[a], 1) {
-            Replay::Events(es) => assert_eq!(es.iter().map(|e| e.id).collect::<Vec<_>>(), vec![3]),
-            Replay::Refresh => panic!("in the ring"),
-        }
-        match h.replay(&[a, b], 0) {
-            Replay::Events(es) => assert_eq!(es.iter().map(|e| e.id).collect::<Vec<_>>(), vec![1, 2, 3]),
-            Replay::Refresh => panic!("in the ring"),
-        }
+        assert_eq!(ids(h.replay(&[a], 1, 1)), (vec![3], false));
+        assert_eq!(ids(h.replay(&[a, b], 0, 1)), (vec![1, 2, 3], false));
         let more: Vec<Event> = (0..RING + 5).map(|_| ev(&h, a)).collect();
         h.publish(more, vec![]);
-        assert!(matches!(h.replay(&[a], 0), Replay::Refresh), "past the ring");
-        assert!(matches!(h.replay(&[a], h.last()), Replay::Events(ref es) if es.is_empty()));
+        assert!(matches!(h.replay(&[a], 0, 1), Replay::Refresh), "past the ring");
+        assert_eq!(ids(h.replay(&[a], h.last(), 1)), (vec![], false));
     }
 
     #[test]

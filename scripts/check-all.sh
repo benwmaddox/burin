@@ -1,6 +1,7 @@
 #!/bin/bash
 # Every correctness check, on the release builds: golden pages, writes, outcomes, edits and
-# boosts, the board app, numbers and time (apps/numbers), external functions (apps/notes), and the
+# boosts, the board app, numbers and time (apps/numbers), external functions (apps/notes), live
+# updates (lists, revoking, fuzzed, signals, in browsers), and the
 # generated fast path's allocations.
 #   bash /mnt/d/code/burin/scripts/check-all.sh
 cd /mnt/d/code/burin
@@ -22,6 +23,7 @@ echo "== externs";     BURIN_BIN=$HOME/hw/burin-notes-release bash scripts/notes
 echo "== numbers";       BURIN_BIN=$HOME/hw/burin-numbers-release bash scripts/numbers-check.sh 2>&1 | grep -E "MISMATCH|PASS|FAIL"
 echo "== live";        bash scripts/live-check.sh 2>&1 | grep -E "FAIL|PASS"
 echo "== revoke";      bash scripts/revoke-check.sh 2>&1 | grep -E "FAIL|PASS"
+echo "== signals";     bash scripts/signals-check.sh 2>&1 | grep -E "FAIL|PASS"
 echo "== live fuzz";   for s in 1 2 3; do bash scripts/live-fuzz.sh 400 $s 2>&1 | grep -E "DIFFERS|STREAM|PASS|FAIL" | head -3; done
 echo "== browser";     bash scripts/browser-smoke.sh 2>&1 | grep -E "FAIL|PASS"
 echo "== browser live"; bash scripts/browser-live.sh 2>&1 | grep -E "FAIL|PASS"

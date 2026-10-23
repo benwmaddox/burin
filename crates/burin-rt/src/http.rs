@@ -187,16 +187,15 @@ fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::R
                         crate::live::Push::Event(e) => {
                             for &i in subs.get(&e.topic).map(|v| v.as_slice()).unwrap_or(&[]) {
                                 if let Some(Some(c)) = conns.get_mut(i) {
-                                    if let Some(l) = c.live.as_mut() {
-                                        if e.id > l.0.last {
-                                            l.0.last = e.id;
-                                            l.1.extend_from_slice(&e.bytes);
-                                        }
+                                    let Some(l) = c.live.as_mut() else { continue };
+                                    if e.id <= l.0.last {
+                                        continue;
                                     }
-                                }
-                            }
-                            for &i in subs.get(&e.topic).map(|v| v.as_slice()).unwrap_or(&[]) {
-                                if let Some(Some(c)) = conns.get_mut(i) {
+                                    l.0.last = e.id;
+                                    if !e.is_for(l.0.viewer) {
+                                        continue;
+                                    }
+                                    l.1.extend_from_slice(&e.bytes);
                                     if !flush_live(c, &poll) {
                                         closing.push(i);
                                     }

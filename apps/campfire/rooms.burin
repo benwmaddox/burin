@@ -19,6 +19,8 @@ action create_open_room(name: Text) {
   for each u in User where .status == "active" {
     create Membership { room: room, user: u, involvement: "mentions" }
   }
+  // every sidebar has the room (users/sidebars: the :rooms stream)
+  signal sidebar() to everyone
   go room(room)
 }
 
@@ -30,6 +32,8 @@ action create_closed_room(name: Text, users: list of User) {
   for each u in User where .status == "active" and (it in users or it == viewer) {
     create Membership { room: room, user: u, involvement: "mentions" }
   }
+  // its members' sidebars have it (each one's [user, :rooms] stream)
+  signal sidebar() to room(room)
   go room(room)
 }
 
@@ -43,6 +47,7 @@ action create_direct_room(users: list of User) {
     for each u in User where it in users or it == viewer {
       create Membership { room: room, user: u, involvement: "everything" }
     }
+    signal sidebar() to room(room)
     go room(room)
   }
 }
@@ -57,6 +62,8 @@ action update_open_room(room: Room, name: Text) {
   for each u in User where .status == "active" and not member(it, room) {
     create Membership { room: room, user: u, involvement: "mentions" }
   }
+  // every sidebar has the room (users/sidebars: the :rooms stream)
+  signal sidebar() to everyone
   go room(room)
 }
 
@@ -71,6 +78,8 @@ action update_closed_room(room: Room, name: Text, users: list of User) {
     create Membership { room: room, user: u, involvement: "mentions" }
   }
   for each ms in Membership where .room == room and not (.user in users or .user == viewer) { delete ms }
+  // its members' sidebars have it (each one's [user, :rooms] stream)
+  signal sidebar() to room(room)
   go room(room)
 }
 
@@ -84,6 +93,7 @@ action delete_room(room: Room) {
   }
   for each ms in Membership where .room == room { delete ms }
   delete room
+  signal sidebar() to everyone
 }
 
 // Which of a room's messages notify the viewer: everything, mentions, nothing, or invisible
@@ -92,6 +102,7 @@ action set_involvement(room: Room, involvement: Text) {
   require member(viewer, room) else not_found
   require involvement == "everything" or involvement == "mentions" or involvement == "nothing" or involvement == "invisible" else invalid
   for each ms in Membership where .room == room and .user == viewer { set ms.involvement = involvement }
+  signal sidebar() to viewer
 }
 
 // ---- pages

@@ -1432,6 +1432,7 @@ declare ptr @burin_w_ext_out(ptr)
 declare void @burin_w_ext_take(ptr, ptr)
 declare %List @burin_w_ids(ptr, ptr)
 declare void @burin_w_go(ptr, ptr, i64, i64, ptr, i64)
+declare void @burin_w_signal(ptr, ptr, i64, i64, i64, i64, i64, i64)
 "#;
 
 /// The module for these registers, and a Rust header with the same records.

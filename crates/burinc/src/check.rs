@@ -988,6 +988,30 @@ fn check_stmts(m: &Model, body: &[Stmt], scope: &Scope, cleared: &mut Vec<(Strin
                     return err(*span, "sign out needs a viewer declaration");
                 }
             }
+            // its target is a row's id or a number; its audience a screen of one parameter
+            Stmt::Signal(_, arg, to, span) => {
+                if let Some(a) = arg {
+                    let t = m.type_of(a, scope)?;
+                    if !matches!(t.strip_opt(), Type::Ref(_) | Type::Int) {
+                        return err(*span, format!("a signal's target is a row or a number, not {}", t.show()));
+                    }
+                }
+                match to {
+                    SignalTo::Everyone => {}
+                    SignalTo::Viewer if m.viewer.is_none() => return err(*span, "a signal to the viewer needs a viewer declaration"),
+                    SignalTo::Viewer => {}
+                    SignalTo::Screen(screen, a) => {
+                        let want = m.screens.iter().find_map(|d| match d {
+                            Decl::Screen { name, params, .. } if name == screen && params.len() == 1 => Some(params[0].ty.clone()),
+                            _ => None,
+                        });
+                        let Some(want) = want else { return err(*span, format!("a signal goes to a screen with one parameter, not `{screen}`")) };
+                        if m.type_of(a, scope)?.strip_opt() != want.strip_opt() {
+                            return err(*span, format!("{screen} takes {}", want.show()));
+                        }
+                    }
+                }
+            }
             Stmt::Delete(e, span) => {
                 let ent = match m.type_of(e, scope)? {
                     Type::Ref(t) => t,
@@ -1047,6 +1071,14 @@ fn stmt_mentions_viewer(s: &Stmt) -> bool {
         Stmt::Create(_, fs, _, _) => fs.iter().any(|(_, v)| expr_mentions_viewer(v)),
         Stmt::If(c, a, b, _) => expr_mentions_viewer(c) || a.iter().any(stmt_mentions_viewer) || b.iter().any(stmt_mentions_viewer),
         Stmt::Go(_, e, _) => expr_mentions_viewer(e),
+        Stmt::Signal(_, a, to, _) => {
+            a.as_ref().is_some_and(expr_mentions_viewer)
+                || match to {
+                    SignalTo::Viewer => true,
+                    SignalTo::Everyone => false,
+                    SignalTo::Screen(_, e) => expr_mentions_viewer(e),
+                }
+        }
         Stmt::Touch(e, _) | Stmt::Delete(e, _) | Stmt::Let(_, e, _) | Stmt::SignIn(e, _) => expr_mentions_viewer(e),
         Stmt::Set(o, _, v, _) => expr_mentions_viewer(o) || expr_mentions_viewer(v),
         Stmt::ForEach(_, q, inner, _) => expr_mentions_viewer(&Expr::Query(Box::new(q.clone()))) || inner.iter().any(stmt_mentions_viewer),

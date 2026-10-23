@@ -676,7 +676,7 @@ fn collect_writes(m: &Model, body: &[Stmt], scope: &Scope, out: &mut Vec<(String
                 collect_writes(m, a, scope, out);
                 collect_writes(m, b, scope, out);
             }
-            Stmt::Go(..) => {}
+            Stmt::Go(..) | Stmt::Signal(..) => {}
             Stmt::Touch(e, _) => {
                 if let Ok(Type::Ref(t)) = m.type_of(e, scope) {
                     out.push((t, vec!["updated".into()]));

@@ -355,6 +355,59 @@ function, so adding one is a declaration and a Rust function, not compiler work.
 - **Not yet:** lists as values (`split`, `join` with a separator, sums over a list), records,
   Decimal as a type.
 
+## Live updates (23 Oct 2026)
+
+Open pages follow writes the way Rails Campfire's do: Turbo Streams. Here they come over one
+server-sent events stream per page (`<turbo-stream-source>`, `/_burin/live`), not Action Cable.
+Each event is built once, by the writer, from what it already knows changed. It is sent to every
+stream on its topic as the same bytes. The runtime's side is `crates/burin-rt/src/live.rs`.
+
+- **Live lists:** `{{for m in room_messages(room) live}}`. The list's element gets an id, and its
+  changes go out as `append`, `prepend`, `replace` and `remove`, keyed by each item's element id.
+  When a change can't be said item by item, the event is `refresh` and Turbo reloads the page.
+- **Numbered and replayed:** a page carries the number of the last event its snapshot includes. A
+  stream that connects later, or reconnects with Last-Event-ID, first gets what it missed from its
+  topics' rings (256 events each). Past a ring, a list topic sends `refresh`.
+- **Audiences:** a stream opens only for a viewer in the screen's audience. When a write changes
+  the audience, the streams of viewers who left are closed.
+- **Presence:** `watch read_room` runs the action when a stream opens and again when it closes, so
+  a room someone sat in while posts arrived isn't unread on their next sidebar.
+- **Signals:** an action says `signal unread(room) to room(room)` (or `to viewer`, or
+  `to everyone`). After the action commits, open pages get a Turbo Stream action named `unread`
+  whose target is the argument's id, and the page's script decides what it means. Campfire marks
+  sidebar links unread or read, and reloads the sidebar's frame for room changes. A signal is one
+  event on one topic every stream is on, tagged with its audience (a screen instance's, from the
+  snapshot). Each worker checks its own streams' viewers, so a post to a 1,000-member room is
+  still one event. A failed action sends none. Signals a stream missed past the ring become
+  `missed`, and the page reloads what signals keep up to date.
+- **Departures from Rails, for the benchmark's fairness:**
+  - Rails broadcasts `unread` to each member's own stream (one broadcast per member). Burin sends
+    one event and filters per stream: fewer server operations per post, the same bytes per client.
+  - For room changes (create, rename, members, involvement, delete), Rails pushes the rendered
+    sidebar row. Burin reloads the frame: one more request per affected sidebar, for writes that
+    are rare.
+  - Rails reorders direct rooms on unread (its sorted-list controller). Burin doesn't yet.
+  - Like Rails, members dropped from a closed room get nothing on their sidebar.
+- **Checks:**
+  - `scripts/live-check.sh`: events in order, presence, replay, refusal.
+  - `scripts/revoke-check.sh`: a dropped member's stream closes.
+  - `scripts/live-fuzz.sh`: random writes while streams are held. Each watcher applies its events
+    as Turbo does, and must end with the same list as a fresh page.
+  - `scripts/signals-check.sh`: who gets which signal.
+  - `scripts/browser-live.sh`: two Chromium pages.
+
+**Targets, measured with live clients in the mixed benchmark (proposed; not yet measured):** at
+50 posts/s with 1,000 open streams:
+- Delivery latency, from the post's reply to the event's bytes at a client: p50 ≤ 5 ms, p99 ≤ 50 ms.
+- Delivered share (the events clients got ÷ the events due them, counted by item id): ≥ 99.9%.
+- Holding the streams costs at most 15% of page throughput.
+
+The Rails port and the Rust port get the same clients over Action Cable.
+
+**Kill criteria:** p99 over 250 ms, a delivered share under 99%, or more than 30% of page
+throughput lost. Any one of these means rethinking where events are built: the single writer
+building every event, and the workers' inboxes.
+
 ## Lessons kept from crudspec and AgentLang
 
 - **The whole app is one program, checked as a whole** (crudspec): names, types, permissions,
