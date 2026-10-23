@@ -274,6 +274,11 @@ struct Scratch {
     pieces: Vec<usize>,
     tmps: Vec<Vec<u8>>,
     ptrs: Vec<*mut Vec<u8>>,
+    /// the page's per-request fragments rendered so far (kind, key, bytes, pieces): one that
+    /// comes again in the page is sent again, not rendered again (it's pure, and the page reads
+    /// one snapshot). The buffers are kept for the next page; `memo_n` are this page's.
+    memo: Vec<(usize, i64, Vec<u8>, Vec<usize>)>,
+    memo_n: usize,
 }
 
 thread_local! {
@@ -282,7 +287,7 @@ thread_local! {
 
 impl Scratch {
     fn new() -> Scratch {
-        Scratch { rec: Vec::with_capacity(512), arena: Arena::new(), viewer: Vec::with_capacity(64), varena: Arena::new(), out: Vec::with_capacity(65536), pieces: Vec::with_capacity(256), tmps: vec![], ptrs: vec![] }
+        Scratch { rec: Vec::with_capacity(512), arena: Arena::new(), viewer: Vec::with_capacity(64), varena: Arena::new(), out: Vec::with_capacity(65536), pieces: Vec::with_capacity(256), tmps: vec![], ptrs: vec![], memo: vec![], memo_n: 0 }
     }
 
     fn load_viewer<G: Glue>(&mut self, c: &Connection, ctx: &Ctx, viewer: i64) {
@@ -334,6 +339,7 @@ pub fn emit_page<'a, G: Glue>(snap: &'a Snap, c: &Connection, ctx: &Ctx, s: usiz
     SCRATCH.with(|sc| {
         let mut guard = sc.borrow_mut();
         let sc = guard.get_or_insert_with(Scratch::new);
+        sc.memo_n = 0;
         let (mut ok, mut viewer_loaded) = (true, false);
         let done = G::assemble(snap, s, key, &mut |part| {
             if !ok {
@@ -347,6 +353,11 @@ pub fn emit_page<'a, G: Glue>(snap: &'a Snap, c: &Connection, ctx: &Ctx, s: usiz
                     sink.bytes(&b[..n]);
                 }
                 Part::Render(kind, k) => {
+                    // rendered already in this page: the same bytes again
+                    if let Some(m) = sc.memo[..sc.memo_n].iter().find(|m| m.0 == kind && m.1 == k) {
+                        ok = send_rendered::<G>(snap, c, ctx, &m.2, &m.3, sink, keep);
+                        return;
+                    }
                     if !viewer_loaded {
                         sc.load_viewer::<G>(c, ctx, viewer);
                         viewer_loaded = true;
@@ -355,36 +366,52 @@ pub fn emit_page<'a, G: Glue>(snap: &'a Snap, c: &Connection, ctx: &Ctx, s: usiz
                         ok = false;
                         return;
                     }
-                    let mut at = 0;
-                    for pair in sc.pieces.chunks(2) {
-                        let (place, pk) = crate::abi::split_at(pair[0]);
-                        let pkey = pair[1] as i64;
-                        if place > at {
-                            sink.bytes(&sc.out[at..place]);
-                        }
-                        at = place;
-                        match snap.reg(pk, pkey) {
-                            Some(r) => sink.seg(&r.seg),
-                            None => match load::<G>(c, ctx, pk, pkey, 0) {
-                                Some(rec) => {
-                                    sink.bytes(&build_raw::<G>(ctx, pk, rec.ptr()));
-                                    keep.push((pk, pkey));
-                                }
-                                None => {
-                                    ok = false;
-                                    return;
-                                }
-                            },
-                        }
+                    ok = send_rendered::<G>(snap, c, ctx, &sc.out, &sc.pieces, sink, keep);
+                    // kept for the page (its buffers reused from pages before)
+                    if sc.memo_n == sc.memo.len() {
+                        sc.memo.push((0, 0, Vec::new(), Vec::new()));
                     }
-                    if at < sc.out.len() {
-                        sink.bytes(&sc.out[at..]);
-                    }
+                    let m = &mut sc.memo[sc.memo_n];
+                    (m.0, m.1) = (kind, k);
+                    m.2.clear();
+                    m.2.extend_from_slice(&sc.out);
+                    m.3.clear();
+                    m.3.extend_from_slice(&sc.pieces);
+                    sc.memo_n += 1;
                 }
             }
         });
+        sc.memo_n = 0;
         done && ok
     })
+}
+
+/// A per-request fragment's bytes into the page: its own, and the cached pieces it merges
+/// (`pieces`: where each goes, and which). False when a merged piece's row is gone.
+fn send_rendered<'a, G: Glue>(snap: &'a Snap, c: &Connection, ctx: &Ctx, out: &[u8], pieces: &[usize], sink: &mut dyn Sink<'a>, keep: &mut Vec<(usize, i64)>) -> bool {
+    let mut at = 0;
+    for pair in pieces.chunks(2) {
+        let (place, pk) = crate::abi::split_at(pair[0]);
+        let pkey = pair[1] as i64;
+        if place > at {
+            sink.bytes(&out[at..place]);
+        }
+        at = place;
+        match snap.reg(pk, pkey) {
+            Some(r) => sink.seg(&r.seg),
+            None => match load::<G>(c, ctx, pk, pkey, 0) {
+                Some(rec) => {
+                    sink.bytes(&build_raw::<G>(ctx, pk, rec.ptr()));
+                    keep.push((pk, pkey));
+                }
+                None => return false,
+            },
+        }
+    }
+    if at < out.len() {
+        sink.bytes(&out[at..]);
+    }
+    true
 }
 
 // ---- the server

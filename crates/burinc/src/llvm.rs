@@ -44,6 +44,21 @@ pub struct ListSlot {
     pub var: String,
     pub expr: Expr,
     pub items: Schema,
+    /// loaded whatever the record holds (a use outside every `if`, or under one the loader can't
+    /// check); else only when one of `when`'s conditions holds (each: guards that all hold)
+    pub always: bool,
+    pub when: Vec<Vec<(Guard, bool)>>,
+}
+
+/// A condition the loader can check on the record's own fields before running a list's query:
+/// a field that's never none, compared with a constant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Guard {
+    Text { field: String, eq: bool, value: String },
+    Int { field: String, eq: bool, value: i64 },
+    Not(Box<Guard>),
+    And(Box<Guard>, Box<Guard>),
+    Or(Box<Guard>, Box<Guard>),
 }
 
 /// The record a register (or a list's items) is built from.
@@ -64,11 +79,28 @@ impl Schema {
         self.fields.push((path.to_string(), s));
         self.fields.len() - 1
     }
-    fn list(&mut self, key: &str, var: &str, expr: &Expr) -> usize {
+    /// A list's place, its use under `guards` recorded. The ones the loader can't check (None)
+    /// are left out: the rest still hold wherever the list is read. None left: an unconditional
+    /// use.
+    fn list(&mut self, key: &str, var: &str, expr: &Expr, guards: &[Option<(Guard, bool)>]) -> usize {
+        let checkable: Vec<(Guard, bool)> = guards.iter().flatten().cloned().collect();
+        let conj = if checkable.is_empty() { None } else { Some(checkable) };
         if let Some(i) = self.lists.iter().position(|l| l.key == key) {
+            match conj {
+                Some(c) if !self.lists[i].always => {
+                    if !self.lists[i].when.contains(&c) {
+                        self.lists[i].when.push(c);
+                    }
+                }
+                _ => self.lists[i].always = true,
+            }
             return i;
         }
-        self.lists.push(ListSlot { key: key.to_string(), var: var.to_string(), expr: expr.clone(), items: Schema::default() });
+        let (always, when) = match conj {
+            Some(c) => (false, vec![c]),
+            None => (true, vec![]),
+        };
+        self.lists.push(ListSlot { key: key.to_string(), var: var.to_string(), expr: expr.clone(), items: Schema::default(), always, when });
         self.lists.len() - 1
     }
     fn at(&self, path: &[usize]) -> &Schema {
@@ -265,6 +297,11 @@ struct Gen<'a, 'b> {
     max_bits: usize,
     mult: usize,
     per_viewer: bool,
+    /// the `if`s around what's being written (each: the condition as the loader can check it, or
+    /// None, and which side), recorded with each list used; `unguarded`: a use that may run
+    /// outside them (a hoisted prologue)
+    guards: Vec<Option<(Guard, bool)>>,
+    unguarded: bool,
     /// a `per viewer` register's parameters: holes on them are splices
     splice_params: Vec<String>,
     /// the splices' expressions, in order
@@ -447,7 +484,9 @@ impl<'a, 'b> Gen<'a, 'b> {
             }
         }
         let key = show(list);
-        let li = self.schema.at_mut(&parent.1).list(&key, var, list);
+        // (the record's own lists only: a list in an item is loaded with the item)
+        let guards = if parent.1.is_empty() && !self.unguarded { self.guards.clone() } else { vec![] };
+        let li = self.schema.at_mut(&parent.1).list(&key, var, list, &guards);
         Ok((parent.0, parent.1, li))
     }
 
@@ -651,13 +690,20 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.bit(&cv);
             }
             let (lt, lf, le) = (self.label("t"), self.label("f"), self.label("e"));
+            let g = self.guard_of(roots, c);
             self.line(&format!("br i1 {cv}, label %{lt}, label %{lf}"));
             self.block(&lt);
-            self.text(roots, a, out, esc)?;
+            self.guards.push(g.clone().map(|g| (g, true)));
+            let r = self.text(roots, a, out, esc);
+            self.guards.pop();
+            r?;
             self.flush(out);
             self.line(&format!("br label %{le}"));
             self.block(&lf);
-            self.text(roots, b, out, esc)?;
+            self.guards.push(g.map(|g| (g, false)));
+            let r = self.text(roots, b, out, esc);
+            self.guards.pop();
+            r?;
             self.flush(out);
             self.line(&format!("br label %{le}"));
             self.block(&le);
@@ -841,6 +887,35 @@ impl<'a, 'b> Gen<'a, 'b> {
     }
 
     /// An i1 condition.
+    /// A condition as the loader can check it before a list's query (`Guard`), or None: only a
+    /// field of the record's own row (never none: not optional) compared with a constant, and
+    /// `not`, `and`, `or` of those. (The field is in the record: the condition read it.)
+    fn guard_of(&self, roots: &HashMap<String, Root>, c: &Expr) -> Option<Guard> {
+        match c {
+            Expr::Not(x, _) => Some(Guard::Not(Box::new(self.guard_of(roots, x)?))),
+            Expr::Bin(BinOp::And, a, b, _) => Some(Guard::And(Box::new(self.guard_of(roots, a)?), Box::new(self.guard_of(roots, b)?))),
+            Expr::Bin(BinOp::Or, a, b, _) => Some(Guard::Or(Box::new(self.guard_of(roots, a)?), Box::new(self.guard_of(roots, b)?))),
+            Expr::Bin(op @ (BinOp::Eq | BinOp::Ne), a, b, _) => {
+                let (path, lit) = match (&**a, &**b) {
+                    (p, l @ (Expr::Str(..) | Expr::Int(..))) | (l @ (Expr::Str(..) | Expr::Int(..)), p) => (p, l),
+                    _ => return None,
+                };
+                let (root, rest) = path_of(path)?;
+                if !matches!(roots.get(&root), Some(Root::Rec { at, .. }) if at.is_empty()) || root == "viewer" {
+                    return None;
+                }
+                let field = std::iter::once(root).chain(rest).collect::<Vec<_>>().join(".");
+                let eq = *op == BinOp::Eq;
+                match (self.m.type_of(path, &self.scope).ok()?, lit) {
+                    (Type::Text, Expr::Str(s, _)) => Some(Guard::Text { field, eq, value: s.clone() }),
+                    (Type::Int, Expr::Int(n, _)) => Some(Guard::Int { field, eq, value: *n }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn cond(&mut self, roots: &HashMap<String, Root>, e: &Expr) -> Result<String, String> {
         match e {
             Expr::Call(f, _, _) if matches!(self.m.externs.get(f), Some(Decl::Extern { ret: Type::Bool, .. })) => {
@@ -1012,7 +1087,11 @@ impl<'a, 'b> Gen<'a, 'b> {
             return Ok(false);
         }
         let saved = self.body.len();
-        let (parent, _, _) = self.list_slot(roots, list, "it")?;
+        // (the prologue runs whatever the conditions: the list is loaded always)
+        self.unguarded = true;
+        let slot = self.list_slot(roots, list, "it");
+        self.unguarded = false;
+        let (parent, _, _) = slot?;
         self.body.truncate(saved);
         if parent != "%in" {
             return Ok(false);
@@ -1113,13 +1192,20 @@ impl<'a, 'b> Gen<'a, 'b> {
                         self.bit(&cv);
                     }
                     let (lt, lf, le) = (self.label("then"), self.label("else"), self.label("end"));
+                    let g = self.guard_of(roots, c);
                     self.line(&format!("br i1 {cv}, label %{lt}, label %{lf}"));
                     self.block(&lt);
-                    self.nodes(roots, a, out)?;
+                    self.guards.push(g.clone().map(|g| (g, true)));
+                    let r = self.nodes(roots, a, out);
+                    self.guards.pop();
+                    r?;
                     self.flush(out);
                     self.line(&format!("br label %{le}"));
                     self.block(&lf);
-                    self.nodes(roots, b, out)?;
+                    self.guards.push(g.map(|g| (g, false)));
+                    let r = self.nodes(roots, b, out);
+                    self.guards.pop();
+                    r?;
                     self.flush(out);
                     self.line(&format!("br label %{le}"));
                     self.block(&le);
@@ -1189,6 +1275,8 @@ fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[T
             max_bits: 0,
             mult: 1,
             per_viewer,
+            guards: vec![],
+            unguarded: false,
             splice_params: vec![],
             splices: vec![],
             hoisted: vec![],
@@ -1221,14 +1309,48 @@ fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[T
 
 /// The loader's code for a record's lists: each list's query, bound to the key or to fields of
 /// the record it hangs off; items fill an array of the list's bound; nested lists per item.
+/// A guard on the loaded record's fields: an i1.
+fn emit_guard(md: &mut Module, b: &mut String, n: &mut usize, schema: &Schema, rec: &str, pty: &str, g: &Guard) -> Result<String, String> {
+    let mut v = || {
+        *n += 1;
+        format!("%l{}", *n)
+    };
+    let field = |f: &str| schema.fields.iter().position(|(p, _)| p == f).ok_or_else(|| format!("a list's condition reads {f}, which isn't in the record"));
+    Ok(match g {
+        Guard::Text { field: f, eq, value } => {
+            let fi = field(f)?;
+            let s = md.str_const(value.as_bytes());
+            let (p, x, ptr, len, c, r) = (v(), v(), v(), v(), v(), v());
+            let _ = writeln!(b, "  {p} = getelementptr inbounds {pty}, ptr {rec}, i32 0, i32 {fi}\n  {x} = load %Str, ptr {p}\n  {ptr} = extractvalue %Str {x}, 0\n  {len} = extractvalue %Str {x}, 1\n  {c} = call i1 @burin_str_eq(ptr {ptr}, i64 {len}, ptr {s}, i64 {})\n  {r} = xor i1 {c}, {}", value.len(), !eq);
+            r
+        }
+        Guard::Int { field: f, eq, value } => {
+            let fi = field(f)?;
+            let (p, x, r) = (v(), v(), v());
+            let _ = writeln!(b, "  {p} = getelementptr inbounds {pty}, ptr {rec}, i32 0, i32 {fi}\n  {x} = load i64, ptr {p}\n  {r} = icmp {} i64 {x}, {value}", if *eq { "eq" } else { "ne" });
+            r
+        }
+        Guard::Not(x) => {
+            let c = emit_guard(md, b, n, schema, rec, pty, x)?;
+            let r = format!("%l{}", *n + 1);
+            *n += 1;
+            let _ = writeln!(b, "  {r} = xor i1 {c}, true");
+            r
+        }
+        Guard::And(x, y) | Guard::Or(x, y) => {
+            let (cx, cy) = (emit_guard(md, b, n, schema, rec, pty, x)?, emit_guard(md, b, n, schema, rec, pty, y)?);
+            let r = format!("%l{}", *n + 1);
+            *n += 1;
+            let _ = writeln!(b, "  {r} = {} i1 {cx}, {cy}", if matches!(g, Guard::And(..)) { "and" } else { "or" });
+            r
+        }
+    })
+}
+
 fn emit_lists(m: &Model, md: &mut Module, b: &mut String, n: &mut usize, qid: &mut usize, reg: &RegInfo, rec: &str, at: &[usize]) -> Result<(), String> {
     let schema = reg.schema.at(at).clone();
     let nf = schema.fields.len();
     for (k, slot) in schema.lists.iter().enumerate() {
-        let mut v = || {
-            *n += 1;
-            format!("%l{}", *n)
-        };
         let paths: Vec<String> = slot.items.fields.iter().map(|(p, _)| p.clone()).collect();
         let scope = Scope::default();
         let sel = crate::sql::list_select(m, &slot.expr, &paths, &scope)?;
@@ -1237,6 +1359,34 @@ fn emit_lists(m: &Model, md: &mut Module, b: &mut String, n: &mut usize, qid: &m
         item_at.push(k);
         let ity = type_name(&reg.name, &item_at);
         let pty = type_name(&reg.name, at);
+        // a list the page uses only under conditions on the row's own fields: its query only when
+        // one holds (else it's left empty, and the page, checking the same, doesn't read it)
+        let guarded = at.is_empty() && !slot.always && !slot.when.is_empty();
+        let (gq, gs, ga) = (format!("gq{qid}_{k}"), format!("gs{qid}_{k}"), format!("ga{qid}_{k}"));
+        if guarded {
+            let mut any = "false".to_string();
+            for conj in &slot.when {
+                let mut all = "true".to_string();
+                for (g, side) in conj {
+                    let c = emit_guard(md, b, n, &schema, rec, &pty, g)?;
+                    let (x, y) = (format!("%l{}", *n + 1), format!("%l{}", *n + 2));
+                    *n += 2;
+                    let _ = writeln!(b, "  {x} = xor i1 {c}, {}\n  {y} = and i1 {all}, {x}", !side);
+                    all = y;
+                }
+                let o = format!("%l{}", *n + 1);
+                *n += 1;
+                let _ = writeln!(b, "  {o} = or i1 {any}, {all}");
+                any = o;
+            }
+            let lp = format!("%l{}", *n + 1);
+            *n += 1;
+            let _ = writeln!(b, "  br i1 {any}, label %{gq}, label %{gs}\n{gs}:\n  {lp} = getelementptr inbounds {pty}, ptr {rec}, i32 0, i32 {}\n  store %List zeroinitializer, ptr {lp}\n  br label %{ga}\n{gq}:", nf + k);
+        }
+        let mut v = || {
+            *n += 1;
+            format!("%l{}", *n)
+        };
         let g = md.str_const(sel.sql.as_bytes());
         *qid += 1;
         let (st, size, sz, arr) = (v(), v(), v(), v());
@@ -1307,6 +1457,9 @@ fn emit_lists(m: &Model, md: &mut Module, b: &mut String, n: &mut usize, qid: &m
             });
             let _ = writeln!(b, "  {nx2} = add i64 {jj}, 1\n  store i64 {nx2}, ptr {j}\n  br label %{nh}");
             let _ = writeln!(b, "{nd}:");
+        }
+        if guarded {
+            let _ = writeln!(b, "  br label %{ga}\n{ga}:");
         }
     }
     Ok(())

@@ -428,6 +428,39 @@ The Rails port and the Rust port get the same clients over Action Cable.
 throughput lost. Any one of these means rethinking where events are built: the single writer
 building every event, and the workers' inboxes.
 
+## Loading only what a page uses (23 Oct 2026)
+
+A profile of Campfire under the mixed load (10 posts/s) put 77% of the server's time in SQLite.
+68% was one loader: the room title's (`room_title`, per viewer, twice in each page). Generated
+code was under 1%, so facts for LLVM in page code can gain little.
+
+- **Each list only when the page will read it.** `display_name` reads a room's members only
+  when the room is direct, but its loader ran the members query, a sort of up to 117 users, on
+  every page.
+  - Now the generator records the conditions around each use of a list. A condition the loader
+    can check is a field of the row compared with a constant (not none), or `not`, `and`, `or`
+    of those.
+  - When every use is under such conditions, the loader checks them on the row it loaded and
+    skips the query when none holds. The page checks the same conditions, so it never reads the
+    empty list.
+  - Conditions the loader can't check are left out (the rest still hold), and a hoisted use
+    counts as unconditional.
+- **A per-request fragment once per page.** One that comes again in a page, with the same key
+  for the same viewer, sends the bytes it rendered the first time. It's pure, and the page
+  reads one snapshot. The buffers are kept between pages, so the fast path still allocates
+  nothing.
+- **Measured** (`bench/mix/run.sh`, s8 against s7):
+
+  | posts/s | s7 pages/s | s8 pages/s | change | CPU per page |
+  |---|---|---|---|---|
+  | 0 | 54.1k | 68.6k | +27% | 0.078 → 0.047 ms |
+  | 10 | 45.1k | 64.9k | +44% | 0.086 → 0.050 ms |
+  | 50 | 33.4k | 50.2k | +50% | 0.105 → 0.060 ms |
+
+  - The server now runs at 75–82% of its 4 cores, so something outside it limits throughput.
+  - The same rule helps any app: a list behind a type or status switch costs nothing on rows
+    that don't show it.
+
 ## Helpers (23 Oct 2026)
 
 Computing that expressions can't say (a checksum, a compressor, a game's rules) is written in
