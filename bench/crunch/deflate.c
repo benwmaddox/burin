@@ -18,10 +18,18 @@
 static int64_t min64(int64_t a, int64_t b) { return a < b ? a : b; }
 
 // the compressed bytes into out (room for n + n / 8 + 64); their count
-static size_t deflate_fixed(const uint8_t *t, int64_t n, uint8_t *out) {
+// `sized`: the tables sized to the text, as apps/crunch/deflate_sized.burin (2^10 to 2^15
+// entries, the hash folded to them); else 2^15, deflate.burin's
+static size_t deflate_fixed(const uint8_t *t, int64_t n, uint8_t *out, int sized) {
     static int32_t head[32768], prev[32768];
-    memset(head, 0, sizeof head);
-    memset(prev, 0, sizeof prev);
+    int64_t tbits = 15;
+    if (sized) {
+        tbits = 10;
+        while (tbits < 15 && ((int64_t)1 << tbits) < n) tbits++;
+    }
+    int64_t mask = ((int64_t)1 << tbits) - 1;
+    memset(head, 0, sizeof(int32_t) << tbits);
+    memset(prev, 0, sizeof(int32_t) << tbits);
     int64_t lit_code[288], lit_bits[288];
     for (int64_t s = 0; s < 288; s++) {
         int64_t code, bits;
@@ -94,7 +102,8 @@ static size_t deflate_fixed(const uint8_t *t, int64_t n, uint8_t *out) {
         }
         int64_t best = 0, best_d = 0;
         if (i + 2 < n) {
-            int64_t h = (((int64_t)t[i] << 10) ^ ((int64_t)t[i + 1] << 5) ^ t[i + 2]) & 32767;
+            int64_t h15 = (((int64_t)t[i] << 10) ^ ((int64_t)t[i + 1] << 5) ^ t[i + 2]) & 32767;
+            int64_t h = (h15 ^ (h15 >> tbits)) & mask;
             int64_t cand = head[h], chain = 0, most = min64(258, n - i);
             while (cand > 0 && chain < CHAIN) {
                 int64_t p = cand - 1, d = i - p;
@@ -106,7 +115,7 @@ static size_t deflate_fixed(const uint8_t *t, int64_t n, uint8_t *out) {
                     best_d = d;
                     if (l == most) break;
                 }
-                cand = prev[p & 32767];
+                cand = prev[p & mask];
                 chain++;
             }
         }
@@ -132,8 +141,9 @@ static size_t deflate_fixed(const uint8_t *t, int64_t n, uint8_t *out) {
         }
         for (int64_t j = i; j < i + step; j++)
             if (j + 2 < n) {
-                int64_t h2 = (((int64_t)t[j] << 10) ^ ((int64_t)t[j + 1] << 5) ^ t[j + 2]) & 32767;
-                prev[j & 32767] = head[h2];
+                int64_t h15b = (((int64_t)t[j] << 10) ^ ((int64_t)t[j + 1] << 5) ^ t[j + 2]) & 32767;
+                int64_t h2 = (h15b ^ (h15b >> tbits)) & mask;
+                prev[j & mask] = head[h2];
                 head[h2] = (int32_t)(j + 1);
             }
         i += step;
@@ -183,11 +193,38 @@ int main(int argc, char **argv) {
     uint8_t *t = malloc(n), *out = malloc(n + n / 8 + 64), *zo = malloc(compressBound(n));
     if (fread(t, 1, n, f) != (size_t)n) return 1;
     fclose(f);
+    // `--series dir runs`: compute.rs's 10 texts (1 KB to 512 KB, from different places), each
+    // by both table designs; their bytes into dir/c-<sized>-<text>.raw; one JSON line each
+    if (argc > 2 && strcmp(argv[2], "--series") == 0) {
+        const char *dir = argc > 3 ? argv[3] : "";
+        int sr = argc > 4 ? atoi(argv[4]) : 15;
+        if (sr > 64) sr = 64;
+        for (int k = 0; k < 10; k++) {
+            int64_t len = ((int64_t)1024 << k) < n ? ((int64_t)1024 << k) : n;
+            int64_t at = ((int64_t)k * 997331) % (n - len + 1);
+            printf("{\"text\":%d,\"bytes\":%lld", k, (long long)len);
+            for (int sized = 0; sized < 2; sized++) {
+                size_t m = 0;
+                double s;
+                MEDIAN(sr, s, m = deflate_fixed(t + at, len, out, sized));
+                if (dir[0]) {
+                    char p[4096];
+                    snprintf(p, sizeof p, "%s/c-%d-%d.raw", dir, sized, k);
+                    FILE *o = fopen(p, "wb");
+                    fwrite(out, 1, m, o);
+                    fclose(o);
+                }
+                printf(",\"%s_us\":%.1f", sized ? "sized" : "deflate", s * 1e6);
+            }
+            printf("}\n");
+        }
+        return 0;
+    }
     int runs = argc > 3 ? atoi(argv[3]) : 9;
     if (runs > 64) runs = 64;
     double mb = n / 1e6, s;
     size_t m = 0;
-    MEDIAN(runs, s, m = deflate_fixed(t, n, out));
+    MEDIAN(runs, s, m = deflate_fixed(t, n, out, 0));
     if (argc > 2 && argv[2][0]) { FILE *o = fopen(argv[2], "wb"); fwrite(out, 1, m, o); fclose(o); }
     double crc_s;
     int64_t crc = 0;
@@ -196,7 +233,7 @@ int main(int argc, char **argv) {
     int64_t sink = 0, small = n < 64 ? n : 64, kb = n < 1024 ? n : 1024;
     double crc64_s, d1k_s;
     MEDIAN(runs, crc64_s, for (int k = 0; k < 100000; k++) { sink += crc32_bytes(t, small); __asm__ volatile("" : : "r"(sink) : "memory"); });
-    MEDIAN(runs, d1k_s, for (int k = 0; k < 2000; k++) { sink += (int64_t)deflate_fixed(t, kb, out); __asm__ volatile("" : : "r"(sink) : "memory"); });
+    MEDIAN(runs, d1k_s, for (int k = 0; k < 2000; k++) { sink += (int64_t)deflate_fixed(t, kb, out, 0); __asm__ volatile("" : : "r"(sink) : "memory"); });
     printf("{\"impl\":\"c\",\"bytes\":%lld,\"deflate_mb_s\":%.1f,\"compressed\":%zu,\"crc32_mb_s\":%.1f,\"crc32\":%lld,\"crc32_64b_ns\":%.0f,\"deflate_1k_ns\":%.0f", (long long)n, mb / s, m, mb / crc_s, (long long)crc, crc64_s * 1e9 / 100000, d1k_s * 1e9 / 2000);
     // context: zlib (levels 1 and 6) and libdeflate (1 and 6), raw DEFLATE; zlib's crc32
     for (int level = 1; level <= 6; level += 5) {

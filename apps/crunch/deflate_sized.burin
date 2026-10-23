@@ -1,0 +1,210 @@
+// deflate.burin with its tables sized to the text (bench/crunch: the table research). The hash
+// table and the window grow with the text, 2^10 to 2^15 entries, so a small text zeroes only
+// what it can use. The hash is folded to their size, so at full size (texts of 32 KB and more)
+// it is deflate's own, and so are the bytes it writes.
+
+
+fn deflate_sized(t: Text): Text {
+  var n = byte_length(t)
+  // the tables' size: the first power of two from 2^10 up that holds the text, 2^15 at most
+  var tbits = 10
+  while tbits < 15 and (1 << tbits) < n {
+    tbits = tbits + 1
+  }
+  var mask = (1 << tbits) - 1
+  // where each 3-byte prefix was last seen (position + 1; 0: never), and each position's
+  // earlier one with the same hash (by position within the window)
+  var head = int32s(1 << tbits)
+  var prev = int32s(1 << tbits)
+
+  // the fixed codes, reversed (DEFLATE sends a code's high bit first, packed from the low end)
+  var lit_code = ints(288)
+  var lit_bits = ints(288)
+  for s in 0..288 {
+    var code = 0
+    var bits = 0
+    if s < 144 {
+      code = 48 + s
+      bits = 8
+    } else if s < 256 {
+      code = 400 + s - 144
+      bits = 9
+    } else if s < 280 {
+      code = s - 256
+      bits = 7
+    } else {
+      code = 192 + s - 280
+      bits = 8
+    }
+    var r = 0
+    for k in 0..bits {
+      r = (r << 1) | ((code >> k) & 1)
+    }
+    lit_code[s] = r
+    lit_bits[s] = bits
+  }
+  // lengths 3 to 258: their code (257 + c), extra bits and base
+  var len_extra = ints(29)
+  var len_base = ints(29)
+  var base = 3
+  for c in 0..29 {
+    var x = 0
+    if c >= 8 and c < 28 {
+      x = (c - 4) / 4
+    }
+    len_extra[c] = x
+    len_base[c] = base
+    base = base + (1 << x)
+  }
+  len_base[28] = 258
+  var len_sym = ints(259)
+  for c in 0..29 {
+    var hi = 259
+    if c < 28 {
+      hi = len_base[c + 1]
+    }
+    for l in len_base[c]..min(hi, 259) {
+      len_sym[l] = c
+    }
+  }
+  // distances 1 to 32768: their code's extra bits and base; the code of d - 1 below 256 at
+  // dist_lo, and of larger ones at dist_hi[(d - 1) >> 7]
+  var dist_extra = ints(30)
+  var dist_base = ints(30)
+  base = 1
+  for c in 0..30 {
+    var x = 0
+    if c >= 4 {
+      x = (c - 2) / 2
+    }
+    dist_extra[c] = x
+    dist_base[c] = base
+    base = base + (1 << x)
+  }
+  var dist_lo = bytes(256)
+  var dist_hi = bytes(256)
+  for c in 0..30 {
+    for d in dist_base[c] - 1..min(dist_base[c] - 1 + (1 << dist_extra[c]), 32768) {
+      if d < 256 {
+        dist_lo[d] = c
+      }
+      dist_hi[d >> 7] = c
+    }
+  }
+  var dist_rev = ints(30)
+  for c in 0..30 {
+    var r = 0
+    for k in 0..5 {
+      r = (r << 1) | ((c >> k) & 1)
+    }
+    dist_rev[c] = r
+  }
+
+  // the bits waiting to be written (fewer than 8), and up to 4 codes waiting to join them
+  var acc = 0
+  var have = 0
+  var q_code = ints(4)
+  var q_bits = ints(4)
+  var q = 0
+  // the block's header: the last block (1), fixed codes (01)
+  q_code[0] = 1
+  q_bits[0] = 1
+  q_code[1] = 1
+  q_bits[1] = 2
+  q = 2
+
+  var i = 0
+  var finished = false
+  while true {
+    // the codes queued: out
+    for k in 0..q {
+      acc = acc | (q_code[k] << have)
+      have = have + q_bits[k]
+      while have >= 8 {
+        out_byte(acc & 255)
+        acc = acc >> 8
+        have = have - 8
+      }
+    }
+    q = 0
+    if i >= n {
+      // the end of the block, then the last bits
+      if finished {
+        break
+      }
+      q_code[0] = lit_code[256]
+      q_bits[0] = lit_bits[256]
+      q = 1
+      finished = true
+      continue
+    }
+    // the longest earlier match along the chain
+    var best = 0
+    var best_d = 0
+    if i + 2 < n {
+      var h15 = ((byte_at(t, i) << 10) ^ (byte_at(t, i + 1) << 5) ^ byte_at(t, i + 2)) & 32767
+      var h = (h15 ^ (h15 >> tbits)) & mask
+      var cand = head[h]
+      var chain = 0
+      var most = min(258, n - i)
+      while cand > 0 and chain < CHAIN {
+        var p = cand - 1
+        var d = i - p
+        if d > 32768 {
+          break
+        }
+        var l = 0
+        while l < most and byte_at(t, p + l) == byte_at(t, i + l) {
+          l = l + 1
+        }
+        if l > best {
+          best = l
+          best_d = d
+          if l == most {
+            break
+          }
+        }
+        cand = prev[p & mask]
+        chain = chain + 1
+      }
+    }
+    var step = 1
+    if best >= 3 {
+      var c = len_sym[best]
+      q_code[0] = lit_code[257 + c]
+      q_bits[0] = lit_bits[257 + c]
+      q_code[1] = best - len_base[c]
+      q_bits[1] = len_extra[c]
+      var dc = 0
+      if best_d - 1 < 256 {
+        dc = dist_lo[best_d - 1]
+      } else {
+        dc = dist_hi[(best_d - 1) >> 7]
+      }
+      q_code[2] = dist_rev[dc]
+      q_bits[2] = 5
+      q_code[3] = best_d - dist_base[dc]
+      q_bits[3] = dist_extra[dc]
+      q = 4
+      step = best
+    } else {
+      var b = byte_at(t, i)
+      q_code[0] = lit_code[b]
+      q_bits[0] = lit_bits[b]
+      q = 1
+    }
+    // every position passed: into the chains
+    for j in i..i + step {
+      if j + 2 < n {
+        var h15b = ((byte_at(t, j) << 10) ^ (byte_at(t, j + 1) << 5) ^ byte_at(t, j + 2)) & 32767
+        var h2 = (h15b ^ (h15b >> tbits)) & mask
+        prev[j & mask] = head[h2]
+        head[h2] = j + 1
+      }
+    }
+    i = i + step
+  }
+  if have > 0 {
+    out_byte(acc & 255)
+  }
+}

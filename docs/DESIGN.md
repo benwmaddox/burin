@@ -525,6 +525,20 @@ burin as a helper: a `fn` with a body of statements.
   - CRC-32 matches C.
   - For context, other algorithms: libdeflate level 1 runs at 240 MB/s to 41% of the size (this
     algorithm gets 49.6%).
+- **Table research** (`bench/crunch/series.sh`: 10 texts from 1 KB to 512 KB, both designs
+  checked byte for byte against C). Does zeroing DEFLATE's 2^15-entry tables on every call cost
+  much, and do tables sized to the text help? Mostly no.
+  - Warm, the 256 KB are in cache and zeroing them takes about 2.4 µs: a quarter of a 1 KB call
+    (9.9 → 7.5 µs with sized tables), and nothing from 4 KB up.
+  - Smaller tables collide more. From 2 KB to 32 KB, sized tables were 5–20% slower, and the
+    series as a whole came out a little slower (34.8 ms against 34.4 ms).
+  - So arrays zeroed lazily (a stamp per slot, nothing to zero at the start) aren't worth their
+    cost on every read here. Getting fresh memory cold (about 13 µs) is the bigger cost, and the
+    kept arena already avoids it.
+  - Kept: the 2^15 design (`deflate`); `deflate_sized` and the C version's `sized` flag stay for
+    the measurement.
+  - Against C on the same texts: burin's tables are constants, and the C version builds its own
+    every call, so burin is about 2× faster on 1 KB and about 0.85–0.9× from 4 KB up.
 - **Next:**
   - The same facts for pages and actions: a field that isn't optional is never none; `max N`
     text; a list's `limit`; snapshot data never changes.

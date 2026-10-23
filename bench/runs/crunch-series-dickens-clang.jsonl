@@ -1,0 +1,10 @@
+{"text":0,"bytes":1024,"deflate_us":20.1,"sized_us":17.1}
+{"text":1,"bytes":2048,"deflate_us":28.3,"sized_us":29.2}
+{"text":2,"bytes":4096,"deflate_us":53.1,"sized_us":56.4}
+{"text":3,"bytes":8192,"deflate_us":119.5,"sized_us":124.4}
+{"text":4,"bytes":16384,"deflate_us":298.0,"sized_us":312.5}
+{"text":5,"bytes":32768,"deflate_us":740.0,"sized_us":738.2}
+{"text":6,"bytes":65536,"deflate_us":1707.0,"sized_us":1748.4}
+{"text":7,"bytes":131072,"deflate_us":3767.6,"sized_us":3756.5}
+{"text":8,"bytes":262144,"deflate_us":7522.8,"sized_us":7448.1}
+{"text":9,"bytes":524288,"deflate_us":15486.6,"sized_us":15483.2}

@@ -1,0 +1,11 @@
+{"text":0,"bytes":1024,"deflate_warm_us":9.9,"deflate_cold_us":23.2,"sized_warm_us":7.5,"sized_cold_us":20.6,"crc32_warm_us":1.83,"crc32_cold_us":1.83}
+{"text":1,"bytes":2048,"deflate_warm_us":20.0,"deflate_cold_us":31.6,"sized_warm_us":27.5,"sized_cold_us":32.8,"crc32_warm_us":3.65,"crc32_cold_us":3.65}
+{"text":2,"bytes":4096,"deflate_warm_us":53.5,"deflate_cold_us":62.4,"sized_warm_us":65.5,"sized_cold_us":74.8,"crc32_warm_us":7.29,"crc32_cold_us":7.29}
+{"text":3,"bytes":8192,"deflate_warm_us":138.7,"deflate_cold_us":148.3,"sized_warm_us":155.4,"sized_cold_us":167.7,"crc32_warm_us":14.88,"crc32_cold_us":14.89}
+{"text":4,"bytes":16384,"deflate_warm_us":361.7,"deflate_cold_us":370.9,"sized_warm_us":389.0,"sized_cold_us":395.6,"crc32_warm_us":29.78,"crc32_cold_us":29.12}
+{"text":5,"bytes":32768,"deflate_warm_us":872.4,"deflate_cold_us":895.6,"sized_warm_us":916.3,"sized_cold_us":923.6,"crc32_warm_us":58.53,"crc32_cold_us":55.67}
+{"text":6,"bytes":65536,"deflate_warm_us":2034.6,"deflate_cold_us":1948.1,"sized_warm_us":1984.3,"sized_cold_us":2029.0,"crc32_warm_us":113.69,"crc32_cold_us":111.35}
+{"text":7,"bytes":131072,"deflate_warm_us":4277.6,"deflate_cold_us":4230.4,"sized_warm_us":4443.5,"sized_cold_us":4428.0,"crc32_warm_us":222.91,"crc32_cold_us":222.99}
+{"text":8,"bytes":262144,"deflate_warm_us":8774.7,"deflate_cold_us":8802.1,"sized_warm_us":8991.9,"sized_cold_us":8982.3,"crc32_warm_us":450.25,"crc32_cold_us":445.68}
+{"text":9,"bytes":524288,"deflate_warm_us":17847.6,"deflate_cold_us":17883.5,"sized_warm_us":17797.1,"sized_cold_us":18421.3,"crc32_warm_us":892.22,"crc32_cold_us":891.29}
+{"series":10,"deflate_warm_us":34390.8,"deflate_cold_us":34395.9,"sized_warm_us":34778.0,"sized_cold_us":35475.7}
