@@ -1,7 +1,7 @@
 From eb8e21c99ff58daac43df64dae28ef7edf0e3e7e Mon Sep 17 00:00:00 2001
 From: Ben Maddox <benwmaddox@gmail.com>
 Date: Fri, 23 Oct 2026 10:33:51 -0400
-Subject: [PATCH 5/7] The layout's stylesheet links and import map as one
+Subject: [PATCH 5/8] The layout's stylesheet links and import map as one
  shared fragment each
 
 A room page's head is ~19 KB, ~17 KB of it the same for everyone (the import map and the

@@ -1,7 +1,7 @@
 From 72abcf4dfc7c52c41c278674af079be60cf76c3a Mon Sep 17 00:00:00 2001
 From: Ben Maddox <benwmaddox@gmail.com>
 Date: Fri, 23 Oct 2026 10:56:18 -0400
-Subject: [PATCH 7/7] README: what the optimized branch changes
+Subject: [PATCH 7/8] README: what the optimized branch changes
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

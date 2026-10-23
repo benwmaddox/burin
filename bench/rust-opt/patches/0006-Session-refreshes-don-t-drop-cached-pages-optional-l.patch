@@ -1,7 +1,7 @@
 From f64192a069374bcfffae10c3c506e4a725341feb Mon Sep 17 00:00:00 2001
 From: Ben Maddox <benwmaddox@gmail.com>
 Date: Fri, 23 Oct 2026 10:49:08 -0400
-Subject: [PATCH 6/7] Session refreshes don't drop cached pages; optional log
+Subject: [PATCH 6/8] Session refreshes don't drop cached pages; optional log
  of global writes
 
 A session's refresh (last_active_at, once an hour per person) moved the global version, so the

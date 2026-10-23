@@ -1,7 +1,7 @@
 From 3f5af2810a3fd1f86316ff05588bdf030f808eeb Mon Sep 17 00:00:00 2001
 From: Ben Maddox <benwmaddox@gmail.com>
 Date: Fri, 23 Oct 2026 09:54:18 -0400
-Subject: [PATCH 2/7] Unread as counts: a post writes the room and its poster,
+Subject: [PATCH 2/8] Unread as counts: a post writes the room and its poster,
  not every member
 
 As in etch: rooms.posts_count counts the room's posts, memberships.seen_posts is the count a

@@ -1,0 +1,37 @@
+From 52d6aeb070031f58a73d8dd7a0bfcc87e9e27bc3 Mon Sep 17 00:00:00 2001
+From: Ben Maddox <benwmaddox@gmail.com>
+Date: Fri, 23 Oct 2026 13:23:57 -0400
+Subject: [PATCH 8/8] README: etch is now Burin
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ README.md | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/README.md b/README.md
+index 2676bdc..361f3fe 100644
+--- a/README.md
++++ b/README.md
+@@ -87,8 +87,8 @@ against Rails. See [`parity/SCREENS.md`](parity/SCREENS.md) for coverage and mas
+ ## The `optimized` branch
+ 
+ This branch is a benchmark variant: the port with ideas from the
+-[etch](https://github.com/benwmaddox/etch) experiment applied where they fit idiomatic Rust,
+-compared with the published port in etch's mixed benchmark (117 people, 60 rooms, browsers
++[Burin](https://github.com/benwmaddox/burin) (formerly etch) experiment applied where they fit idiomatic Rust,
++compared with the published port in Burin's mixed benchmark (117 people, 60 rooms, browsers
+ using Turbo, people posting). Its own differences:
+ 
+ - **Caches versioned by what each write changes.** The response and fragment caches were keyed
+@@ -108,7 +108,7 @@ using Turbo, people posting). Its own differences:
+   import map and stylesheet links are shared fragments.
+ - `CAMPFIRE_SPLICE_{FRAGMENTS,TEXT_PIECES,TEXTS}_MB` set the gzip piece stores' budgets.
+ 
+-etch's `bench/mix/rustopt-verify.sh` checks the branch against itself with its caches off.
++Burin's `bench/mix/rustopt-verify.sh` checks the branch against itself with its caches off.
+ 
+ ## Known differences
+ 
+-- 
+2.56.0.windows.1
+

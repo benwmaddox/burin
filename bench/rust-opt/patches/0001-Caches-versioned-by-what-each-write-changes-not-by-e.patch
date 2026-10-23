@@ -1,7 +1,7 @@
 From 9cb19d1c7bda7697b4c8cf8e45826588589dfa7b Mon Sep 17 00:00:00 2001
 From: Ben Maddox <benwmaddox@gmail.com>
 Date: Fri, 23 Oct 2026 09:42:15 -0400
-Subject: [PATCH 1/7] Caches versioned by what each write changes, not by every
+Subject: [PATCH 1/8] Caches versioned by what each write changes, not by every
  commit
 
 The response and fragment caches were keyed by PRAGMA data_version, so any commit made every
