@@ -577,7 +577,10 @@ impl<'a> Gen<'a> {
                 let (head, inner, done) = (self.label("while"), self.label("body"), self.label("wend"));
                 self.br(&head);
                 self.start(&head);
-                self.step();
+                // a counted loop ends by itself (`counted`): no step
+                if !self.counted(c, body) {
+                    self.step();
+                }
                 let c = self.bool(c)?;
                 self.cond_br(&c, &inner, &done);
                 self.start(&inner);
@@ -664,6 +667,29 @@ impl<'a> Gen<'a> {
 }
 
 impl Gen<'_> {
+    /// Whether a `while` ends by itself, as a `for` does: its condition is `x < y` or `x <= y`
+    /// (or that `and` more); `x` is a `var` the body changes in one place only, a statement of its
+    /// own (not inside an `if` or a loop) `x = x + c` with c a number above 0; `y` reads nothing
+    /// the loop changes; and nothing `continue`s it (every turn that goes on reaches the step). An
+    /// overflow of x ends the call (none), so x reaches y.
+    fn counted(&self, c: &Expr, body: &[HStmt]) -> bool {
+        let mut first = c;
+        while let Expr::Bin(BinOp::And, l, _, _) = first {
+            first = l;
+        }
+        let Expr::Bin(BinOp::Lt | BinOp::Le, x, y, _) = first else { return false };
+        let Expr::Name(x, _) = &**x else { return false };
+        if !matches!(self.lookup(x), Some(Local::Slot(_, Ty::Int, true))) {
+            return false;
+        }
+        let changed = assigned(body);
+        let steps_up = |s: &HStmt| match s {
+            HStmt::Set(n, Expr::Bin(BinOp::Add, a, b, _), _) if n == x => matches!((&**a, &**b), (Expr::Name(m, _), Expr::Int(k, _)) | (Expr::Int(k, _), Expr::Name(m, _)) if m == x && *k > 0),
+            _ => false,
+        };
+        changed.iter().filter(|n| *n == x).count() == 1 && body.iter().any(steps_up) && !reads(y, &changed) && !continues(body)
+    }
+
     /// Before a way out: the arena back to where the helper found it.
     fn leave(&mut self) {
         if self.arena {
@@ -674,6 +700,47 @@ impl Gen<'_> {
 
 fn x_span(x: &Expr) -> Span {
     x.span()
+}
+
+/// The names statements assign (each time it's written: `x = …` twice is x twice), and the
+/// arrays whose elements they set, anywhere in them.
+fn assigned(body: &[HStmt]) -> Vec<String> {
+    let mut out = vec![];
+    for s in body {
+        match s {
+            HStmt::Set(n, _, _) | HStmt::SetAt(n, _, _, _) => out.push(n.clone()),
+            HStmt::If(_, a, b, _) => {
+                out.extend(assigned(a));
+                out.extend(assigned(b));
+            }
+            HStmt::While(_, a, _) | HStmt::For(_, _, _, a, _) => out.extend(assigned(a)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether an expression reads any of `names`, or an array's element (which a loop may set).
+fn reads(e: &Expr, names: &[String]) -> bool {
+    match e {
+        Expr::Name(n, _) => names.contains(n),
+        Expr::Call(f, a, _) => f == "__at" || a.iter().any(|x| reads(x, names)),
+        Expr::Bin(_, l, r, _) => reads(l, names) || reads(r, names),
+        Expr::Not(x, _) => reads(x, names),
+        Expr::If(c, a, b, _) => reads(c, names) || reads(a, names) || reads(b, names),
+        Expr::Int(..) | Expr::Dur(..) | Expr::Bool(..) => false,
+        // (anything else isn't in a helper: the generator refuses it)
+        _ => true,
+    }
+}
+
+/// Whether a loop's body `continue`s it (a `continue` in a loop inside is that loop's).
+fn continues(body: &[HStmt]) -> bool {
+    body.iter().any(|s| match s {
+        HStmt::Continue(_) => true,
+        HStmt::If(_, a, b, _) => continues(a) || continues(b),
+        _ => false,
+    })
 }
 
 /// Whether statements make an array (`var a = ints(n)`, anywhere in them).

@@ -344,3 +344,37 @@ fn helpers_refuse_what_would_hide_reads_or_never_end() {
     // bit operations belong in helpers
     refused("fragment p() <<<{{for p in recent()}}{{p.author.name}}{{end}}>>>\naction a(n: Int) {\n  create Post { author: viewer, body: text(n & 3) }\n}", "&");
 }
+
+#[test]
+fn a_counted_while_spends_no_steps_and_every_other_does() {
+    let src = format!(
+        "{BASE}\n{}",
+        [
+            // counted: its own step, a bound it doesn't change
+            "fn counted(n: Int): Int {\n  var i = 0\n  while i < n and i >= 0 {\n    i = i + 1\n  }\n  return i\n}",
+            // a `continue` skips the step: it may never end
+            "fn skips(n: Int): Int {\n  var i = 0\n  while i < n {\n    if i == 3 {\n      continue\n    }\n    i = i + 1\n  }\n  return i\n}",
+            // the bound moves with it
+            "fn chases(n: Int): Int {\n  var i = 0\n  var m = n\n  while i < m {\n    m = m + 1\n    i = i + 1\n  }\n  return i\n}",
+            // the step only sometimes
+            "fn maybe(n: Int): Int {\n  var i = 0\n  while i < n {\n    if n > 2 {\n      i = i + 1\n    }\n  }\n  return i\n}",
+            // stepped twice, once back
+            "fn twice(n: Int): Int {\n  var i = 0\n  while i < n {\n    i = i + 1\n    i = i - 1\n  }\n  return i\n}",
+            // the bound reads an array the loop sets
+            "fn moving(n: Int): Int {\n  var a = ints(4)\n  a[0] = n\n  var i = 0\n  while i < a[0] {\n    a[0] = a[0] + 1\n    i = i + 1\n  }\n  return i\n}",
+        ]
+        .join("\n")
+    );
+    let app = app_of(&src).unwrap();
+    let m = check::Model::new(&app).map_err(|e| e.msg).unwrap();
+    check::check(&m).map_err(|e| e.msg).unwrap();
+    let ir = crate::helpers::emit(&m, true).map_err(|e| e.1).unwrap();
+    let steps = |f: &str| {
+        let body = ir.split("define ").find(|d| d.contains(&format!("@burin_fn_{f}("))).unwrap();
+        body.matches("load i64, ptr %steps").count()
+    };
+    assert_eq!(steps("counted"), 0, "a counted loop");
+    for f in ["skips", "chases", "maybe", "twice", "moving"] {
+        assert_eq!(steps(f), 1, "{f} isn't counted");
+    }
+}
