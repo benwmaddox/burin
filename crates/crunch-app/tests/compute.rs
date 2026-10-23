@@ -25,8 +25,77 @@ fn median(runs: usize, mut f: impl FnMut()) -> f64 {
     t[runs / 2]
 }
 
+/// A series of 10 texts (slices of the input from different places, 1 KB to 512 KB), each
+/// compressed warm (the thread's helper arena kept from the calls before, as a worker's or the
+/// writer's is) and cold (the arena given back before each call: its memory fresh from the
+/// system). CRC-32, which makes no arena array, is the control. One JSON line per text, then
+/// the series' totals. Only with BURIN_CRUNCH_ARENA=1.
+#[test]
+fn arena_warm_and_cold() {
+    let (Ok(path), Ok(_)) = (std::env::var("BURIN_CRUNCH_INPUT"), std::env::var("BURIN_CRUNCH_ARENA")) else {
+        eprintln!("skipped: BURIN_CRUNCH_INPUT or BURIN_CRUNCH_ARENA isn't set");
+        return;
+    };
+    let input = std::fs::read(&path).unwrap();
+    let runs: usize = std::env::var("BURIN_CRUNCH_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(15);
+    let texts: Vec<&[u8]> = (0..10)
+        .map(|k| {
+            let len = (1024usize << k).min(input.len());
+            let at = (k * 997_331) % (input.len() - len + 1);
+            &input[at..at + len]
+        })
+        .collect();
+    let mut out = Vec::with_capacity(1 << 20);
+    fn deflate(t: &[u8], out: &mut Vec<u8>) {
+        out.clear();
+        unsafe { burin_fn_deflate(t.as_ptr(), t.len() as i64, out) };
+        assert!(!out.is_empty());
+    }
+    // one call's time: the median of `runs`, each `before` it (untimed)
+    let mut time = |t: &[u8], before: &dyn Fn(), f: &mut dyn FnMut(&[u8])| {
+        let mut ts: Vec<f64> = (0..runs)
+            .map(|_| {
+                before();
+                let t0 = Instant::now();
+                f(t);
+                t0.elapsed().as_secs_f64() * 1e9
+            })
+            .collect();
+        ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ts[runs / 2]
+    };
+    // warm the arena: the whole series once
+    for t in &texts {
+        deflate(t, &mut out);
+    }
+    let (mut warm_total, mut cold_total) = (0.0, 0.0);
+    for (k, t) in texts.iter().enumerate() {
+        let warm = time(t, &|| {}, &mut |t| deflate(t, &mut out));
+        let cold = time(t, &|| burin_rt::abi::helper_arena_drop(), &mut |t| deflate(t, &mut out));
+        let mut sink = 0;
+        let crc_warm = time(t, &|| {}, &mut |t| sink += unsafe { burin_fn_crc32(t.as_ptr(), t.len() as i64) });
+        let crc_cold = time(t, &|| burin_rt::abi::helper_arena_drop(), &mut |t| sink += unsafe { burin_fn_crc32(t.as_ptr(), t.len() as i64) });
+        std::hint::black_box(sink);
+        warm_total += warm;
+        cold_total += cold;
+        println!(
+            "{{\"text\":{k},\"bytes\":{},\"deflate_warm_us\":{:.1},\"deflate_cold_us\":{:.1},\"cold_over_warm\":{:.2},\"crc32_warm_us\":{:.2},\"crc32_cold_us\":{:.2}}}",
+            t.len(),
+            warm / 1e3,
+            cold / 1e3,
+            cold / warm,
+            crc_warm / 1e3,
+            crc_cold / 1e3
+        );
+    }
+    println!("{{\"series\":10,\"deflate_warm_us\":{:.1},\"deflate_cold_us\":{:.1},\"cold_over_warm\":{:.2}}}", warm_total / 1e3, cold_total / 1e3, cold_total / warm_total);
+}
+
 #[test]
 fn deflate_and_crc32_timed() {
+    if std::env::var("BURIN_CRUNCH_ARENA").is_ok() {
+        return;
+    }
     let Ok(path) = std::env::var("BURIN_CRUNCH_INPUT") else {
         eprintln!("skipped: BURIN_CRUNCH_INPUT isn't set");
         return;

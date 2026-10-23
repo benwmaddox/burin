@@ -473,8 +473,13 @@ burin as a helper: a `fn` with a body of statements.
 - **Memory (time over memory):**
   - Arrays of a size written out, up to 4 KB, are on the stack, where LLVM keeps them in
     registers.
-  - The rest come from a bump arena per thread, marked on entry and released on every way out.
-    The memory is kept for the next call; a call can't take more than 256 MB.
+  - The rest come from a bump arena per thread (1 MiB chunks), marked on entry and released on
+    every way out.
+    The memory is kept for the next call; a call can't take more than 256 MB. Kept, a warm
+    call saves getting fresh zeroed memory: about 13 µs a call for DEFLATE's 256 KB of hash
+    tables (`bench/crunch/arena.sh`, 10 texts from 1 KB to 512 KB). That is 2.5× on a 1 KB
+    text and 1.65× on 2 KB, but lost in the work from 4 KB up. With memory fresh from the
+    system each call (8 MiB chunks, mapped and unmapped), a cold call paid about 180 µs.
   - Arena arrays are `noalias` (as malloc's), so LLVM knows they don't overlap the text.
 - **Constant tables:** a helper's top-level statements that depend on nothing at run time
   (building a table from constants) run in the compiler, with the generated code's own rules.

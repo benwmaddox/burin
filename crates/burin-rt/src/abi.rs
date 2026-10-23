@@ -692,7 +692,8 @@ pub unsafe extern "C" fn burin_vec_truncate(v: *mut Vec<u8>, n: i64) {
 /// when it ends (helpers nest; they don't recurse). The memory is kept for the thread's next
 /// calls: time over memory. A helper asking for more than HELPER_ARENA_MAX in all fails (none).
 pub const HELPER_ARENA_MAX: usize = 256 << 20;
-const CHUNK: usize = 1 << 20;
+/// a chunk's size in u64s (1 MiB)
+const CHUNK: usize = (1 << 20) / 8;
 
 struct HelperArena {
     /// chunks of u64s (8-byte aligned; arrays are of i64, i32 or u8), kept once made
@@ -725,6 +726,17 @@ pub const HELPER_STEPS_WORKER: i64 = 500_000_000;
 /// The loop steps each helper call on this thread may take.
 pub fn set_helper_budget(steps: i64) {
     HELPER_BUDGET.with(|b| b.set(steps));
+}
+
+/// Gives this thread's helper arena back to the allocator (the next helper's arrays start from
+/// fresh memory). The runtime never does: kept, it costs memory and saves time. For measuring.
+pub fn helper_arena_drop() {
+    HELPER_ARENA.with(|a| {
+        let mut a = a.borrow_mut();
+        a.chunks = Vec::new();
+        a.at = 0;
+        a.used = 0;
+    });
 }
 
 /// A helper call's step budget.
@@ -850,7 +862,7 @@ mod helper_arena_tests {
         let a = burin_ha_alloc(100);
         assert!(!a.is_null() && a as usize % 8 == 0);
         let inner = burin_ha_mark();
-        // bigger than a chunk: its own
+        // bigger than a chunk (1 MiB): its own
         let big = burin_ha_alloc(3 << 20);
         assert!(!big.is_null());
         unsafe { *big.add((3 << 20) - 1) = 7 };
