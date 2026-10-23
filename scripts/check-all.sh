@@ -21,6 +21,8 @@ echo "== board";         BURIN_BIN=$HOME/hw/burin-board-release bash scripts/boa
 echo "== externs";     BURIN_BIN=$HOME/hw/burin-notes-release bash scripts/notes-check.sh 2>&1 | grep -E "FAIL|PASS"
 echo "== numbers";       BURIN_BIN=$HOME/hw/burin-numbers-release bash scripts/numbers-check.sh 2>&1 | grep -E "MISMATCH|PASS|FAIL"
 echo "== live";        bash scripts/live-check.sh 2>&1 | grep -E "FAIL|PASS"
+echo "== revoke";      bash scripts/revoke-check.sh 2>&1 | grep -E "FAIL|PASS"
+echo "== live fuzz";   for s in 1 2 3; do bash scripts/live-fuzz.sh 400 $s 2>&1 | grep -E "DIFFERS|STREAM|PASS|FAIL" | head -3; done
 echo "== browser";     bash scripts/browser-smoke.sh 2>&1 | grep -E "FAIL|PASS"
 echo "== browser live"; bash scripts/browser-live.sh 2>&1 | grep -E "FAIL|PASS"
 echo "== hot path";      bash scripts/hot-path-test.sh 2>&1 | tail -4
