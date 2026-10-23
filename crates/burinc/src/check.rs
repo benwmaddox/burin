@@ -23,8 +23,10 @@ pub struct Model<'a> {
     pub entities: HashMap<String, &'a Entity>,
     pub viewer: Option<&'a Decl>,
     pub fns: HashMap<String, &'a Decl>,
-    /// `extern fn`s, by name
+    /// `extern fn`s, by name (a helper too: its signature)
     pub externs: HashMap<String, &'a Decl>,
+    /// helpers (`fn f(…): T { … }`), by name: their bodies
+    pub helpers: HashMap<String, &'a Decl>,
     pub views: HashMap<String, &'a Decl>,
     pub consts: HashMap<String, &'a Decl>,
     pub fragments: HashMap<String, &'a Decl>,
@@ -45,6 +47,7 @@ impl<'a> Model<'a> {
             viewer: None,
             fns: HashMap::new(),
             externs: HashMap::new(),
+            helpers: HashMap::new(),
             views: HashMap::new(),
             consts: HashMap::new(),
             fragments: HashMap::new(),
@@ -79,6 +82,10 @@ impl<'a> Model<'a> {
                     if m.fns.contains_key(name) || m.externs.insert(name.clone(), d).is_some() {
                         dup(*span, name)?
                     }
+                }
+                // (its signature is the Extern the parser declared with it)
+                Decl::Helper { name, .. } => {
+                    m.helpers.insert(name.clone(), d);
                 }
                 Decl::View { name, span, .. } => {
                     if m.views.insert(name.clone(), d).is_some() {
@@ -301,6 +308,11 @@ impl<'a> Model<'a> {
                             return err(*s, format!("can't order {} and {}", a.show(), b.show()));
                         }
                         Type::Bool
+                    }
+                    o @ (BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr | BinOp::AddWrap | BinOp::SubWrap | BinOp::MulWrap) => {
+                        // (a helper's body is typed by its generator: here is anywhere else)
+                        let _ = (a, b);
+                        return err(*s, format!("`{}` is only in a helper's body (`fn f(…): T {{ … }}`): put the computing in a helper", o.sym()));
                     }
                     BinOp::Add if matches!((a.strip_opt(), b.strip_opt()), (Type::Text, Type::Text)) => Type::Text,
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
@@ -786,6 +798,8 @@ pub fn check(m: &Model) -> R<()> {
             return err(*span, format!("{via_entity}.{to_field} must refer to {entity}"));
         }
     }
+    // helpers: their bodies, no recursion, their stack (the generator checks as it writes)
+    crate::helpers::emit(m, true).map_err(|(span, msg)| Error { span, msg })?;
     for d in &m.app.decls {
         match d {
             Decl::Fn { params, ret, body, span, .. } => {

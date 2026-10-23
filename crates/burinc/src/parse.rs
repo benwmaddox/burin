@@ -30,7 +30,7 @@ pub struct Error {
 
 type R<T> = Result<T, Error>;
 
-const PUNCTS: [&str; 23] = ["==", "!=", "<=", ">=", "->", "{", "}", "(", ")", "[", "]", ",", ":", ".", "=", "<", ">", "+", "-", "?", "*", "/", "%"];
+const PUNCTS: &[&str] = &["==", "!=", "<=", ">=", "->", "..", "<<", ">>", "+%", "-%", "*%", "&", "|", "^", "{", "}", "(", ")", "[", "]", ",", ":", ".", "=", "<", ">", "+", "-", "?", "*", "/", "%"];
 
 impl<'a> Lexer<'a> {
     fn err<T>(&self, msg: impl Into<String>) -> R<T> {
@@ -116,6 +116,17 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 out.push((Tok::Str(String::from_utf8(v).map_err(|_| Error { span, msg: "a string isn't UTF-8".into() })?), span));
+                continue;
+            }
+            // a hexadecimal number (`0xEDB88320`)
+            if self.s[self.i..].starts_with(b"0x") {
+                let start = self.i + 2;
+                self.i = start;
+                while self.i < self.s.len() && self.s[self.i].is_ascii_hexdigit() {
+                    self.i += 1;
+                }
+                let n = i64::from_str_radix(std::str::from_utf8(&self.s[start..self.i]).unwrap(), 16).or_else(|_| self.err("a hexadecimal number too big for 64 bits"))?;
+                out.push((Tok::Int(n), span));
                 continue;
             }
             if c.is_ascii_digit() {
@@ -346,6 +357,9 @@ impl Parser {
                 let params = self.params()?;
                 self.expect(":")?;
                 let ret = self.ty()?;
+                if self.is("{") {
+                    return Ok(Decl::Helper { name, params, ret, body: self.hblock()?, span });
+                }
                 self.expect("=")?;
                 Ok(Decl::Fn { name, params, ret, body: self.expr()?, span })
             }
@@ -565,6 +579,82 @@ impl Parser {
         self.err(format!("expected a statement (require, create, set, touch, delete, let, if, go, sign in, sign out, for each), found {}", show(self.peek())))
     }
 
+    // ---- a helper's statements
+
+    /// `{ statement … }`
+    fn hblock(&mut self) -> R<Vec<HStmt>> {
+        self.expect("{")?;
+        let mut out = vec![];
+        while !self.eat("}") {
+            out.push(self.hstmt()?);
+        }
+        Ok(out)
+    }
+
+    fn hstmt(&mut self) -> R<HStmt> {
+        let span = self.span();
+        if self.eat_kw("var") {
+            let name = self.ident()?;
+            self.expect("=")?;
+            return Ok(HStmt::Var(name, self.expr()?, span));
+        }
+        if self.eat_kw("if") {
+            let c = self.expr()?;
+            let then = self.hblock()?;
+            let otherwise = if self.eat_kw("else") {
+                if self.is_kw("if") {
+                    vec![self.hstmt()?]
+                } else {
+                    self.hblock()?
+                }
+            } else {
+                vec![]
+            };
+            return Ok(HStmt::If(c, then, otherwise, span));
+        }
+        if self.eat_kw("while") {
+            let c = self.expr()?;
+            return Ok(HStmt::While(c, self.hblock()?, span));
+        }
+        if self.eat_kw("for") {
+            let var = self.ident()?;
+            self.expect_kw("in")?;
+            let from = self.additive()?;
+            self.expect("..")?;
+            let to = self.additive()?;
+            return Ok(HStmt::For(var, from, to, self.hblock()?, span));
+        }
+        if self.eat_kw("break") {
+            return Ok(HStmt::Break(span));
+        }
+        if self.eat_kw("continue") {
+            return Ok(HStmt::Continue(span));
+        }
+        if self.eat_kw("return") {
+            let e = if self.is("}") { None } else { Some(self.expr()?) };
+            return Ok(HStmt::Return(e, span));
+        }
+        if self.is_kw("out_byte") && matches!(self.peek_at(1), Tok::Punct("(")) {
+            self.next();
+            self.expect("(")?;
+            let e = self.expr()?;
+            self.expect(")")?;
+            return Ok(HStmt::Out(e, span));
+        }
+        // `x = e`, `a[i] = e`
+        let name = self.ident()?;
+        if self.eat("[") {
+            let i = self.expr()?;
+            self.expect("]")?;
+            self.expect("=")?;
+            return Ok(HStmt::SetAt(name, i, self.expr()?, span));
+        }
+        if !self.eat("=") {
+            return self.err(format!("a helper's statement: `var`, `if`, `while`, `for`, `break`, `continue`, `return`, `out_byte(…)`, or `{name} = …`"));
+        }
+        Ok(HStmt::Set(name, self.expr()?, span))
+    }
+
     // ---- expressions, loosest first
 
     fn expr(&mut self) -> R<Expr> {
@@ -656,12 +746,14 @@ impl Parser {
         let mut l = self.multiplicative()?;
         loop {
             let s = self.span();
-            let op = if self.is("+") {
-                BinOp::Add
-            } else if self.is("-") {
-                BinOp::Sub
-            } else {
-                return Ok(l);
+            let op = match self.peek() {
+                Tok::Punct("+") => BinOp::Add,
+                Tok::Punct("-") => BinOp::Sub,
+                Tok::Punct("+%") => BinOp::AddWrap,
+                Tok::Punct("-%") => BinOp::SubWrap,
+                Tok::Punct("|") => BinOp::BitOr,
+                Tok::Punct("^") => BinOp::BitXor,
+                _ => return Ok(l),
             };
             self.next();
             let r = self.multiplicative()?;
@@ -672,14 +764,16 @@ impl Parser {
         let mut l = self.postfix()?;
         loop {
             let s = self.span();
-            let op = if self.is("*") {
-                BinOp::Mul
-            } else if self.is("/") {
-                BinOp::Div
-            } else if self.is("%") {
-                BinOp::Mod
-            } else {
-                return Ok(l);
+            // (as Go: shifts and `&` bind as multiplying does; `|` and `^` as adding)
+            let op = match self.peek() {
+                Tok::Punct("*") => BinOp::Mul,
+                Tok::Punct("/") => BinOp::Div,
+                Tok::Punct("%") => BinOp::Mod,
+                Tok::Punct("*%") => BinOp::MulWrap,
+                Tok::Punct("<<") => BinOp::Shl,
+                Tok::Punct(">>") => BinOp::Shr,
+                Tok::Punct("&") => BinOp::BitAnd,
+                _ => return Ok(l),
             };
             self.next();
             let r = self.postfix()?;
@@ -688,13 +782,20 @@ impl Parser {
     }
     fn postfix(&mut self) -> R<Expr> {
         let mut e = self.primary()?;
-        while self.is(".") {
+        loop {
             let s = self.span();
-            self.next();
-            let f = self.ident()?;
-            e = Expr::Field(Box::new(e), f, s);
+            if self.eat(".") {
+                let f = self.ident()?;
+                e = Expr::Field(Box::new(e), f, s);
+            } else if matches!(e, Expr::Name(..)) && self.eat("[") {
+                // a helper's array, at an index
+                let i = self.expr()?;
+                self.expect("]")?;
+                e = Expr::Call("__at".into(), vec![e, i], s);
+            } else {
+                return Ok(e);
+            }
         }
-        Ok(e)
     }
     fn primary(&mut self) -> R<Expr> {
         let s = self.span();
@@ -1019,7 +1120,13 @@ pub fn parse_file(src: &str, file: u32) -> R<Vec<Decl>> {
     let mut p = parse_code(src, Span { file, line: 1 })?;
     let mut out = vec![];
     while p.peek() != &Tok::Eof {
-        out.push(p.decl()?);
+        let d = p.decl()?;
+        // a helper is also declared as an external function (its signature, its symbol): it's
+        // called, placed and checked as one
+        if let Decl::Helper { name, params, ret, span, .. } = &d {
+            out.push(Decl::Extern { name: name.clone(), params: params.clone(), ret: ret.clone(), effect: false, symbol: format!("burin_fn_{name}"), span: *span });
+        }
+        out.push(d);
     }
     let _ = p.file;
     Ok(out)

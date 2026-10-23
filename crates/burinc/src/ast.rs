@@ -93,6 +93,73 @@ pub enum BinOp {
     Mod,
     /// `x in list`: a row among a list argument's rows
     In,
+    // only in a helper's body (a `fn` with statements):
+    /// `&`, `|`, `^`: on each bit
+    BitAnd,
+    BitOr,
+    BitXor,
+    /// `<<`, `>>` (the sign kept): a shift outside 0 to 63 is none
+    Shl,
+    Shr,
+    /// `+%`, `-%`, `*%`: wrapping at 64 bits (a hash's arithmetic), never none
+    AddWrap,
+    SubWrap,
+    MulWrap,
+}
+
+impl BinOp {
+    /// Its symbol, as written.
+    pub fn sym(&self) -> &'static str {
+        match self {
+            BinOp::Or => "or",
+            BinOp::And => "and",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::Lt => "<",
+            BinOp::Le => "<=",
+            BinOp::Gt => ">",
+            BinOp::Ge => ">=",
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Mod => "%",
+            BinOp::In => "in",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+            BinOp::AddWrap => "+%",
+            BinOp::SubWrap => "-%",
+            BinOp::MulWrap => "*%",
+        }
+    }
+}
+
+/// A helper's statement (`fn f(…): T { … }`): a function with locals that change, loops and
+/// stack arrays, pure (it sees only its arguments: no rows, queries, viewer or time), so the
+/// reads of a call are its arguments' and nothing else. No recursion; loops are bounded by a step
+/// budget. Anything that goes wrong (an overflow, a divisor of 0, an index outside its array, a
+/// shift outside 0 to 63, the budget spent) makes the call's result none.
+#[derive(Clone, Debug)]
+pub enum HStmt {
+    /// `var x = e` (an array: `ints(n)`, `int32s(n)`, `bytes(n)`, n a constant, zeroed)
+    Var(String, Expr, Span),
+    /// `x = e`
+    Set(String, Expr, Span),
+    /// `a[i] = e`
+    SetAt(String, Expr, Expr, Span),
+    If(Expr, Vec<HStmt>, Vec<HStmt>, Span),
+    While(Expr, Vec<HStmt>, Span),
+    /// `for i in a..b { … }`: i from a up to b (not b), b read once
+    For(String, Expr, Expr, Vec<HStmt>, Span),
+    Break(Span),
+    Continue(Span),
+    /// `return e` (a Text helper: `return`, its result what it wrote)
+    Return(Option<Expr>, Span),
+    /// `out_byte(b)`: a byte onto a Text helper's result
+    Out(Expr, Span),
 }
 
 #[derive(Clone, Debug)]
@@ -223,6 +290,10 @@ pub enum Decl {
     /// `from "symbol"`: its name in the C ABI (else its own name); the standard library's are
     /// the runtime's `burin_std_…`.
     Extern { name: String, params: Vec<Param>, ret: Type, effect: bool, symbol: String, span: Span },
+    /// `fn f(…): T { … }`: a helper (HStmt), compiled by burin into a function of the external
+    /// functions' C ABI (`burin_fn_f`); the parser also declares it as an `extern fn`, so it's
+    /// called, placed and checked as one (pure: pages may call it)
+    Helper { name: String, params: Vec<Param>, ret: Type, body: Vec<HStmt>, span: Span },
     View { name: String, params: Vec<Param>, query: Query, span: Span },
     Const { name: String, value: Expr, span: Span },
     /// `per viewer`: keyed by the viewer (its memory per viewer is reported)

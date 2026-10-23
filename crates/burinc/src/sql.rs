@@ -278,6 +278,7 @@ impl<'a> Tx<'a> {
                     BinOp::Mod => "%",
                     // a list argument is bound as a JSON array of ids
                     BinOp::In => return Ok(format!("({a} IN (SELECT value FROM json_each({b})))")),
+                    o => return Err(format!("`{}` is only in a helper's body (`fn f(…): T {{ … }}`)", o.sym())),
                 };
                 format!("({a} {o} {b})")
             }

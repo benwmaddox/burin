@@ -681,6 +681,132 @@ pub unsafe extern "C" fn burin_vec_len(v: *mut Vec<u8>) -> i64 {
     (*v).len() as i64
 }
 
+/// A Text helper's result: as long as it was when the helper began (it failed: none).
+/// # Safety: a live Vec.
+#[no_mangle]
+pub unsafe extern "C" fn burin_vec_truncate(v: *mut Vec<u8>, n: i64) {
+    (*v).truncate(n.max(0) as usize);
+}
+
+/// Helpers' arrays: a bump arena per thread, marked when a helper begins and released to the mark
+/// when it ends (helpers nest; they don't recurse). The memory is kept for the thread's next
+/// calls: time over memory. A helper asking for more than HELPER_ARENA_MAX in all fails (none).
+pub const HELPER_ARENA_MAX: usize = 256 << 20;
+const CHUNK: usize = 1 << 20;
+
+struct HelperArena {
+    /// chunks of u64s (8-byte aligned; arrays are of i64, i32 or u8), kept once made
+    chunks: Vec<Box<[u64]>>,
+    /// the chunk in use, and how many of its u64s are taken
+    at: usize,
+    used: usize,
+}
+
+impl HelperArena {
+    /// Bytes taken: the chunks before the one in use (their unused ends too), and its used part.
+    fn taken(&self) -> usize {
+        (self.chunks[..self.at.min(self.chunks.len())].iter().map(|c| c.len()).sum::<usize>() + self.used) * 8
+    }
+}
+
+thread_local! {
+    static HELPER_ARENA: std::cell::RefCell<HelperArena> = const { std::cell::RefCell::new(HelperArena { chunks: Vec::new(), at: 0, used: 0 }) };
+    /// loop steps a helper call may take on this thread (`set_helper_budget`)
+    static HELPER_BUDGET: std::cell::Cell<i64> = const { std::cell::Cell::new(HELPER_STEPS_DEFAULT) };
+}
+
+/// Steps on a thread that set none (tests, tools): a few seconds' worth.
+pub const HELPER_STEPS_DEFAULT: i64 = 2_000_000_000;
+/// The writer's: every write waits for it, so about 50 ms of loop turns.
+pub const HELPER_STEPS_WRITER: i64 = 50_000_000;
+/// A request worker's: about half a second.
+pub const HELPER_STEPS_WORKER: i64 = 500_000_000;
+
+/// The loop steps each helper call on this thread may take.
+pub fn set_helper_budget(steps: i64) {
+    HELPER_BUDGET.with(|b| b.set(steps));
+}
+
+/// A helper call's step budget.
+#[no_mangle]
+#[inline]
+pub extern "C" fn burin_ha_budget() -> i64 {
+    HELPER_BUDGET.with(|b| b.get())
+}
+
+/// The arena's mark (where a helper's arrays begin): chunk << 32 | used.
+#[no_mangle]
+#[inline]
+pub extern "C" fn burin_ha_mark() -> i64 {
+    HELPER_ARENA.with(|a| {
+        let a = a.borrow();
+        ((a.at as i64) << 32) | a.used as i64
+    })
+}
+
+/// Back to a mark: the arrays made since are gone (their memory is kept for the next).
+#[no_mangle]
+#[inline]
+pub extern "C" fn burin_ha_release(mark: i64) {
+    HELPER_ARENA.with(|a| {
+        let mut a = a.borrow_mut();
+        a.at = (mark >> 32) as usize;
+        a.used = (mark & 0xffff_ffff) as usize;
+    })
+}
+
+/// `bytes` of a helper's array, 8-byte aligned (not zeroed: the helper zeroes it); null when
+/// the helpers on this thread would pass HELPER_ARENA_MAX. Not inlined: its call keeps the
+/// `noalias` the helpers give it (as malloc's), so their arrays aren't taken to overlap their text.
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn burin_ha_alloc(bytes: i64) -> *mut u8 {
+    if bytes < 0 || bytes as usize > HELPER_ARENA_MAX {
+        return std::ptr::null_mut();
+    }
+    let words = (bytes as usize).div_ceil(8).max(1);
+    HELPER_ARENA.with(|a| {
+        let mut a = a.borrow_mut();
+        if a.chunks.is_empty() {
+            a.chunks.push(vec![0u64; CHUNK.max(words)].into_boxed_slice());
+        }
+        if a.used + words > a.chunks[a.at].len() {
+            // the next chunk (a kept one if it's big enough; the rest of this one is left)
+            let next = a.at + 1;
+            let size = CHUNK.max(words);
+            if next >= a.chunks.len() {
+                a.chunks.push(vec![0u64; size].into_boxed_slice());
+            } else if a.chunks[next].len() < words {
+                a.chunks[next] = vec![0u64; size].into_boxed_slice();
+            }
+            a.at = next;
+            a.used = 0;
+        }
+        if a.taken() + words * 8 > HELPER_ARENA_MAX {
+            return std::ptr::null_mut();
+        }
+        let (at, used) = (a.at, a.used);
+        a.used += words;
+        a.chunks[at][used..].as_mut_ptr() as *mut u8
+    })
+}
+
+/// The most a Text helper writes (more is a failure: none).
+pub const HELPER_OUT_MAX: usize = 64 << 20;
+
+/// `out_byte(b)` in a Text helper: 1, or 0 when the result would pass HELPER_OUT_MAX.
+/// # Safety: a live Vec.
+#[no_mangle]
+#[inline]
+pub unsafe extern "C" fn burin_out_byte(v: *mut Vec<u8>, b: i64) -> i64 {
+    let v = &mut *v;
+    if v.len() >= HELPER_OUT_MAX {
+        return 0;
+    }
+    v.push(b as u8);
+    1
+}
+
 /// An external function's text result, into the page (escaped when `esc`): what isn't UTF-8 is
 /// replaced (U+FFFD), so the page stays valid text. # Safety: live Vecs.
 #[no_mangle]
@@ -712,4 +838,43 @@ pub unsafe extern "C" fn burin_w_ext_take(w: *mut Writer, dst: *mut Str) {
     let p = w.arena.take(n.max(1));
     std::ptr::copy_nonoverlapping(w.ext.as_ptr(), p, n);
     *dst = Str { ptr: p, len: n as i64 };
+}
+
+#[cfg(test)]
+mod helper_arena_tests {
+    use super::*;
+
+    #[test]
+    fn arrays_nest_release_to_their_mark_and_stop_at_the_cap() {
+        let outer = burin_ha_mark();
+        let a = burin_ha_alloc(100);
+        assert!(!a.is_null() && a as usize % 8 == 0);
+        let inner = burin_ha_mark();
+        // bigger than a chunk: its own
+        let big = burin_ha_alloc(3 << 20);
+        assert!(!big.is_null());
+        unsafe { *big.add((3 << 20) - 1) = 7 };
+        burin_ha_release(inner);
+        // the inner arrays' room is used again; the outer one's isn't touched
+        let again = burin_ha_alloc(100);
+        assert_eq!(again as usize, a as usize + 104);
+        burin_ha_release(outer);
+        assert_eq!(burin_ha_alloc(8), a, "back to where it began");
+        burin_ha_release(outer);
+        // past the cap: null (the helper fails); a negative size too
+        assert!(burin_ha_alloc(HELPER_ARENA_MAX as i64 + 1).is_null());
+        assert!(burin_ha_alloc(-1).is_null());
+        let mut held = vec![];
+        loop {
+            let p = burin_ha_alloc(64 << 20);
+            if p.is_null() {
+                break;
+            }
+            held.push(p);
+        }
+        assert!(held.len() >= 3 && held.len() <= 4, "{} arrays of 64 MiB fit", held.len());
+        burin_ha_release(outer);
+        assert!(!burin_ha_alloc(64 << 20).is_null(), "released: room again");
+        burin_ha_release(outer);
+    }
 }

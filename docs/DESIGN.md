@@ -428,6 +428,78 @@ The Rails port and the Rust port get the same clients over Action Cable.
 throughput lost. Any one of these means rethinking where events are built: the single writer
 building every event, and the workers' inboxes.
 
+## Helpers (23 Oct 2026)
+
+Computing that expressions can't say (a checksum, a compressor, a game's rules) is written in
+burin as a helper: a `fn` with a body of statements.
+
+    fn crc32(t: Text): Int {
+      var table = ints(256)
+      for i in 0..256 { … }
+      var crc = 0xFFFFFFFF
+      for i in 0..byte_length(t) {
+        crc = table[(crc ^ byte_at(t, i)) & 255] ^ (crc >> 8)
+      }
+      return crc ^ 0xFFFFFFFF
+    }
+
+- **What it has:**
+  - `var`, assignment, `if`/`else`, `while`, `for i in a..b`, `break`, `continue`, `return`.
+  - Arrays: `ints(n)`, `int32s(n)` and `bytes(n)`, zeroed, any size.
+  - Bit operations (`& | ^ << >>`) and wrapping arithmetic (`+% -% *%`).
+  - Text read as bytes (`byte_at`, `byte_length`). A Text helper writes its result with
+    `out_byte`.
+  - It may call other helpers and expression `fn`s.
+- **Kept apart from the data:**
+  - Parameters are Ints, Bools, Times, Durations and Text, never rows. No queries, `viewer` or
+    `now`. So a call's reads are its arguments', and burin's read tracking is unchanged.
+  - A helper is declared as an external function of its own (`burin_fn_f`, the same C ABI). It's
+    placed and checked like one: pure, so cached pieces may call it; actions bind its result
+    into their SQL; queries can't run it on their rows (store what it computes in a field).
+- **Ending:**
+  - No recursion: the compiler checks the calls, including through expression `fn`s.
+  - Each `while` turn spends a step of the thread's budget. The writer's is about 50 ms of
+    turns, since every write waits for the pieces it builds; a request worker's is about half a
+    second. A `for` ends by itself and spends none.
+  - Heavy computing belongs in background work (the outbox and jobs, not built yet), not in a
+    cached piece.
+- **Failing:** an overflow, a divisor of 0, an index outside its array, a shift outside 0 to 63,
+  a byte outside its text or the budget spent each make the result none. An Int is
+  `i64::MIN`, as burin's none is everywhere; a Bool is false; a Text helper's writing is
+  undone.
+- **Memory (time over memory):**
+  - Arrays of a size written out, up to 4 KB, are on the stack, where LLVM keeps them in
+    registers.
+  - The rest come from a bump arena per thread, marked on entry and released on every way out.
+    The memory is kept for the next call; a call can't take more than 256 MB.
+  - Arena arrays are `noalias` (as malloc's), so LLVM knows they don't overlap the text.
+- **Measured** (`bench/crunch/run.sh`, Silesia's dickens, 10.2 MB, one core, median of 9):
+  DEFLATE (greedy LZ77 over a 32 KB window, fixed Huffman codes) in burin and the same
+  algorithm in C give the same bytes, which inflate back.
+
+  | | DEFLATE MB/s | vs clang -O2 | CRC-32 MB/s |
+  |---|---|---|---|
+  | burin | 24.8 | 0.70 | 579 |
+  | burin, no step budget | 27.0 | 0.76 | 582 |
+  | C, clang -O2 | 35.6 | 1.00 | 564 |
+  | C, gcc -O2 | 35.4 | 0.99 | 575 |
+  | C, clang with overflow and bounds traps | 28.0 | 0.79 | 579 |
+  | C, gcc with overflow and bounds traps | 33.7 | 0.95 | 581 |
+
+  - burin is about as fast as C with checks.
+  - Its gap to plain C is the step budget (about 8%, all on the inner byte-matching `while`)
+    plus checks C doesn't make: every `byte_at` and index is bounds-checked, every `+` is
+    overflow-checked.
+  - CRC-32 matches C.
+  - For context, other algorithms: libdeflate level 1 runs at 240 MB/s to 41% of the size (this
+    algorithm gets 49.6%).
+- **Next:**
+  - Fewer checks where the compiler can prove a range (hoisting, as Roc does).
+  - Tables built at compile time.
+  - Arrays passed between helpers.
+  - Text built from pieces.
+  - A `Bytes` type for results that aren't UTF-8.
+
 ## Lessons kept from crudspec and AgentLang
 
 - **The whole app is one program, checked as a whole** (crudspec): names, types, permissions,
@@ -441,8 +513,13 @@ building every event, and the workers' inboxes.
 - **No hand-written crypto** (AgentLang): HMAC from the `hmac`/`sha2` crates.
 - **Use built libraries for CPU-heavy pieces:** `httparse` for HTTP parsing, `rusqlite` (bundled
   SQLite), `libdeflate` if compression is added.
-- **A small language, not Turing-complete** (crudspec's lesson from AgentLang): every list is
-  bounded, and there's no recursion.
+- **A small language where the data is** (crudspec's lesson from AgentLang): every list a page
+  shows is bounded, and nothing recurses. Since 23 Oct 2026 helpers add loops and mutation for
+  computing. They're Turing-complete within a step budget, and kept apart from the data: they see
+  only their arguments (see Helpers).
+- **Time over memory** (the owner's rule, 23 Oct 2026): with arenas, memory is the cheap
+  resource. Spend it to save time (tables, buffers, arenas kept for reuse), and budget runaway
+  work by time, not bytes.
 - **Kill criteria in writing, and differential checks mandatory** (both).
 - **A fast edit loop from day one** (AgentLang's 5–10 minute builds shaped most of its work).
 - **Compare against a strong baseline:** crudspec's Go build and the recorded Rust port, with

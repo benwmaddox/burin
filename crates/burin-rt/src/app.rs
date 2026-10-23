@@ -969,6 +969,8 @@ fn number(streams: Vec<(u64, Vec<u8>, Option<Arc<Vec<i64>>>)>) -> Vec<crate::liv
 }
 
 fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, rx: Receiver<Cmd>, stats: Arc<Stats>, seq: i64, scrub_ms: u64) {
+    // helpers in the pieces it builds: every write waits for them
+    crate::abi::set_helper_budget(crate::abi::HELPER_STEPS_WRITER);
     let mut w = Writer::new(seq);
     // viewers' records: an action's viewer (forwarding copies values from it)
     let mut viewers: HashMap<i64, Rec> = HashMap::new();

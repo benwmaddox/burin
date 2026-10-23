@@ -1,0 +1,102 @@
+// Compute in idiomatic burin, against C doing the same (crates/crunch-app/tests/compute.rs,
+// bench/crunch): each row's piece computes a score with integer arithmetic of burin's checked
+// kind (an overflow, or a divisor of 0, is none) and writes it into its HTML. As in any burin
+// app, a row's piece is built when the row is written, not per request; the test times that
+// build. Not an app anyone uses.
+
+entity User {
+  name: Text max 60
+}
+
+entity Session {
+  user: User
+  token: Text max 64
+}
+
+entity Grid {
+  owner: User
+  seed: Int
+}
+
+entity Point {
+  grid: Grid
+  a: Int
+  b: Int
+  c: Int
+}
+
+viewer User from cookie sid = Session.token -> .user
+
+view points(g: Grid) = Point where .grid == g order by .seq limit 2000
+
+// one round of mixing: what a hash, a score or a game's damage formula is made of
+fn round(x: Int, k: Int): Int = (x * 31 + k) % 1000003
+
+// eight rounds over a row and its grid's seed
+fn score(a: Int, b: Int, c: Int, s: Int): Int = round(round(round(round(round(round(round(round(a, b), c), s), a), b), c), s), 7)
+
+// every row, its score, and a mark when it's even
+screen grid(g: Grid) at "/grid/{g}"
+  require exists(Grid where .owner == viewer and it == g) else go "/"
+<<<{{head()}}{{for p in points(g)}}{{cell(p)}}{{end}}{{foot()}}>>>
+
+fragment cell(p: Point) <<<<tr><td>{{score(p.a, p.b, p.c, p.grid.seed)}}</td>{{if score(p.a, p.b, p.c, p.grid.seed) % 2 == 0}}<td>even</td>{{end}}</tr>
+>>>
+
+// the same rows with next to no computing: a piece's own cost
+screen plain(g: Grid) at "/plain/{g}"
+  require exists(Grid where .owner == viewer and it == g) else go "/"
+<<<{{head()}}{{for p in points(g)}}{{bare(p)}}{{end}}{{foot()}}>>>
+
+fragment bare(p: Point) <<<<tr><td>{{p.a + p.grid.seed}}</td></tr>
+>>>
+
+fragment head() <<<<!doctype html><html><head><meta charset="utf-8"><title>crunch</title></head><body><table>
+>>>
+
+fragment foot() <<<</table></body></html>
+>>>
+
+// ---- helpers: loops, locals that change, stack arrays
+
+// CRC-32, as zlib's crc32: a table, then a byte at a time
+fn crc32(t: Text): Int {
+  var table = ints(256)
+  for i in 0..256 {
+    var c = i
+    for k in 0..8 {
+      if c & 1 == 1 {
+        c = 0xEDB88320 ^ (c >> 1)
+      } else {
+        c = c >> 1
+      }
+    }
+    table[i] = c
+  }
+  var crc = 0xFFFFFFFF
+  for i in 0..byte_length(t) {
+    crc = table[(crc ^ byte_at(t, i)) & 255] ^ (crc >> 8)
+  }
+  return crc ^ 0xFFFFFFFF
+}
+
+entity Note {
+  grid: Grid
+  body: Text
+  crc: Int?
+}
+
+view notes(g: Grid) = Note where .grid == g order by .seq limit 200
+
+// a page's own CRC beside the action's stored one (the same helper, called both ways)
+screen notes_page(g: Grid) at "/notes/{g}"
+  require exists(Grid where .owner == viewer and it == g) else go "/"
+<<<{{head()}}{{for n in notes(g)}}{{note(n)}}{{end}}{{foot()}}>>>
+
+fragment note(n: Note) <<<<tr id="note_{{n.id}}"><td class="page">{{crc32(n.body)}}</td><td class="stored">{{n.crc}}</td></tr>
+>>>
+
+action add_note(g: Grid, body: Text) {
+  require exists(Grid where .owner == viewer and it == g) else not_found
+  create Note { grid: g, body: body, crc: crc32(body) }
+}

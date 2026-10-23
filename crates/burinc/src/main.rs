@@ -7,6 +7,7 @@ mod ast;
 mod actions;
 mod check;
 mod glue;
+mod helpers;
 mod inline;
 mod llvm;
 mod netlist;

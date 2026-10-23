@@ -314,3 +314,33 @@ fn a_signal_goes_to_a_screen_of_its_type_and_targets_a_row_or_number() {
     let e = verdict(&format!("{page}action post(u: User) {{\n  signal posted(u) to nowhere(u)\n}}")).unwrap_err();
     assert!(e.contains("a screen with one parameter"), "{e}");
 }
+
+#[test]
+fn a_helper_with_loops_arrays_and_bit_operations_passes() {
+    verdict("fn crc(t: Text): Int {\n  var table = ints(256)\n  for i in 0..256 {\n    var c = i\n    for k in 0..8 {\n      if c & 1 == 1 { c = 0xEDB88320 ^ (c >> 1) } else { c = c >> 1 }\n    }\n    table[i] = c\n  }\n  var crc = 0xFFFFFFFF\n  var i = 0\n  while i < byte_length(t) and i >= 0 {\n    crc = table[(crc ^ byte_at(t, i)) & 255] ^ (crc >> 8)\n    i = i + 1\n  }\n  return crc ^ 0xFFFFFFFF\n}\nfn twice(t: Text): Int = crc(t) * 2\nfragment p() <<<{{for p in recent()}}{{twice(p.body)}}{{end}}>>>").unwrap();
+}
+
+#[test]
+fn helpers_refuse_what_would_hide_reads_or_never_end() {
+    let refused = |src: &str, want: &str| {
+        let Err(e) = verdict(src) else { panic!("accepted:
+{src}") };
+        assert!(e.contains(want), "{src}\n  → {e}");
+    };
+    // recursion, directly and through an expression fn
+    refused("fn f(n: Int): Int {\n  return f(n)\n}", "can't recurse");
+    refused("fn f(n: Int): Int {\n  return g(n)\n}\nfn g(n: Int): Int = f(n) + 1", "can't recurse");
+    // rows, queries, the viewer: a helper sees only its arguments
+    refused("fn f(u: User): Int {\n  return 1\n}", "values, not rows");
+    refused("fn f(n: Int): Int {\n  return count(Post where .body == \"x\")\n}", "no function `count`");
+    refused("fn f(n: Int): Int {\n  return viewer.id\n}", "not in a helper");
+    refused("fn f(n: Int): Int {\n  return n + now\n}", "pass `now`");
+    // parameters, loop counters and arrays themselves don't change
+    refused("fn f(n: Int): Int {\n  n = 2\n  return n\n}", "doesn't change");
+    refused("fn f(n: Int): Int {\n  for i in 0..n {\n    i = 3\n  }\n  return n\n}", "doesn't change");
+    refused("fn f(n: Int): Int {\n  var a = ints(n)\n  a = 3\n  return 0\n}", "set an element");
+    refused("fn f(n: Int): Int {\n  break\n  return 0\n}", "outside a loop");
+    refused("fn f(n: Int): Int {\n  out_byte(n)\n  return 0\n}", "Text helper");
+    // bit operations belong in helpers
+    refused("fragment p() <<<{{for p in recent()}}{{p.author.name}}{{end}}>>>\naction a(n: Int) {\n  create Post { author: viewer, body: text(n & 3) }\n}", "&");
+}

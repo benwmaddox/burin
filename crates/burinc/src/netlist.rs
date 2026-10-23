@@ -340,6 +340,7 @@ fn show_expr(e: &Expr) -> String {
                 BinOp::Div => "/",
                 BinOp::Mod => "%",
                 BinOp::In => "in",
+                o => o.sym(),
             };
             format!("{} {o} {}", show_expr(l), show_expr(r))
         }

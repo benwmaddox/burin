@@ -119,6 +119,7 @@ pub fn serve<H: Handler>(addr: SocketAddr, workers: usize, handler: Arc<H>) -> i
         threads.push(std::thread::Builder::new().name(format!("burin-w{w}")).spawn(move || {
             // readers yield to the writer: a write is never kept waiting behind reads
             crate::lower_priority(READER_NICE);
+            crate::abi::set_helper_budget(crate::abi::HELPER_STEPS_WORKER);
             if let Err(e) = run(w, listener, h) {
                 eprintln!("worker {w}: {e}");
             }
