@@ -1,17 +1,17 @@
 #!/bin/bash
-# The compiled etch (forwarding) against crudspec, under writes into the
+# The compiled burin (forwarding) against crudspec, under writes into the
 # read room, gzip off and on. Two passes, the second in reverse order; holds the bench lock.
-#   wsl -d Ubuntu -u root -- bash /mnt/d/code/etch/bench/drive-fwd.sh <tag>
+#   wsl -d Ubuntu -u root -- bash /mnt/d/code/burin/bench/drive-fwd.sh <tag>
 set -euo pipefail
 TAG=$1
-B=/mnt/d/code/etch/bench
+B=/mnt/d/code/burin/bench
 exec 9>>/home/ben/linuxbench/bench.lock
 echo "$(date -u +%T) waiting for the bench lock"; flock -x 9; echo "$(date -u +%T) have the lock"
 export BENCH_LOCKED=1
 runs=(
-  "gen  0 GOBIN=/home/ben/hw/etch-fwd"
+  "gen  0 GOBIN=/home/ben/hw/burin-fwd"
   "cs   0 GOBIN=/home/ben/hw/campfire-pk"
-  "gen  1 GOBIN=/home/ben/hw/etch-fwd"
+  "gen  1 GOBIN=/home/ben/hw/burin-fwd"
   "cs   1 GOBIN=/home/ben/hw/campfire-pk"
 )
 one() {

@@ -1,4 +1,7 @@
-# etch
+# Burin
+
+*Burin was called etch until 23 Oct 2026; it was renamed because [etch-lang.org](https://etch-lang.org/) is another
+language. A burin is the engraver's steel tool. Benchmark runs before the rename keep the old name.*
 
 An experimental web app language designed like hardware. The compiler (Rust) reads a whole app's
 spec, turns it into a dataflow netlist, and emits LLVM IR that is linked with a small runtime under
@@ -12,18 +15,18 @@ fixed rules run by one writer that update exactly the pieces they affect.
 
 ## Layout
 
-- `crates/etchc`: the compiler (`check`, `report`, `emit`).
-- `crates/etch-rt`: the runtime every generated app links (HTTP fast path, snapshot, writer).
-- `apps/campfire`, `apps/board`: two apps written in etch; `crates/campfire-app`,
+- `crates/burinc`: the compiler (`check`, `report`, `emit`).
+- `crates/burin-rt`: the runtime every generated app links (HTTP fast path, snapshot, writer).
+- `apps/campfire`, `apps/board`: two apps written in burin; `crates/campfire-app`,
   `crates/board-app` are their 3-line binaries.
-- `scripts/`: building (`build-etch.sh`) and every correctness check (`check-all.sh`).
+- `scripts/`: building (`build-burin.sh`) and every correctness check (`check-all.sh`).
 - `bench/`: benchmarks.
 
 ## Building and checking (Linux or WSL)
 
 ```
-bash scripts/build-etch.sh release                              # Campfire
-APP=board CRATE=board-app bash scripts/build-etch.sh release    # the board app
+bash scripts/build-burin.sh release                              # Campfire
+APP=board CRATE=board-app bash scripts/build-burin.sh release    # the board app
 bash scripts/check-all.sh
 ```
 

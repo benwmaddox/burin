@@ -3,12 +3,12 @@
 # (one write to the room, none per member), never for the poster; reading the room clears it.
 # The sidebar (/users/me/sidebar, its own request as in Rails) shows it; the room page says when
 # the room being read was unread (its script then marks it read). Golden data, David and Jason.
-#   bash /mnt/d/code/etch/scripts/unread-check.sh
+#   bash /mnt/d/code/burin/scripts/unread-check.sh
 set -e
-BIN=${ETCH_BIN:-$HOME/hw/etch-gen-release}
-D=/tmp/etch-un; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/etch/data/campfire-golden $D/data; rm -f $D/data/app.lock
+BIN=${BURIN_BIN:-$HOME/hw/burin-gen-release}
+D=/tmp/burin-un; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/burin/data/campfire-golden $D/data; rm -f $D/data/app.lock
 PORT=13795; U=http://127.0.0.1:$PORT
-TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/etch/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
+TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/burin/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
 PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 100); do curl -fsS -o /dev/null $U/up 2>/dev/null && break; sleep 0.05; done
@@ -33,6 +33,6 @@ sleep 0.2
 want "Jason: read after read_room" "$(unread $JASON $ROOM $OTHER)" 0
 want "Jason viewing it again: nothing to mark" "$(page $JASON $OTHER | grep -c '<meta name="current-room-unread"')" 0
 want "the post wrote the room, not each member" "$(node -e "const {DatabaseSync}=require('node:sqlite');console.log(new DatabaseSync('$D/data/app.sqlite').prepare('select posted from Room where id = $OTHER').get().posted)" 2>/dev/null)" 2
-curl -sS $U/_etch/stats | grep -oE '"mismatched":[0-9]+'
+curl -sS $U/_burin/stats | grep -oE '"mismatched":[0-9]+'
 grep -iE "panic|error" $D/server.log && fail=1
 [ $fail = 0 ] && echo PASS || { echo FAIL; exit 1; }

@@ -2,21 +2,21 @@
 # Rooms, with --verify: making open, closed and direct rooms; their settings pages; reopening,
 # closing and their members; involvement; deleting a room with its messages. Every fast page must
 # equal a fresh render; no write may clear the screens.
-#   bash /mnt/d/code/etch/scripts/rooms-check.sh
+#   bash /mnt/d/code/burin/scripts/rooms-check.sh
 set -e
-BIN=${ETCH_BIN:-$HOME/hw/etch-gen-release}
-D=/tmp/etch-rc; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/etch/data/campfire-golden $D/data; rm -f $D/data/app.lock
+BIN=${BURIN_BIN:-$HOME/hw/burin-gen-release}
+D=/tmp/burin-rc; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/burin/data/campfire-golden $D/data; rm -f $D/data/app.lock
 PORT=13793
-q() { node /mnt/d/code/etch/scripts/q.js $D/data/app.sqlite "$1"; }
+q() { node /mnt/d/code/burin/scripts/q.js $D/data/app.sqlite "$1"; }
 DAVID=$(q "select token from Session where id = 481019661"); DU=$(q "select user from Session where token = '$DAVID'")
 JASON=jasontokenjasontokenjasontoken00; JU=$(q "select user from Session where token = '$JASON'")
 KU=$(q "select id from User where email = 'kevin@37signals.com'")
-TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/etch/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
+TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/burin/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
 PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 100); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done
 U=http://127.0.0.1:$PORT
-stat() { curl -sS $U/_etch/stats | sed "s/.*\"$1\":\([0-9]*\).*/\1/"; }
+stat() { curl -sS $U/_burin/stats | sed "s/.*\"$1\":\([0-9]*\).*/\1/"; }
 # an action: its outcome and where it went (the room's id is the Location's last part)
 act() { local who=$1 name=$2; shift 2; local a=(); for f in "$@"; do a+=(--data-urlencode "$f"); done
   curl -sS -o /dev/null -D - -H "Cookie: session_token=$who" "${a[@]}" $U/_do/$name | tr -d '\r' | awk '/^[Xx]-[Ee]tch-[Oo]utcome/{o=$2} /^[Ll]ocation/{l=$2} END{printf "%s -> %s", o, l}'; }
@@ -49,5 +49,5 @@ echo "jason deletes his room: $(act $JASON delete_room "room=$CLOSED"); left: ro
 echo "  jason reads it now: $(get $JASON /rooms/$CLOSED)"
 sleep 0.3
 for r in 486777696 $OPEN $NEWD; do get $DAVID /rooms/$r >/dev/null; get $JASON /rooms/$r > /dev/null; done
-curl -sS $U/_etch/stats; echo
+curl -sS $U/_burin/stats; echo
 grep -v "^started" $D/server.log | head -10 || true

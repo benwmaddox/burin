@@ -1,11 +1,11 @@
 #!/bin/bash
-# A periodic check: the current build against an earlier etch build and crudspec, gzip on, under
+# A periodic check: the current build against an earlier burin build and crudspec, gzip on, under
 # writes into the read room (0, 5, 50, 200 posts/s). Two passes, the second in reverse order;
 # holds the bench lock.
-#   wsl -d Ubuntu -u root -- bash /mnt/d/code/etch/bench/drive-now.sh <tag> <current binary> [earlier binary]
+#   wsl -d Ubuntu -u root -- bash /mnt/d/code/burin/bench/drive-now.sh <tag> <current binary> [earlier binary]
 set -euo pipefail
-TAG=$1; CUR=$2; EARLIER=${3:-/home/ben/hw/etch-fwd}
-B=/mnt/d/code/etch/bench
+TAG=$1; CUR=$2; EARLIER=${3:-/home/ben/hw/burin-fwd}
+B=/mnt/d/code/burin/bench
 exec 9>>/home/ben/linuxbench/bench.lock
 echo "$(date -u +%T) waiting for the bench lock"; flock -x 9; echo "$(date -u +%T) have the lock"
 export BENCH_LOCKED=1

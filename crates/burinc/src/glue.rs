@@ -1,4 +1,4 @@
-//! The app's glue for the runtime (`etch_rt::app::Glue`), generated as Rust: routes, screens'
+//! The app's glue for the runtime (`burin_rt::app::Glue`), generated as Rust: routes, screens'
 //! audiences, guards and headers, the read stage's assembly in template order, and dispatch to
 //! the generated LLVM functions. Everything app-specific the runtime needs comes from here.
 
@@ -103,11 +103,11 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
         _ => return Err("an app needs a viewer declaration".into()),
     };
     let screen_decls: Vec<&Decl> = m.screens.clone();
-    let _ = writeln!(s, "\n// ---- the glue for the runtime (etch_rt::app::Glue)\n");
+    let _ = writeln!(s, "\n// ---- the glue for the runtime (burin_rt::app::Glue)\n");
     let _ = writeln!(s, "pub const SESSION_COOKIE: &[u8] = b{:?};", viewer.1);
     let _ = writeln!(s, "pub const CONFIGS: &[&str] = &[{}];", m.app.decls.iter().filter_map(|d| if let Decl::Config { name, .. } = d { Some(format!("{name:?}")) } else { None }).collect::<Vec<_>>().join(", "));
     let _ = writeln!(s, "pub struct Spec;\n");
-    let _ = writeln!(s, "unsafe impl etch_rt::app::Glue for Spec {{");
+    let _ = writeln!(s, "unsafe impl burin_rt::app::Glue for Spec {{");
     let _ = writeln!(s, "    const REGS: usize = {};\n    const LISTS: usize = {};\n    const SCREENS: usize = {};", md.registers.len(), screens.len(), screen_decls.len());
     let pv: Vec<String> = md.registers.iter().enumerate().filter(|(_, r)| r.per_viewer).map(|(i, _)| i.to_string()).collect();
     let _ = writeln!(s, "    fn per_request(kind: usize) -> bool {{ matches!(kind, {}) }}", if pv.is_empty() { "usize::MAX".into() } else { pv.join(" | ") });
@@ -180,19 +180,19 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     }
     let _ = writeln!(s, "        _ => 0 }} }}");
     let _ = writeln!(s, "    fn tmps(kind: usize) -> usize {{ match kind {{ {}_ => 0 }} }}", md.registers.iter().enumerate().map(|(i, r)| format!("{i} => {}, ", r.tmps)).collect::<String>());
-    let _ = writeln!(s, "    unsafe fn load(kind: usize, ctx: &etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, viewer: i64, rec: *mut u8, arena: *mut etch_rt::abi::Arena) -> bool {{ match kind {{");
+    let _ = writeln!(s, "    unsafe fn load(kind: usize, ctx: &burin_rt::abi::Ctx, db: *mut burin_rt::abi::Db, key: i64, viewer: i64, rec: *mut u8, arena: *mut burin_rt::abi::Arena) -> bool {{ match kind {{");
     for (i, r) in md.registers.iter().enumerate() {
-        let _ = writeln!(s, "        {i} => etch_load_{}(ctx, db, key, viewer, rec as *mut In_{}, arena),", r.name, r.name);
+        let _ = writeln!(s, "        {i} => burin_load_{}(ctx, db, key, viewer, rec as *mut In_{}, arena),", r.name, r.name);
     }
     let _ = writeln!(s, "        _ => false }} }}");
 
-    let _ = writeln!(s, "    unsafe fn build(kind: usize, ctx: &etch_rt::abi::Ctx, rec: *const u8, viewer: *const u8, out: &mut Vec<u8>, tmps: &[*mut Vec<u8>], splits: &mut Vec<usize>) {{ match kind {{");
+    let _ = writeln!(s, "    unsafe fn build(kind: usize, ctx: &burin_rt::abi::Ctx, rec: *const u8, viewer: *const u8, out: &mut Vec<u8>, tmps: &[*mut Vec<u8>], splits: &mut Vec<usize>) {{ match kind {{");
     for (i, r) in md.registers.iter().enumerate() {
-        let _ = writeln!(s, "        {i} => etch_build_{}(ctx, rec as *const In_{}, viewer as *const Viewer, out, tmps.as_ptr(), splits),", r.name, r.name);
+        let _ = writeln!(s, "        {i} => burin_build_{}(ctx, rec as *const In_{}, viewer as *const Viewer, out, tmps.as_ptr(), splits),", r.name, r.name);
     }
     let _ = writeln!(s, "        _ => {{}} }} }}");
     let _ = writeln!(s, "    fn viewer_size() -> usize {{ std::mem::size_of::<Viewer>() }}");
-    let _ = writeln!(s, "    unsafe fn load_viewer(ctx: &etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, rec: *mut u8, arena: *mut etch_rt::abi::Arena) -> bool {{ etch_load_viewer(ctx, db, key, key, rec as *mut Viewer, arena) }}");
+    let _ = writeln!(s, "    unsafe fn load_viewer(ctx: &burin_rt::abi::Ctx, db: *mut burin_rt::abi::Db, key: i64, rec: *mut u8, arena: *mut burin_rt::abi::Arena) -> bool {{ burin_load_viewer(ctx, db, key, key, rec as *mut Viewer, arena) }}");
 
 
     // screens
@@ -330,7 +330,7 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
             match n {
                 TNode::Text(t) => {
                     consts.push(t.clone());
-                    let _ = writeln!(asm, "                emit(etch_rt::store::Part::Seg(&consts()[{}]));", consts.len() - 1);
+                    let _ = writeln!(asm, "                emit(burin_rt::store::Part::Seg(&consts()[{}]));", consts.len() - 1);
                 }
                 TNode::Hole(Expr::Call(f, args, _)) if m.fragments.contains_key(f) => {
                     let k = kind_of(md, f)?;
@@ -344,10 +344,10 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
                     };
                     if reg.per_viewer {
                         // rendered for the viewer now (it merges the cached pieces it calls)
-                        let _ = writeln!(asm, "                emit(etch_rt::store::Part::Render({k}, {at}));");
+                        let _ = writeln!(asm, "                emit(burin_rt::store::Part::Render({k}, {at}));");
                     } else {
                         regs.push(format!("({k}, {at})"));
-                        let _ = writeln!(asm, "                let Some(r) = snap.reg({k}, {at}) else {{ return false }};\n                emit(etch_rt::store::Part::Seg(&r.seg));");
+                        let _ = writeln!(asm, "                let Some(r) = snap.reg({k}, {at}) else {{ return false }};\n                emit(burin_rt::store::Part::Seg(&r.seg));");
                     }
                 }
                 TNode::For(var, list, _, b) => {
@@ -361,7 +361,7 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
                     if md.registers[k].per_viewer {
                         return Err(format!("a screen's list shows cached fragments: {} is rendered per request", md.registers[k].name));
                     }
-                    let _ = writeln!(asm, "                let Some(items) = snap.lists[{li}].get(&key) else {{ return false }};\n                if let Some(b) = snap.block({li}, key, {k}) {{\n                    emit(etch_rt::store::Part::Seg(b));\n                }} else {{\n                    for id in items.iter() {{\n                        let Some(r) = snap.reg({k}, *id) else {{ return false }};\n                        emit(etch_rt::store::Part::Seg(&r.seg));\n                    }}\n                }}");
+                    let _ = writeln!(asm, "                let Some(items) = snap.lists[{li}].get(&key) else {{ return false }};\n                if let Some(b) = snap.block({li}, key, {k}) {{\n                    emit(burin_rt::store::Part::Seg(b));\n                }} else {{\n                    for id in items.iter() {{\n                        let Some(r) = snap.reg({k}, *id) else {{ return false }};\n                        emit(burin_rt::store::Part::Seg(&r.seg));\n                    }}\n                }}");
                 }
                 _ => return Err("a screen's template holds fragments, loops of a fragment, and text".into()),
             }
@@ -378,31 +378,31 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     let _ = writeln!(s, "    fn screen_regs(s: usize, key: i64) -> Vec<(usize, i64)> {{ let _ = key; match s {{\n{regs_fn}        _ => vec![] }} }}");
 
     let _ = writeln!(s, "    fn screen_lists(c: &rusqlite::Connection, s: usize, key: i64) -> Vec<(usize, Vec<i64>)> {{\n        match s {{\n{lists_fn}        _ => vec![],\n        }}\n    }}");
-    let _ = writeln!(s, "    fn assemble<'a>(snap: &'a etch_rt::store::Snap, s: usize, key: i64, emit: &mut dyn FnMut(etch_rt::store::Part<'a>)) -> bool {{\n        let _ = (snap, key);\n        match s {{\n{asm_fn}            _ => false,\n        }}\n    }}");
+    let _ = writeln!(s, "    fn assemble<'a>(snap: &'a burin_rt::store::Snap, s: usize, key: i64, emit: &mut dyn FnMut(burin_rt::store::Part<'a>)) -> bool {{\n        let _ = (snap, key);\n        match s {{\n{asm_fn}            _ => false,\n        }}\n    }}");
 
     // actions
-    let _ = writeln!(s, "    fn act(name: &str, c: &rusqlite::Connection, ctx: &etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, w: &mut etch_rt::abi::Writer, viewer: i64, vrec: *const u8, form: &[(String, String)], d: &mut etch_rt::abi::Deltas) -> Result<(), &'static str> {{\n        let _ = c;\n        match name {{");
+    let _ = writeln!(s, "    fn act(name: &str, c: &rusqlite::Connection, ctx: &burin_rt::abi::Ctx, db: *mut burin_rt::abi::Db, w: &mut burin_rt::abi::Writer, viewer: i64, vrec: *const u8, form: &[(String, String)], d: &mut burin_rt::abi::Deltas) -> Result<(), &'static str> {{\n        let _ = c;\n        match name {{");
     for a in acts {
         let _ = writeln!(s, "            {:?} => {{", a.name);
         let mut fields = vec![];
         for (n, sh) in &a.args {
             match sh {
                 crate::llvm::Shape::I64 => {
-                    let _ = writeln!(s, "                let {n}: i64 = etch_rt::app::field(form, {n:?}).and_then(|v| v.parse().ok()).ok_or(\"invalid\")?;");
+                    let _ = writeln!(s, "                let {n}: i64 = burin_rt::app::field(form, {n:?}).and_then(|v| v.parse().ok()).ok_or(\"invalid\")?;");
                     fields.push(n.clone());
                 }
                 crate::llvm::Shape::Str if a.list_args.contains(n) => {
-                    let _ = writeln!(s, "                let {n}_s = etch_rt::app::field_ids(form, {n:?});");
+                    let _ = writeln!(s, "                let {n}_s = burin_rt::app::field_ids(form, {n:?});");
                     fields.push(format!("{n}: Str::of(&{n}_s)"));
                 }
                 crate::llvm::Shape::Str => {
-                    let _ = writeln!(s, "                let {n}_s = etch_rt::app::field(form, {n:?}).unwrap_or(\"\");");
+                    let _ = writeln!(s, "                let {n}_s = burin_rt::app::field(form, {n:?}).unwrap_or(\"\");");
                     fields.push(format!("{n}: Str::of({n}_s)"));
                 }
             }
         }
         let _ = writeln!(s, "                let args = Args_{} {{ {} }};", a.name, fields.join(", "));
-        let _ = writeln!(s, "                let r = unsafe {{ etch_act_{}(ctx, db, w, viewer, vrec as *const Viewer, &args, d) }};\n                if r == 0 {{ Ok(()) }} else {{ Err(OUTCOMES_{}[r as usize]) }}\n            }}", a.name, a.name.to_uppercase());
+        let _ = writeln!(s, "                let r = unsafe {{ burin_act_{}(ctx, db, w, viewer, vrec as *const Viewer, &args, d) }};\n                if r == 0 {{ Ok(()) }} else {{ Err(OUTCOMES_{}[r as usize]) }}\n            }}", a.name, a.name.to_uppercase());
     }
     let _ = writeln!(s, "            _ => Err(\"not_found\"),\n        }}\n    }}");
     let publics: Vec<String> = acts.iter().filter(|a| a.public).map(|a| format!("{:?}", a.name)).collect();
@@ -422,12 +422,12 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
             for sql::Bind::Path(e) in &sel.binds {
                 match e {
                     Expr::Name(n, _) if n == "viewer" => binds.push("viewer.to_string()".to_string()),
-                    Expr::Name(n, _) if a.args.iter().any(|(x, _)| x == n) => binds.push(format!("etch_rt::app::field(form, {n:?}).unwrap_or(\"\").to_string()")),
+                    Expr::Name(n, _) if a.args.iter().any(|(x, _)| x == n) => binds.push(format!("burin_rt::app::field(form, {n:?}).unwrap_or(\"\").to_string()")),
                     other => return Err(format!("authenticates reads {} (only arguments and the viewer)", show(other))),
                 }
             }
             let _ = writeln!(s, "                let hash: Option<String> = c.prepare_cached(r##\"{}\"##).ok().and_then(|mut st| st.query_row(rusqlite::params![{}], |r| r.get::<_, Option<String>>(0)).ok()).flatten();", sel.sql, binds.join(", "));
-            let _ = writeln!(s, "                let ok = etch_rt::pass::verify(hash.as_deref(), etch_rt::app::field(form, {text:?}).unwrap_or(\"\"));");
+            let _ = writeln!(s, "                let ok = burin_rt::pass::verify(hash.as_deref(), burin_rt::app::field(form, {text:?}).unwrap_or(\"\"));");
             let _ = writeln!(s, "                form.push((\"__verified_{i}\".to_string(), if ok {{ hash.unwrap_or_default() }} else {{ String::new() }}));");
         }
         let _ = writeln!(s, "            }}");
@@ -438,7 +438,7 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     for a in acts.iter().filter(|a| !a.hashes.is_empty()) {
         let _ = writeln!(s, "            {:?} => {{", a.name);
         for (i, arg) in &a.hashes {
-            let _ = writeln!(s, "                let t = etch_rt::app::field(form, {arg:?}).unwrap_or(\"\").to_string();\n                form.push((\"__hashed_{i}\".to_string(), if t.is_empty() {{ String::new() }} else {{ etch_rt::pass::hash(&t) }}));");
+            let _ = writeln!(s, "                let t = burin_rt::app::field(form, {arg:?}).unwrap_or(\"\").to_string();\n                form.push((\"__hashed_{i}\".to_string(), if t.is_empty() {{ String::new() }} else {{ burin_rt::pass::hash(&t) }}));");
         }
         let _ = writeln!(s, "            }}");
     }
@@ -464,7 +464,7 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     let _ = writeln!(s, "    fn columns() -> &'static [(&'static str, &'static str, &'static str)] {{ &[{}] }}", adds.join(", "));
     let _ = writeln!(s, "}}\n");
     // the screens' constant text, made once
-    let _ = writeln!(s, "fn consts() -> &'static [etch_rt::store::Seg] {{\n    static C: std::sync::OnceLock<Vec<etch_rt::store::Seg>> = std::sync::OnceLock::new();\n    C.get_or_init(|| vec![{}])\n}}", consts.iter().map(|c| format!("etch_rt::store::Seg::new({c:?}.as_bytes().to_vec())")).collect::<Vec<_>>().join(", "));
+    let _ = writeln!(s, "fn consts() -> &'static [burin_rt::store::Seg] {{\n    static C: std::sync::OnceLock<Vec<burin_rt::store::Seg>> = std::sync::OnceLock::new();\n    C.get_or_init(|| vec![{}])\n}}", consts.iter().map(|c| format!("burin_rt::store::Seg::new({c:?}.as_bytes().to_vec())")).collect::<Vec<_>>().join(", "));
     Ok(s)
 }
 

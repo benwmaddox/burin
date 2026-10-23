@@ -2,16 +2,16 @@
 # External functions end to end (apps/notes, with C and Rust in apps/notes/ext): notes added by an
 # action (slug and word count from C, a serial from a Rust effect, stored), then the page (C and
 # Rust in its cached and per-viewer parts), every value checked against Python's, with --verify.
-#   APP=notes CRATE=notes-app bash scripts/build-etch.sh release
-#   bash /mnt/d/code/etch/scripts/notes-check.sh
+#   APP=notes CRATE=notes-app bash scripts/build-burin.sh release
+#   bash /mnt/d/code/burin/scripts/notes-check.sh
 set -e
-BIN=${ETCH_BIN:-$HOME/hw/etch-notes-release}
-D=/tmp/etch-notes; rm -rf $D; mkdir -p $D/data
+BIN=${BURIN_BIN:-$HOME/hw/burin-notes-release}
+D=/tmp/burin-notes; rm -rf $D; mkdir -p $D/data
 PORT=13803; U=http://127.0.0.1:$PORT
 "$BIN" --data $D/data --port $PORT --workers 1 --exit-after 1 > $D/first.log 2>&1 || true
 python3 - <<'EOF'
 import sqlite3, time
-db = sqlite3.connect('/tmp/etch-notes/data/app.sqlite')
+db = sqlite3.connect('/tmp/burin-notes/data/app.sqlite')
 now = int(time.time() * 1000)
 db.execute('INSERT INTO "User" (id, seq, created, updated, name) VALUES (1, 1, ?, ?, ?)', (now, now, 'Ada Lovelace'))
 db.execute('INSERT INTO "Session" (id, seq, created, updated, user, token) VALUES (1, 2, ?, ?, 1, ?)', (now, now, 'ada-token'))
@@ -29,8 +29,8 @@ sleep 0.2
 curl -sS -H "Cookie: sid=ada-token" $U/users/1/notes > $D/page2.html
 python3 - <<'EOF'
 import html, re, sys
-page = open('/tmp/etch-notes/page.html').read()
-assert page == open('/tmp/etch-notes/page2.html').read(), 'the second (fast) page differs from the first'
+page = open('/tmp/burin-notes/page.html').read()
+assert page == open('/tmp/burin-notes/page2.html').read(), 'the second (fast) page differs from the first'
 def slug(t, mx):
     out, dash = '', False
     for c in t.encode():
@@ -87,5 +87,5 @@ want('per viewer: capitals (Rust)', me and me.group(1), 'ADA LOVELACE')
 want('per viewer: word count (C)', me and int(me.group(2)), 2)
 print('PASS' if ok else 'FAIL'); sys.exit(0 if ok else 1)
 EOF
-curl -sS $U/_etch/stats | grep -oE '"verified":[0-9]+|"mismatched":[0-9]+' | tr '\n' ' '; echo
+curl -sS $U/_burin/stats | grep -oE '"verified":[0-9]+|"mismatched":[0-9]+' | tr '\n' ' '; echo
 grep -iE "panic" $D/server.log && exit 1 || true

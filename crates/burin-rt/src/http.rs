@@ -80,7 +80,7 @@ pub fn serve<H: Handler>(addr: SocketAddr, workers: usize, handler: Arc<H>) -> i
     for w in 0..workers {
         let listener = bind(addr)?;
         let h = handler.clone();
-        threads.push(std::thread::Builder::new().name(format!("etch-w{w}")).spawn(move || {
+        threads.push(std::thread::Builder::new().name(format!("burin-w{w}")).spawn(move || {
             // readers yield to the writer: a write is never kept waiting behind reads
             crate::lower_priority(READER_NICE);
             if let Err(e) = run(w, listener, h) {

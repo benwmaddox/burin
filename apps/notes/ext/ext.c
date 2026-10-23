@@ -1,9 +1,9 @@
-/* Notes' C functions (apps/notes/notes.etch): pure, as `extern fn` must be. */
-#include "etch.h"
+/* Notes' C functions (apps/notes/notes.burin): pure, as `extern fn` must be. */
+#include "burin.h"
 
 /* A URL slug: ASCII letters and digits kept (lowercased), any run of others one '-', at most
  * `max` bytes, no '-' at either end. */
-void slug(const uint8_t *t, int64_t n, int64_t max, etch_out *out) {
+void slug(const uint8_t *t, int64_t n, int64_t max, burin_out *out) {
     uint8_t buf[256];
     int64_t k = 0;
     int dash = 0;
@@ -19,7 +19,7 @@ void slug(const uint8_t *t, int64_t n, int64_t max, etch_out *out) {
             dash = 1;
         }
     }
-    etch_ext_write(out, buf, k);
+    burin_ext_write(out, buf, k);
 }
 
 /* Words: runs of bytes that aren't ASCII whitespace. */

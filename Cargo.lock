@@ -93,15 +93,41 @@ dependencies = [
 name = "board-app"
 version = "0.1.0"
 dependencies = [
- "etch-rt",
+ "burin-rt",
  "rusqlite",
 ]
+
+[[package]]
+name = "burin-rt"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "argon2",
+ "base64",
+ "crc32fast",
+ "flate2",
+ "getrandom",
+ "hmac",
+ "httparse",
+ "httpdate",
+ "jiff",
+ "libc",
+ "mio",
+ "p256",
+ "rusqlite",
+ "sha2",
+ "socket2",
+]
+
+[[package]]
+name = "burinc"
+version = "0.1.0"
 
 [[package]]
 name = "campfire-app"
 version = "0.1.0"
 dependencies = [
- "etch-rt",
+ "burin-rt",
  "rusqlite",
 ]
 
@@ -254,32 +280,6 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
-
-[[package]]
-name = "etch-rt"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "argon2",
- "base64",
- "crc32fast",
- "flate2",
- "getrandom",
- "hmac",
- "httparse",
- "httpdate",
- "jiff",
- "libc",
- "mio",
- "p256",
- "rusqlite",
- "sha2",
- "socket2",
-]
-
-[[package]]
-name = "etchc"
-version = "0.1.0"
 
 [[package]]
 name = "fallible-iterator"
@@ -495,7 +495,7 @@ dependencies = [
 name = "notes-app"
 version = "0.1.0"
 dependencies = [
- "etch-rt",
+ "burin-rt",
  "rusqlite",
 ]
 
@@ -503,7 +503,7 @@ dependencies = [
 name = "numbers-app"
 version = "0.1.0"
 dependencies = [
- "etch-rt",
+ "burin-rt",
  "rusqlite",
 ]
 

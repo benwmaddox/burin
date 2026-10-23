@@ -1,6 +1,6 @@
 // A larger Campfire for the mixed benchmark, in Rails' own format (every implementation loads it:
 // Rails and the Rust port directly, Flow from the Rails database, crudspec through its importer,
-// etch from crudspec's copy). It starts from the verification fixture and adds people, rooms
+// burin from crudspec's copy). It starts from the verification fixture and adds people, rooms
 // (open, closed, direct), memberships, messages, boosts and a session for everyone.
 // Deterministic for a seed.
 //   node bench/mix/gen-rails.mjs <fixture production.sqlite3> <out.sqlite3> <bcrypt digest> [seed]
@@ -100,7 +100,7 @@ for (const r of rooms) {
 // in on every implementation)
 run(`UPDATE users SET password_digest = ? WHERE status = 0 AND role != 2`, digest);
 
-// a session for everyone active (the cookie etch and crudspec read; Rails and Rust sign in)
+// a session for everyone active (the cookie burin and crudspec read; Rails and Rust sign in)
 let sid = Math.max(maxId("sessions"), 900000000);
 for (const u of db.prepare("SELECT id FROM users WHERE status = 0 AND role != 2").all()) {
   if (one("SELECT 1 FROM sessions WHERE user_id = ?", u.id)) continue;

@@ -1,4 +1,4 @@
-# etch: a web app language designed like hardware
+# Burin: a web app language designed like hardware
 
 *Started 22 Oct 2026. An experiment, after crudspec and AgentLang (Flow).*
 
@@ -8,7 +8,7 @@ are fast for the same reasons: everything is decided when the chip is built, dat
 the logic that uses it, and work flows through fixed stages instead of being looked up and
 dispatched at run time.
 
-etch asks whether a web app can be built that way. The compiler sees the whole app (as crudspec's
+burin asks whether a web app can be built that way. The compiler sees the whole app (as crudspec's
 does) and bakes in what doesn't change between requests. What a request does at run time is
 reduced to looking up already-built bytes and writing them to the socket.
 
@@ -98,7 +98,7 @@ CPU per page over loopback, with page shapes like the room page:
 
 | method | raw 345 KB, 53 ranges | gzip 74 KB, 57 ranges |
 |---|---|---|
-| writev (what etch does) | 42 µs | 13.8 µs |
+| writev (what burin does) | 42 µs | 13.8 µs |
 | sendmsg MSG_ZEROCOPY | 58 µs (the kernel copied every send anyway) | 27.5 µs |
 | sendfile from a memfd, one call per range | 147 µs (67 µs corked) | 147 µs (39 µs corked) |
 | vmsplice + splice | 33 µs | 23 µs |
@@ -233,7 +233,7 @@ and generated code that decodes each row straight into a fixed struct, with no b
 
 ## The language leans toward efficient apps
 
-etch is for many apps; Campfire is the first. The compiler and runtime know nothing about any one
+burin is for many apps; Campfire is the first. The compiler and runtime know nothing about any one
 app. The language is shaped so that the efficient design is the default and the short thing to
 write, and anything that would cost the read path is either refused or written explicitly (and
 then shown in the compile report). The checker enforces these rules:
@@ -288,7 +288,7 @@ rules:
   literal (`a / 4`, `d / 1h`).
 - **overflow gives none.** A result outside 64 bits is none in a page, through LLVM's
   overflow-checked add, subtract and multiply. In SQL, SQLite makes it a REAL; an action reads any
-  computed value that isn't an INTEGER as none (`etch_col_int`), and a STRICT table refuses to
+  computed value that isn't an INTEGER as none (`burin_col_int`), and a STRICT table refuses to
   store a REAL, so the write fails and the action rolls back. One gap remains: an overflow *inside*
   a `require`'s comparison compares as a REAL in SQL, and as none in a page.
 
@@ -310,7 +310,7 @@ rows made to hit the edges: dividing by 0, none, negatives, and overflow at 64 b
 
 ## External functions (23 Oct 2026)
 
-When a spec can't say something, it calls code outside etch through the C ABI: C, or Rust's
+When a spec can't say something, it calls code outside burin through the C ABI: C, or Rust's
 `extern "C"`, in `apps/<app>/ext/` (C sources are compiled into the app; `ext.rs` goes into its
 crate). `apps/notes` and `scripts/notes-check.sh` use every form.
 
@@ -319,17 +319,17 @@ crate). `apps/notes` and `scripts/notes-check.sh` use every form.
 
 - **What crosses:** Int, Bool (0 or 1), Time and Duration (ms) as 64-bit integers; Text as its
   UTF-8 bytes and length, borrowed for the call only. A Text result is written with
-  `etch_ext_write` (`include/etch.h`; `etch_rt::ext` in Rust), so etch never takes memory it
+  `burin_ext_write` (`include/burin.h`; `burin_rt::ext` in Rust), so burin never takes memory it
   would have to free; what isn't UTF-8 is replaced.
 - **Pure, or effects:** a cached piece calls a pure function once, when it's built, and serves
-  that result until its inputs change. etch can't check purity: a function that reads the
+  that result until its inputs change. burin can't check purity: a function that reads the
   clock, a file or its own state shows a stale result. `--verify` and the scrubber compare kept
   pages with fresh renders, so this usually shows in tests. `extern effect fn` runs only in
   actions, on the writer, inside the action's transaction: its effect isn't undone if the action
   then fails, and a slow one delays every write. (Email, webhooks and other services want an
   outbox and jobs instead: not built yet.)
 - **No data access:** an external function gets no database: what it needs is passed in, which
-  keeps etch's read tracking exact. It can't run inside a query (SQLite runs those); an action
+  keeps burin's read tracking exact. It can't run inside a query (SQLite runs those); an action
   may compute one from its arguments and store the result in a field.
 - **Costs:** a text argument is written into a buffer first; C is a separate native library, so
   it isn't inlined. It runs in the server's process: memory errors in C can corrupt what every
@@ -339,10 +339,10 @@ crate). `apps/notes` and `scripts/notes-check.sh` use every form.
 
 ## The standard library (23 Oct 2026)
 
-Every app has `lang/std.etch`: text (`length`, `contains`, `starts_with`, `ends_with`,
+Every app has `lang/std.burin`: text (`length`, `contains`, `starts_with`, `ends_with`,
 `index_of`, `trim`, `truncate`, `slice`, `replace_all`, `repeat`, `pad_start`, `pad_end`,
 `capitalize`, `plural`), numbers (`decimal`, `percent`, `round_to`) and time (`format_time`,
-`weekday`). Each is Rust in the runtime (`crates/etch-rt/src/stdlib.rs`), called as an external
+`weekday`). Each is Rust in the runtime (`crates/burin-rt/src/stdlib.rs`), called as an external
 function, so adding one is a declaration and a Rust function, not compiler work. All are pure.
 
 - **The same answer everywhere:** text is counted in characters, as SQLite counts it. The ten
@@ -358,7 +358,7 @@ function, so adding one is a declaration and a Rust function, not compiler work.
 ## Lessons kept from crudspec and AgentLang
 
 - **The whole app is one program, checked as a whole** (crudspec): names, types, permissions,
-  links, forms. etch adds the dependency analysis of principle 1 to the same pass.
+  links, forms. burin adds the dependency analysis of principle 1 to the same pass.
 - **Rules carry through every layer** (crudspec): `max 80` is a database CHECK, a form's
   `maxlength`, and here also a buffer size.
 - **Data lives in SQLite.** All precomputed state is derived and can be rebuilt from SQLite at
@@ -395,6 +395,6 @@ knows what changed), the agent API, migrations, and an LSP.
 ## Reference page
 
 `D:\code\crudspec-hw\golden\room.html` is crudspec's room page for the benchmark user on
-`bench-snap-nc5` (366,229 bytes, the same on every request, valid against the contract). etch's
+`bench-snap-nc5` (366,229 bytes, the same on every request, valid against the contract). burin's
 page must equal it once crudspec's live-update bookkeeping is removed: the `<!--f:…-->` markers
-and the `crudspec-page` data script. etch will need its own live updates in phase 2.
+and the `crudspec-page` data script. burin will need its own live updates in phase 2.

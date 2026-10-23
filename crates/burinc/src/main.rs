@@ -1,7 +1,7 @@
-//! etchc: the etch compiler.
+//! burinc: the burin compiler.
 //!
-//!   etchc check <app dir>     names, types and the efficiency rules
-//!   etchc report <app dir>    the dataflow netlist: each node's stage, the registers, splices
+//!   burinc check <app dir>     names, types and the efficiency rules
+//!   burinc report <app dir>    the dataflow netlist: each node's stage, the registers, splices
 
 mod ast;
 mod actions;
@@ -23,7 +23,7 @@ fn main() -> ExitCode {
     let (cmd, dir) = match (args.get(1), args.get(2)) {
         (Some(c), Some(d)) => (c.as_str(), Path::new(d)),
         _ => {
-            eprintln!("usage: etchc check|report <app dir>");
+            eprintln!("usage: burinc check|report <app dir>");
             return ExitCode::from(64);
         }
     };
@@ -55,18 +55,18 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "emit" => {
-            // etchc emit <app> <out dir> <register,…>: the registers' LLVM module and Rust header
+            // burinc emit <app> <out dir> <register,…>: the registers' LLVM module and Rust header
             // (the registers are what the screens show, unless named)
             let (out, regs) = match (args.get(3), args.get(4)) {
                 (Some(o), Some(r)) => (Path::new(o), r.split(',').collect::<Vec<_>>()),
                 (Some(o), None) => (Path::new(o), vec![]),
                 _ => {
-                    eprintln!("usage: etchc emit <app dir> <out dir> [register,…]");
+                    eprintln!("usage: burinc emit <app dir> <out dir> [register,…]");
                     return ExitCode::from(64);
                 }
             };
-            let dl = std::env::var("ETCH_DATALAYOUT").unwrap_or_else(|_| "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128".into());
-            let tt = std::env::var("ETCH_TRIPLE").unwrap_or_else(|_| "x86_64-unknown-linux-gnu".into());
+            let dl = std::env::var("BURIN_DATALAYOUT").unwrap_or_else(|_| "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128".into());
+            let tt = std::env::var("BURIN_TRIPLE").unwrap_or_else(|_| "x86_64-unknown-linux-gnu".into());
             match llvm::module(&model, &regs, &format!("target datalayout = \"{dl}\""), &format!("target triple = \"{tt}\"")) {
                 Ok((ll, rs)) => {
                     let _ = std::fs::create_dir_all(out);

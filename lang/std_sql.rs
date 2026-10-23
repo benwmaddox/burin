@@ -1,6 +1,6 @@
-// The standard library's SQL forms (lang/std.etch): what a function is inside a query, `$1`
+// The standard library's SQL forms (lang/std.burin): what a function is inside a query, `$1`
 // … its arguments. Included by the compiler (sql.rs) and by the runtime's test that checks each
-// form against its Rust (crates/etch-rt/src/stdlib.rs) on many inputs. A function without one
+// form against its Rust (crates/burin-rt/src/stdlib.rs) on many inputs. A function without one
 // can't run inside a query.
 pub const STD_SQL: &[(&str, &str)] = &[
     ("length", "length($1)"),

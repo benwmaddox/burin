@@ -6,11 +6,11 @@
 //! is, in Rust:
 //!
 //!     #[no_mangle]
-//!     pub unsafe extern "C" fn shout(p: *const u8, n: i64, out: *mut etch_rt::ext::Out) {
-//!         etch_rt::ext::write(out, &etch_rt::ext::text(p, n).to_uppercase());
+//!     pub unsafe extern "C" fn shout(p: *const u8, n: i64, out: *mut burin_rt::ext::Out) {
+//!         burin_rt::ext::write(out, &burin_rt::ext::text(p, n).to_uppercase());
 //!     }
 //!
-//! (C functions use include/etch.h.) Numbers, flags, times and durations are `i64`.
+//! (C functions use include/burin.h.) Numbers, flags, times and durations are `i64`.
 
 /// A text result's buffer.
 pub type Out = Vec<u8>;

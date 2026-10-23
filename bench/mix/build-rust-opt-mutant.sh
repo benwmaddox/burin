@@ -2,7 +2,7 @@
 # A deliberately broken build of the Rust port variant, to prove rustopt-verify.sh catches stale
 # pages: crates/db/src/changes.rs mutated while it builds (then put back),
 # into ~/linuxbench/rust-opt/bin/campfire-mutant.
-#   bash /mnt/d/code/etch/bench/mix/build-rust-opt-mutant.sh
+#   bash /mnt/d/code/burin/bench/mix/build-rust-opt-mutant.sh
 set -euo pipefail
 source ~/.cargo/env 2>/dev/null || true
 cd /mnt/d/code/campfire-rust-opt

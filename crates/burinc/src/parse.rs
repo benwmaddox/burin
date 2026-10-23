@@ -1,4 +1,4 @@
-//! The parser: every .etch file of an app into declarations. Code is tokenized; a template
+//! The parser: every .burin file of an app into declarations. Code is tokenized; a template
 //! (`<<< … >>>`) is taken as raw bytes, then split into text and `{{ … }}` holes, whose code is
 //! tokenized again.
 
@@ -988,13 +988,13 @@ pub fn parse_expr(src: &str) -> R<Expr> {
     Ok(e)
 }
 
-/// Parses every .etch file in an app's directory, in name order.
+/// Parses every .burin file in an app's directory, in name order.
 pub fn parse_app(dir: &std::path::Path) -> Result<App, (Vec<String>, Error)> {
     let mut paths: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| (vec![], Error { span: Span::default(), msg: format!("{}: {e}", dir.display()) }))?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|x| x == "etch").unwrap_or(false))
+        .filter(|p| p.extension().map(|x| x == "burin").unwrap_or(false))
         .collect();
     paths.sort();
     let mut files: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
@@ -1008,9 +1008,9 @@ pub fn parse_app(dir: &std::path::Path) -> Result<App, (Vec<String>, Error)> {
     Ok(App { files, decls })
 }
 
-/// The standard library every app has (lang/std.etch, built into the compiler).
-pub const PRELUDE: &str = include_str!("../../../lang/std.etch");
-pub const PRELUDE_NAME: &str = "lang/std.etch";
+/// The standard library every app has (lang/std.burin, built into the compiler).
+pub const PRELUDE: &str = include_str!("../../../lang/std.burin");
+pub const PRELUDE_NAME: &str = "lang/std.burin";
 
 /// The standard library's declarations, as file `file`.
 pub fn prelude(file: u32) -> R<Vec<Decl>> {

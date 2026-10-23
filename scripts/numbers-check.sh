@@ -2,16 +2,16 @@
 # Numbers and time, end to end (apps/numbers): every value a page computes in its fragment's code
 # must equal what an action computed in SQL and stored, and what Python computes here, for
 # planets made to hit the edges: a divisor of 0, none, negatives, and overflow at 64 bits.
-#   APP=numbers CRATE=numbers-app bash scripts/build-etch.sh release
-#   bash /mnt/d/code/etch/scripts/numbers-check.sh
+#   APP=numbers CRATE=numbers-app bash scripts/build-burin.sh release
+#   bash /mnt/d/code/burin/scripts/numbers-check.sh
 set -e
-BIN=${ETCH_BIN:-$HOME/hw/etch-numbers-release}
-D=/tmp/etch-numbers; rm -rf $D; mkdir -p $D/data
+BIN=${BURIN_BIN:-$HOME/hw/burin-numbers-release}
+D=/tmp/burin-numbers; rm -rf $D; mkdir -p $D/data
 PORT=13799
 "$BIN" --data $D/data --port $PORT --workers 1 --exit-after 1 > $D/first.log 2>&1 || true
 python3 - <<'EOF'
 import sqlite3, time
-db = sqlite3.connect('/tmp/etch-numbers/data/app.sqlite')
+db = sqlite3.connect('/tmp/burin-numbers/data/app.sqlite')
 now = int(time.time() * 1000) - 3_600_000
 seq = 0
 def row(table, cols):
@@ -38,7 +38,7 @@ PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 100); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done
 get() { curl -sS -o $D/$2.html -w "%{http_code}" -H "Cookie: sid=ada-token" http://127.0.0.1:$PORT/planets/$1; }
-act() { curl -sS -o /dev/null -D - -H "Cookie: sid=ada-token" --data-urlencode "p=$1" http://127.0.0.1:$PORT/_do/$2 | grep -i x-etch-outcome | tr -d '\r' | sed 's/.*: //'; }
+act() { curl -sS -o /dev/null -D - -H "Cookie: sid=ada-token" --data-urlencode "p=$1" http://127.0.0.1:$PORT/_do/$2 | grep -i x-burin-outcome | tr -d '\r' | sed 's/.*: //'; }
 for p in 1 2 3 4 5; do
   echo "planet $p: read $(get $p cold$p), snapshot $(act $p snapshot), read $(sleep 0.2; get $p snap$p) $(get $p fast$p)"
 done
@@ -52,7 +52,7 @@ echo "planet 1: requeue $(act 1 requeue), read $(sleep 0.2; get 1 requeued1)"
 grep -iE 'mismatch|panic|error' $D/server.log | head -5 || true
 python3 - <<'EOF'
 import re, datetime
-D = '/tmp/etch-numbers/'
+D = '/tmp/burin-numbers/'
 MIN, MAX = -2**63, 2**63 - 1
 def fit(x):
     # none for none in, a divisor of 0, or outside 64 bits (none is i64::MIN itself)

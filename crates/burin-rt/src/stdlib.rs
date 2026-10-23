@@ -1,4 +1,4 @@
-//! etch's standard library (lang/std.etch): each function called as an external function (the C
+//! burin's standard library (lang/std.burin): each function called as an external function (the C
 //! ABI: text as UTF-8 bytes and a length, numbers as i64, a text result written to `out`). Text
 //! is counted in characters (Unicode scalar values), as SQLite counts it; the functions with a SQL
 //! form (lang/std_sql.rs) must give the same answers as it (the test below).
@@ -109,90 +109,90 @@ pub fn round_to(n: i64, step: i64) -> i64 {
 
 /// # Safety: as for every external function (crate::ext).
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_length(p: *const u8, n: i64) -> i64 {
+pub unsafe extern "C" fn burin_std_length(p: *const u8, n: i64) -> i64 {
     length(&text(p, n))
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_contains(p: *const u8, n: i64, q: *const u8, m: i64) -> i64 {
+pub unsafe extern "C" fn burin_std_contains(p: *const u8, n: i64, q: *const u8, m: i64) -> i64 {
     b(text(p, n).contains(&*text(q, m)))
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_starts_with(p: *const u8, n: i64, q: *const u8, m: i64) -> i64 {
+pub unsafe extern "C" fn burin_std_starts_with(p: *const u8, n: i64, q: *const u8, m: i64) -> i64 {
     b(text(p, n).starts_with(&*text(q, m)))
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_ends_with(p: *const u8, n: i64, q: *const u8, m: i64) -> i64 {
+pub unsafe extern "C" fn burin_std_ends_with(p: *const u8, n: i64, q: *const u8, m: i64) -> i64 {
     b(text(p, n).ends_with(&*text(q, m)))
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_index_of(p: *const u8, n: i64, q: *const u8, m: i64) -> i64 {
+pub unsafe extern "C" fn burin_std_index_of(p: *const u8, n: i64, q: *const u8, m: i64) -> i64 {
     index_of(&text(p, n), &text(q, m))
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_trim(p: *const u8, n: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_trim(p: *const u8, n: i64, out: *mut Out) {
     write(out, trim(&text(p, n)));
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_truncate(p: *const u8, n: i64, k: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_truncate(p: *const u8, n: i64, k: i64, out: *mut Out) {
     write(out, &truncate(&text(p, n), k));
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_slice(p: *const u8, n: i64, start: i64, count: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_slice(p: *const u8, n: i64, start: i64, count: i64, out: *mut Out) {
     write(out, &slice(&text(p, n), start, count));
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_replace_all(p: *const u8, n: i64, f: *const u8, fl: i64, t: *const u8, tl: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_replace_all(p: *const u8, n: i64, f: *const u8, fl: i64, t: *const u8, tl: i64, out: *mut Out) {
     write(out, &replace_all(&text(p, n), &text(f, fl), &text(t, tl)));
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_repeat(p: *const u8, n: i64, times: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_repeat(p: *const u8, n: i64, times: i64, out: *mut Out) {
     write(out, &repeat(&text(p, n), times));
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_pad_start(p: *const u8, n: i64, width: i64, f: *const u8, fl: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_pad_start(p: *const u8, n: i64, width: i64, f: *const u8, fl: i64, out: *mut Out) {
     write(out, &pad(&text(p, n), width, &text(f, fl), true));
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_pad_end(p: *const u8, n: i64, width: i64, f: *const u8, fl: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_pad_end(p: *const u8, n: i64, width: i64, f: *const u8, fl: i64, out: *mut Out) {
     write(out, &pad(&text(p, n), width, &text(f, fl), false));
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_capitalize(p: *const u8, n: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_capitalize(p: *const u8, n: i64, out: *mut Out) {
     write(out, &capitalize(&text(p, n)));
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_plural(k: i64, p: *const u8, n: i64, q: *const u8, m: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_plural(k: i64, p: *const u8, n: i64, q: *const u8, m: i64, out: *mut Out) {
     write(out, &if k == 1 { text(p, n) } else { text(q, m) });
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_decimal(n: i64, places: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_decimal(n: i64, places: i64, out: *mut Out) {
     write(out, &decimal(n, places));
 }
 #[no_mangle]
-pub extern "C" fn etch_std_percent(part: i64, whole: i64) -> i64 {
+pub extern "C" fn burin_std_percent(part: i64, whole: i64) -> i64 {
     percent(part, whole)
 }
 #[no_mangle]
-pub extern "C" fn etch_std_round_to(n: i64, step: i64) -> i64 {
+pub extern "C" fn burin_std_round_to(n: i64, step: i64) -> i64 {
     round_to(n, step)
 }
 /// # Safety: as for every external function.
 #[no_mangle]
-pub unsafe extern "C" fn etch_std_format_time(ms: i64, p: *const u8, n: i64, out: *mut Out) {
+pub unsafe extern "C" fn burin_std_format_time(ms: i64, p: *const u8, n: i64, out: *mut Out) {
     if ms == NONE {
         return;
     }
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn etch_std_format_time(ms: i64, p: *const u8, n: i64, out
     }
 }
 #[no_mangle]
-pub extern "C" fn etch_std_weekday(ms: i64) -> i64 {
+pub extern "C" fn burin_std_weekday(ms: i64) -> i64 {
     if ms == NONE {
         return NONE;
     }

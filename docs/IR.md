@@ -1,4 +1,4 @@
-# etch's IR: an app as a dataflow netlist
+# burin's IR: an app as a dataflow netlist
 
 *22 Oct 2026.* How the compiler organizes an app before LLVM sees it. The model is a hardware
 netlist: a graph of sources, operators and registers, where every node belongs to one clock
@@ -138,6 +138,6 @@ A route whose read stage isn't clean names the node that forced it to the cold p
 ## Compatibility with crudspec
 
 To compare byte for byte, phase 1 reproduces crudspec's HTML, including details that are
-crudspec's implementation rather than etch's design: the handler ids 88, 137 and 85 in the
+crudspec's implementation rather than burin's design: the handler ids 88, 137 and 85 in the
 signed form tokens, and those tokens' JSON shapes. These live in one labelled file in the app's
-spec (`apps/campfire/crudspec-compat.etch`) and don't shape the language.
+spec (`apps/campfire/crudspec-compat.burin`) and don't shape the language.

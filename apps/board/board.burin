@@ -1,5 +1,5 @@
-// A message board: the second etch app, to check the compiler and runtime aren't Campfire's.
-// Its database is its own (etch creates the tables).
+// A message board: the second burin app, to check the compiler and runtime aren't Campfire's.
+// Its database is its own (burin creates the tables).
 
 config host: Text
 

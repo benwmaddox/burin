@@ -1,16 +1,16 @@
 #!/bin/bash
 # Direct rooms: each member sees the room named for the others (variant bits, no per-viewer copy
 # of the page); with --verify, every fast page equals a fresh render; a post into one keeps it fast.
-#   bash /mnt/d/code/etch/scripts/direct-check.sh
+#   bash /mnt/d/code/burin/scripts/direct-check.sh
 set -e
-BIN=${ETCH_BIN:-$HOME/hw/etch-gen-release}
-D=/tmp/etch-dc; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/etch/data/campfire-golden $D/data; rm -f $D/data/app.lock
+BIN=${BURIN_BIN:-$HOME/hw/burin-gen-release}
+D=/tmp/burin-dc; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/burin/data/campfire-golden $D/data; rm -f $D/data/app.lock
 PORT=13795
-q() { node /mnt/d/code/etch/scripts/q.js $D/data/app.sqlite "$1"; }
+q() { node /mnt/d/code/burin/scripts/q.js $D/data/app.sqlite "$1"; }
 DAVID=$(q "select token from Session where id = 481019661")
 JASON=jasontokenjasontokenjasontoken00
 DU=$(q "select user from Session where token = '$DAVID'"); JU=$(q "select user from Session where token = '$JASON'")
-TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/etch/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
+TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/burin/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
 PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 100); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done
@@ -35,5 +35,5 @@ if [ -n "$SHARED" ]; then
   echo "david sees \"$(title $DAVID $SHARED)\", jason sees \"$(title $JASON $SHARED)\""
 fi
 echo "the open room still: $(get $DAVID 486777696; title $DAVID 486777696)"
-curl -sS http://127.0.0.1:$PORT/_etch/stats; echo
+curl -sS http://127.0.0.1:$PORT/_burin/stats; echo
 grep -v "^started" $D/server.log | head -10 || true

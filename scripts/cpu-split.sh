@@ -1,13 +1,13 @@
 #!/bin/bash
-# Where the fast path's CPU goes: user (etch's code) against kernel (the socket's copies), from
+# Where the fast path's CPU goes: user (burin's code) against kernel (the socket's copies), from
 # /proc's counters, under 10 s of load. Server on cores 0-3, load generator on 4-7.
-#   bash /mnt/d/code/etch/scripts/cpu-split.sh <binary> [gzip 0|1]
+#   bash /mnt/d/code/burin/scripts/cpu-split.sh <binary> [gzip 0|1]
 set -e
 BIN=$1; GZ=${2:-0}
-D=/tmp/etch-split; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/etch/data/campfire $D/data; rm -f $D/data/app.lock
+D=/tmp/burin-split; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/burin/data/campfire $D/data; rm -f $D/data/app.lock
 PORT=13796
-LG=/mnt/d/code/etch/tools/loadgen
-TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/etch/apps/campfire/assets --port $PORT > $D/server.log 2>&1 &
+LG=/mnt/d/code/burin/tools/loadgen
+TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/burin/apps/campfire/assets --port $PORT > $D/server.log 2>&1 &
 PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 200); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done

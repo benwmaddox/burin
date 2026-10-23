@@ -16,8 +16,8 @@ const post = async () => {
   const ms = performance.now() - t0;
   times.push(ms); posted++;
   if (ms > 20) slow.push([n0, +(t0 - start).toFixed(0), +ms.toFixed(1)]);
-  // etch's outcome header, or the reference baseline's
-  if (r && (r.headers.get("X-Etch-Outcome") ?? r.headers.get("X-Crudspec-Outcome")) === "ok") ok++;
+  // burin's outcome header, or the reference baseline's
+  if (r && (r.headers.get("X-Burin-Outcome") ?? r.headers.get("X-Crudspec-Outcome")) === "ok") ok++;
 };
 // one post first, untimed: the client's own warm-up (its first connection, its JIT) isn't the
 // server's latency (it showed as every server's p99 at low rates)

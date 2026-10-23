@@ -1,13 +1,13 @@
 # The mixed benchmark
 
-Many people (117) reading and posting in many rooms (60), at different rates, against etch,
+Many people (117) reading and posting in many rooms (60), at different rates, against burin,
 crudspec, the Rust port of Campfire as published (`rust`) and its optimized variant (`rustopt`,
-`bench/rust-opt`: etch's caching ideas applied in idiomatic Rust). Rails and Flow are stage 2. Read-heavy, with writes
+`bench/rust-opt`: burin's caching ideas applied in idiomatic Rust). Rails and Flow are stage 2. Read-heavy, with writes
 from various people. Each run is two passes (the second in reverse order) under the shared
 bench lock, in its own network namespace and cgroup, the server on cores 8-11 and the load on
 12-19.
 
-    wsl -d Ubuntu -u root -- bash /mnt/d/code/etch/bench/mix/drive.sh <tag> etch crudspec rust
+    wsl -d Ubuntu -u root -- bash /mnt/d/code/burin/bench/mix/drive.sh <tag> burin crudspec rust
 
 Data: `build-data.sh` (in WSL home, never in the repository). The load: `tools/mixload`.
 
@@ -24,10 +24,10 @@ Every app gets the same load, shaped like browsers using Rails Campfire with Tur
 - **A visit** is a Turbo Drive visit: the page only. The frame is permanent, so it's kept; it is
   asked for again after a visit with probability 0.05 (Rails reloads it when the tab is shown
   again).
-- **Reading.** etch's page says when the room being read was unread for the viewer, and its
+- **Reading.** burin's page says when the room being read was unread for the viewer, and its
   script marks it read (`/_do/read_room`): the load does the same ("marks/s"). Rails marks a
   room read through its presence channel over ActionCable: that's stage B (live connections).
-- **Posting** follows each app's browser flow: etch and crudspec answer the form with a
+- **Posting** follows each app's browser flow: burin and crudspec answer the form with a
   redirect, which the browser follows (the post's time includes that page); Rails' composer
   asks for a Turbo Stream and gets no page. The post comes from the room's page (its referer).
 - **Static files** aren't asked for: a browser keeps them.
@@ -36,11 +36,11 @@ Every app gets the same load, shaped like browsers using Rails Campfire with Tur
 
 ## Not the same work (read every table with this)
 
-- **Unread.** etch and `rustopt` count posts per room and members' last-seen counts: a post
+- **Unread.** burin and `rustopt` count posts per room and members' last-seen counts: a post
   writes the room and the poster's membership. Rails, the published Rust port and crudspec
   mark each disconnected member's row on every post (a write per member).
 - **Presence.** Until stage B, nothing here holds a live connection: Rails' per-visit presence
-  writes and its live pushes aren't exercised, and etch has no live updates yet.
+  writes and its live pushes aren't exercised, and burin has no live updates yet.
 
 ## Results
 

@@ -1,6 +1,6 @@
-// Notes' Rust functions (apps/notes/notes.etch), with the C ABI an `extern fn` has.
+// Notes' Rust functions (apps/notes/notes.burin), with the C ABI an `extern fn` has.
 
-use etch_rt::ext::{text, write, Out};
+use burin_rt::ext::{text, write, Out};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// The text in capitals (Unicode's rules).

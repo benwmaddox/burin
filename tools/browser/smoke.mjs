@@ -1,4 +1,4 @@
-// A real browser on etch's Campfire (Chromium, headless): what Rails Campfire's pages do with
+// A real browser on burin's Campfire (Chromium, headless): what Rails Campfire's pages do with
 // Turbo, done here too. The page loads its sidebar once into a permanent frame; following a room
 // link swaps the page without reloading it and keeps that sidebar (no second request); the
 // page's script marks the viewer's own messages; posting from the composer shows the message.
@@ -41,8 +41,8 @@ try {
 
   // mark the document and the sidebar's frame: a Turbo visit keeps both
   await page.evaluate(() => {
-    window.__etchSameDocument = true;
-    document.getElementById("user_sidebar").__etchSameFrame = true;
+    window.__burinSameDocument = true;
+    document.getElementById("user_sidebar").__burinSameFrame = true;
   });
   const next = await page.evaluate((r) => [...document.querySelectorAll("#user_sidebar .rooms a.room")].map((a) => a.getAttribute("href")).find((h) => h !== `/rooms/${r}`), room);
   want("another room to visit", !!next, next || "none");
@@ -51,8 +51,8 @@ try {
     await page.click(`#user_sidebar a[href="${next}"]`);
     await page.waitForFunction((h) => document.querySelector('meta[name="current-room-id"]')?.content === h.split("/").pop(), next, { timeout: 10000 });
     want("the visit fetched the page", count(/\/rooms\/\d+$/) === pages0 + 1);
-    want("no full reload (Turbo Drive)", await page.evaluate(() => window.__etchSameDocument === true));
-    want("the same sidebar, kept", await page.evaluate(() => document.getElementById("user_sidebar").__etchSameFrame === true));
+    want("no full reload (Turbo Drive)", await page.evaluate(() => window.__burinSameDocument === true));
+    want("the same sidebar, kept", await page.evaluate(() => document.getElementById("user_sidebar").__burinSameFrame === true));
     want("still one sidebar request", count(/\/users\/me\/sidebar/) === 1, String(count(/\/users\/me\/sidebar/)));
     want("the visited room isn't shown unread", await page.evaluate((h) => !document.querySelector(`#user_sidebar a[href="${h}"].unread`), next));
   }
@@ -64,7 +64,7 @@ try {
   await page.waitForFunction((t) => [...document.querySelectorAll(".message__presentation")].some((e) => e.textContent.includes(t)), text, { timeout: 10000 });
   want("a post shows in the room", true);
   want("it's marked as the viewer's own", await page.evaluate((t) => [...document.querySelectorAll(".message")].some((m) => m.classList.contains("message--me") && m.textContent.includes(t)), text));
-  want("still no full reload", await page.evaluate(() => window.__etchSameDocument === true));
+  want("still no full reload", await page.evaluate(() => window.__burinSameDocument === true));
   want("still one sidebar request", count(/\/users\/me\/sidebar/) === 1, String(count(/\/users\/me\/sidebar/)));
   want("no failed requests", bad.length === 0, bad.slice(0, 5).join(", "));
   want("no script errors", errors.length === 0, errors.slice(0, 3).join(" | "));

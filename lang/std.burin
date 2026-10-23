@@ -1,0 +1,49 @@
+// burin's standard library: in every app, as if each app declared it. Each function is Rust in
+// the runtime (crates/burin-rt/src/stdlib.rs), called as an external function; the ones with a
+// SQL form (lang/std_sql.rs) also run inside queries, and a test checks both forms agree.
+// All are pure. Text is counted in characters (Unicode scalar values), as SQLite counts it.
+
+// ---- text
+
+// how many characters
+extern fn length(t: Text): Int from "burin_std_length"
+// whether `part` is in `t` (exactly: case matters)
+extern fn contains(t: Text, part: Text): Bool from "burin_std_contains"
+extern fn starts_with(t: Text, prefix: Text): Bool from "burin_std_starts_with"
+extern fn ends_with(t: Text, suffix: Text): Bool from "burin_std_ends_with"
+// where `part` first is, counting from 0; -1 when it isn't
+extern fn index_of(t: Text, part: Text): Int from "burin_std_index_of"
+// without spaces, tabs and line breaks at either end
+extern fn trim(t: Text): Text from "burin_std_trim"
+// the first `n` characters, with "…" when there were more
+extern fn truncate(t: Text, n: Int): Text from "burin_std_truncate"
+// `count` characters from `start` (counting from 0)
+extern fn slice(t: Text, start: Int, count: Int): Text from "burin_std_slice"
+// every `from` replaced by `to` (an empty `from` changes nothing)
+extern fn replace_all(t: Text, from: Text, to: Text): Text from "burin_std_replace_all"
+// `t`, `n` times (at most 1 MB)
+extern fn repeat(t: Text, n: Int): Text from "burin_std_repeat"
+// at least `width` characters, `fill`'s first character added before (pad_start) or after
+extern fn pad_start(t: Text, width: Int, fill: Text): Text from "burin_std_pad_start"
+extern fn pad_end(t: Text, width: Int, fill: Text): Text from "burin_std_pad_end"
+// the first character in capitals
+extern fn capitalize(t: Text): Text from "burin_std_capitalize"
+// `one` when n is 1, else `many`
+extern fn plural(n: Int, one: Text, many: Text): Text from "burin_std_plural"
+
+// ---- numbers
+
+// a whole number of hundredths (or other places) written as a decimal: decimal(12345, 2) is
+// "123.45", decimal(-5, 2) "-0.05"; places 0 to 18; none is ""
+extern fn decimal(n: Int, places: Int): Text from "burin_std_decimal"
+// part of whole, in whole percent (rounded toward 0); none when whole is 0
+extern fn percent(part: Int, whole: Int): Int from "burin_std_percent"
+// the nearest multiple of step (halves away from 0); n itself when step isn't above 0
+extern fn round_to(n: Int, step: Int): Int from "burin_std_round_to"
+
+// ---- time (in the server's time zone)
+
+// strftime's patterns ("%Y-%m-%d %H:%M", "%A", "%B %-d"): an invalid pattern is ""
+extern fn format_time(t: Time, pattern: Text): Text from "burin_std_format_time"
+// the day of the week: 0 Monday to 6 Sunday
+extern fn weekday(t: Time): Int from "burin_std_weekday"

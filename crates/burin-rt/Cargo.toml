@@ -1,9 +1,9 @@
 [package]
-name = "etch-rt"
+name = "burin-rt"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "etch's runtime: the prebuilt base every generated app links (the HTTP fast path, signing, formatting)"
+description = "burin's runtime: the prebuilt base every generated app links (the HTTP fast path, signing, formatting)"
 
 [dependencies]
 httparse = "1"

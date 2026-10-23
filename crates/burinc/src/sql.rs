@@ -690,7 +690,7 @@ include!("../../../lang/std_sql.rs");
 /// name couldn't exist, it would be declared twice).
 fn std_sql(m: &Model, f: &str) -> Option<&'static str> {
     match m.externs.get(f) {
-        Some(Decl::Extern { symbol, .. }) if symbol.starts_with("etch_std_") => STD_SQL.iter().find(|(n, _)| *n == f).map(|(_, s)| *s),
+        Some(Decl::Extern { symbol, .. }) if symbol.starts_with("burin_std_") => STD_SQL.iter().find(|(n, _)| *n == f).map(|(_, s)| *s),
         _ => None,
     }
 }

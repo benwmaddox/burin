@@ -1,12 +1,12 @@
 #!/bin/bash
-# Posts the same messages to crudspec and to etch (each on its own copy of the golden data) and
+# Posts the same messages to crudspec and to burin (each on its own copy of the golden data) and
 # compares the room pages, with the post times and the random client ids masked.
-#   bash /mnt/d/code/etch/scripts/post-parity.sh
+#   bash /mnt/d/code/burin/scripts/post-parity.sh
 set -e
 CS=$HOME/hw/campfire-pk
-ET=${ETCH_BIN:-$HOME/hw/etch-gen-release}
-D=/tmp/etch-pp; rm -rf $D; mkdir -p $D
-cp -a /mnt/d/code/etch/data/campfire-golden $D/cs; cp -a /mnt/d/code/etch/data/campfire-golden $D/et; rm -f $D/cs/app.lock $D/et/app.lock
+ET=${BURIN_BIN:-$HOME/hw/burin-gen-release}
+D=/tmp/burin-pp; rm -rf $D; mkdir -p $D
+cp -a /mnt/d/code/burin/data/campfire-golden $D/cs; cp -a /mnt/d/code/burin/data/campfire-golden $D/et; rm -f $D/cs/app.lock $D/et/app.lock
 cd /mnt/d/code/crudspec
 TZ=America/New_York CRUDSPEC_NO_CACHE=1 taskset -c 0-3 "$CS" --data $D/cs --assets /mnt/d/code/crudspec-assets/campfire --port 13792 > $D/cs.log 2>&1 &
 P1=$!
@@ -44,5 +44,5 @@ else:
     i = next((j for j in range(min(len(a), len(b))) if a[j] != b[j]), min(len(a), len(b)))
     print('DIFFER at', i)
     print(' crudspec:', repr(a[max(0,i-150):i+150]))
-    print(' etch:    ', repr(b[max(0,i-150):i+150]))
+    print(' burin:    ', repr(b[max(0,i-150):i+150]))
 EOF

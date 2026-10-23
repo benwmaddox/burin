@@ -1,6 +1,6 @@
 //! Actions as fixed rules (DESIGN.md principle 3), lowered to LLVM IR, with their delta edges.
 //!
-//! `etch_act_<name>(ctx, db, w, viewer, vrec, args, deltas) -> i32` runs inside the writer's
+//! `burin_act_<name>(ctx, db, w, viewer, vrec, args, deltas) -> i32` runs inside the writer's
 //! transaction and returns its outcome (0: ok; otherwise an index into the outcomes):
 //! - `require c else o`: the condition as one SQL expression (`SELECT …`), values bound;
 //! - `create E {…}`: an INSERT; the id, seq and time come from the writer (`w`);
@@ -331,7 +331,7 @@ impl<'a, 'b> Act<'a, 'b> {
             Expr::Name(n, _) if n == "now" => Ok(("%now".into(), Shape::I64)),
             Expr::Name(n, _) if n == "@seq" => {
                 let x = self.v();
-                self.line(&format!("{x} = call i64 @etch_w_seq_now(ptr %w)"));
+                self.line(&format!("{x} = call i64 @burin_w_seq_now(ptr %w)"));
                 Ok((x, Shape::I64))
             }
             // a number SQL computed (RETURNING), by its value
@@ -375,7 +375,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     _ => return Err("token takes a constant length".into()),
                 };
                 let p = self.v();
-                self.line(&format!("{p} = alloca %Str\n  call void @etch_w_token(ptr %w, i64 {n}, ptr {p})"));
+                self.line(&format!("{p} = alloca %Str\n  call void @burin_w_token(ptr %w, i64 {n}, ptr {p})"));
                 Ok((p, Shape::Str))
             }
             // an external function: its arguments as the C ABI takes them (text as its bytes'
@@ -399,8 +399,8 @@ impl<'a, 'b> Act<'a, 'b> {
                 if matches!(ret, Type::Text) {
                     let (o, d) = (self.v(), self.v());
                     let sep = if list.is_empty() { "" } else { ", " };
-                    self.line(&format!("{o} = call ptr @etch_w_ext_out(ptr %w)\n  call void @{}({}{sep}ptr {o})", self.m.extern_symbol(f), list.join(", ")));
-                    self.line(&format!("{d} = alloca %Str\n  call void @etch_w_ext_take(ptr %w, ptr {d})"));
+                    self.line(&format!("{o} = call ptr @burin_w_ext_out(ptr %w)\n  call void @{}({}{sep}ptr {o})", self.m.extern_symbol(f), list.join(", ")));
+                    self.line(&format!("{d} = alloca %Str\n  call void @burin_w_ext_take(ptr %w, ptr {d})"));
                     Ok((d, Shape::Str))
                 } else {
                     let r = self.v();
@@ -427,7 +427,7 @@ impl<'a, 'b> Act<'a, 'b> {
         let st = self.stmt(&sel)?;
         let v = self.v();
         self.line(&format!("call i32 @sqlite3_step(ptr {st})"));
-        self.line(&format!("{v} = call i64 @etch_col_int(ptr {st}, i32 0)"));
+        self.line(&format!("{v} = call i64 @burin_col_int(ptr {st}, i32 0)"));
         self.line(&format!("call i32 @sqlite3_reset(ptr {st})"));
         Ok((v, Shape::I64))
     }
@@ -475,7 +475,7 @@ impl<'a, 'b> Act<'a, 'b> {
         }
         let (v, _) = self.value(e)?;
         let (c, ok) = (self.v(), self.v());
-        self.line(&format!("{c} = call i64 @etch_str_chars(ptr {v})"));
+        self.line(&format!("{c} = call i64 @burin_str_chars(ptr {v})"));
         self.line(&format!("{ok} = icmp sle i64 {c}, {n}"));
         let code = self.outcome("invalid");
         let (pass, fail) = (format!("pass{}", self.n), format!("fail{}", self.n));
@@ -490,9 +490,9 @@ impl<'a, 'b> Act<'a, 'b> {
         let (v, shape) = self.value(e)?;
         if shape == Shape::I64 {
             // none (i64::MIN) is bound as NULL
-            self.line(&format!("call void @etch_bind_i64(ptr {st}, i32 {i}, i64 {v})"));
+            self.line(&format!("call void @burin_bind_i64(ptr {st}, i32 {i}, i64 {v})"));
         } else {
-            self.line(&format!("call void @etch_bind_str(ptr {st}, i32 {i}, ptr {v})"));
+            self.line(&format!("call void @burin_bind_str(ptr {st}, i32 {i}, ptr {v})"));
         }
         Ok(())
     }
@@ -502,7 +502,7 @@ impl<'a, 'b> Act<'a, 'b> {
         *self.qid += 1;
         let st = self.v();
         let _ = writeln!(self.b, "  ; {sql_text}");
-        self.line(&format!("{st} = call ptr @etch_stmt(ptr %db, i64 {}, ptr {g}, i64 {})", self.qid, sql_text.len()));
+        self.line(&format!("{st} = call ptr @burin_stmt(ptr %db, i64 {}, ptr {g}, i64 {})", self.qid, sql_text.len()));
         st
     }
 
@@ -525,7 +525,7 @@ impl<'a, 'b> Act<'a, 'b> {
             2 | 5 | 7 => self.touched.push(('l', a, None)),
             _ => {}
         }
-        self.line(&format!("call void @etch_delta(ptr %d, i32 {op}, i64 {a}, i64 {key}, i64 {item})"));
+        self.line(&format!("call void @burin_delta(ptr %d, i32 {op}, i64 {a}, i64 {key}, i64 {item})"));
     }
 
     /// A created row's register record, filled from what the action wrote, if every field can
@@ -583,7 +583,7 @@ impl<'a, 'b> Act<'a, 'b> {
         }
         let ty = format!("%In_{}", reg.name);
         let (size, sz, rec) = (self.v(), self.v(), self.v());
-        self.line(&format!("{size} = getelementptr {ty}, ptr null, i64 1\n  {sz} = ptrtoint ptr {size} to i64\n  {rec} = call ptr @etch_w_alloc(ptr %w, i64 {sz})"));
+        self.line(&format!("{size} = getelementptr {ty}, ptr null, i64 1\n  {sz} = ptrtoint ptr {size} to i64\n  {rec} = call ptr @burin_w_alloc(ptr %w, i64 {sz})"));
         for (i, (src, shape)) in plan.into_iter().enumerate() {
             let p = self.v();
             self.line(&format!("{p} = getelementptr inbounds {ty}, ptr {rec}, i32 0, i32 {i}"));
@@ -599,7 +599,7 @@ impl<'a, 'b> Act<'a, 'b> {
                         self.line(&format!("store i64 {v}, ptr {p}"));
                     } else {
                         // copied into the writer's arena: the record outlives the action's arguments
-                        self.line(&format!("call void @etch_w_copy(ptr %w, ptr {v}, ptr {p})"));
+                        self.line(&format!("call void @burin_w_copy(ptr %w, ptr {v}, ptr {p})"));
                     }
                 }
                 Src::Viewer(key) => {
@@ -608,7 +608,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let (q, x) = (self.v(), self.v());
                     self.line(&format!("{q} = getelementptr inbounds %Viewer, ptr %vrec, i32 0, i32 {vi}"));
                     if shape == Shape::Str {
-                        self.line(&format!("call void @etch_w_copy(ptr %w, ptr {q}, ptr {p})"));
+                        self.line(&format!("call void @burin_w_copy(ptr %w, ptr {q}, ptr {p})"));
                     } else {
                         self.line(&format!("{x} = load i64, ptr {q}\n  store i64 {x}, ptr {p}"));
                     }
@@ -726,7 +726,7 @@ impl<'a, 'b> Act<'a, 'b> {
                 self.n += 1;
                 let (rc, ok, k) = (self.v(), self.v(), self.v());
                 let _ = writeln!(self.b, "  br label %{h}\n{h}:\n  {rc} = call i32 @sqlite3_step(ptr {st})\n  {ok} = icmp eq i32 {rc}, 100\n  br i1 {ok}, label %{body}, label %{done}\n{body}:");
-                self.line(&format!("{k} = call i64 @etch_col_i64(ptr {st}, i32 0)"));
+                self.line(&format!("{k} = call i64 @burin_col_i64(ptr {st}, i32 0)"));
                 self.delta(3, l.reg, &k, "0");
                 for c in cols {
                     self.cover(l.reg, &l.entity, &format!("{p0}.{c}"));
@@ -882,7 +882,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let st = self.stmt(&sel)?;
                     let (x, ok) = (self.v(), self.v());
                     self.line(&format!("call i32 @sqlite3_step(ptr {st})"));
-                    self.line(&format!("{x} = call i64 @etch_col_i64(ptr {st}, i32 0)"));
+                    self.line(&format!("{x} = call i64 @burin_col_i64(ptr {st}, i32 0)"));
                     self.line(&format!("call i32 @sqlite3_reset(ptr {st})"));
                     self.line(&format!("{ok} = icmp eq i64 {x}, 1"));
                     let (pass, fail) = (format!("pass{}", self.n), format!("fail{}", self.n));
@@ -896,8 +896,8 @@ impl<'a, 'b> Act<'a, 'b> {
                     }
                     let gid = self.md.str_const_pub(ent.as_bytes());
                     let (id, seq) = (self.v(), self.v());
-                    self.line(&format!("{id} = call i64 @etch_w_id(ptr %w, ptr %db, ptr {gid}, i64 {})", ent.len()));
-                    self.line(&format!("{seq} = call i64 @etch_w_seq(ptr %w)"));
+                    self.line(&format!("{id} = call i64 @burin_w_id(ptr %w, ptr %db, ptr {gid}, i64 {})", ent.len()));
+                    self.line(&format!("{seq} = call i64 @burin_w_seq(ptr %w)"));
                     let mut cols = vec!["id".to_string(), "seq".into(), "created".into(), "updated".into()];
                     cols.extend(fields.iter().map(|(f, _)| f.clone()));
                     let sql_text = format!(
@@ -922,12 +922,12 @@ impl<'a, 'b> Act<'a, 'b> {
                             // a computed value (`now + 5min`), forwarded as the value bound
                             fixed.push((f.clone(), if matches!(e, Expr::Bin(..) | Expr::Call(..)) { Expr::Name(format!("@i64{v}"), Span::default()) } else { e.clone() }));
                         } else {
-                            self.line(&format!("call void @etch_bind_str(ptr {st}, i32 {}, ptr {v})", i + 5));
+                            self.line(&format!("call void @burin_bind_str(ptr {st}, i32 {}, ptr {v})", i + 5));
                             // the made value, by its pointer, for the forwarded record
                             fixed.push((f.clone(), Expr::Name(format!("@ptr{v}"), Span::default())));
                         }
                     }
-                    self.line(&format!("call void @etch_exec(ptr {st})"));
+                    self.line(&format!("call void @burin_exec(ptr {st})"));
                     self.edges(ent, &["*".into()], &vals, &[], regs, lists, screens, Some((&id, &seq, &fixed)), false)?;
                     if let Some(n) = name {
                         let p = format!("%let_{n}_{}", self.n);
@@ -947,7 +947,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let st = self.stmt_text(&format!("UPDATE \"{ent}\" SET \"updated\" = ? WHERE id = ?"));
                     self.line(&format!("call i32 @sqlite3_bind_int64(ptr {st}, i32 1, i64 %now)"));
                     self.line(&format!("call i32 @sqlite3_bind_int64(ptr {st}, i32 2, i64 {id})"));
-                    self.line(&format!("call void @etch_exec(ptr {st})"));
+                    self.line(&format!("call void @burin_exec(ptr {st})"));
                     let mut vals = HashMap::new();
                     vals.insert("id".to_string(), id);
                     self.edges(&ent, &["updated".into()], &vals, &[("updated".into(), Expr::Name("now".into(), Span::default()))], regs, lists, screens, None, false)?;
@@ -965,7 +965,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     self.line(&format!("{p} = alloca i64"));
                     self.line(&format!("call i32 @sqlite3_step(ptr {st})"));
                     // a computed number that overflowed (a REAL) is none, as in a page
-                    self.line(&format!("{v} = call i64 @etch_col_int(ptr {st}, i32 0)"));
+                    self.line(&format!("{v} = call i64 @burin_col_int(ptr {st}, i32 0)"));
                     self.line(&format!("call i32 @sqlite3_reset(ptr {st})"));
                     self.line(&format!("store i64 {v}, ptr {p}"));
                     if let Type::Ref(ent) = t.strip_opt() {
@@ -978,7 +978,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let (tok, _) = self.value(&Expr::Call("token".into(), vec![Expr::Int(32, *span)], *span))?;
                     let fields = vec![(to_field.clone(), e.clone()), (via_field.clone(), Expr::Name(format!("@ptr{tok}"), *span))];
                     self.stmts(&[Stmt::Create(via_entity.clone(), fields, None, *span)], scope, regs, lists, screens)?;
-                    self.line(&format!("call void @etch_w_sign_in(ptr %w, ptr {tok})"));
+                    self.line(&format!("call void @burin_w_sign_in(ptr %w, ptr {tok})"));
                 }
                 Stmt::If(c, a, b, _) => {
                     let cond = inline::expr(self.m, c, &inline::Env::new(), 0, 0);
@@ -986,7 +986,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let st = self.stmt(&sel)?;
                     let (x, ok) = (self.v(), self.v());
                     self.line(&format!("call i32 @sqlite3_step(ptr {st})"));
-                    self.line(&format!("{x} = call i64 @etch_col_i64(ptr {st}, i32 0)"));
+                    self.line(&format!("{x} = call i64 @burin_col_i64(ptr {st}, i32 0)"));
                     self.line(&format!("call i32 @sqlite3_reset(ptr {st})"));
                     self.line(&format!("{ok} = icmp eq i64 {x}, 1"));
                     let (lt, lf, le) = (format!("ift{}", self.n), format!("iff{}", self.n), format!("ife{}", self.n));
@@ -1009,7 +1009,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let (pre, post) = route.split_once(&format!("{{{param}}}")).ok_or("go's route")?;
                     let (gp, gs) = (self.md.str_const_pub(pre.as_bytes()), self.md.str_const_pub(post.as_bytes()));
                     let (id, _) = self.value(arg)?;
-                    self.line(&format!("call void @etch_w_go(ptr %w, ptr {gp}, i64 {}, i64 {id}, ptr {gs}, i64 {})", pre.len(), post.len()));
+                    self.line(&format!("call void @burin_w_go(ptr %w, ptr {gp}, i64 {}, i64 {id}, ptr {gs}, i64 {})", pre.len(), post.len()));
                 }
                 Stmt::SignOut(span) => {
                     let Some(Decl::Viewer { via_entity, via_field, .. }) = self.m.viewer else { return Err("sign out needs a viewer".into()) };
@@ -1017,7 +1017,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let q = Query { source: Source::Entity(via_entity.clone()), filter: Some(filter), order: vec![], limit: None, window_last: None, span: *span };
                     let row = "__s".to_string();
                     self.stmts(&[Stmt::ForEach(row.clone(), q, vec![Stmt::Delete(Expr::Name(row, *span), *span)], *span)], scope, regs, lists, screens)?;
-                    self.line("call void @etch_w_sign_out(ptr %w)");
+                    self.line("call void @burin_w_sign_out(ptr %w)");
                 }
                 // `set x.f = v` and `delete x` on one row: a for each over its id
                 Stmt::Set(o, _, _, span) | Stmt::Delete(o, span) => {
@@ -1044,7 +1044,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let sel = sql::ids(self.m, &ent, filter.as_ref(), &self.rows)?;
                     let st = self.stmt(&sel)?;
                     let (ids, p, n) = (self.v(), self.v(), self.v());
-                    self.line(&format!("{ids} = call %List @etch_w_ids(ptr %w, ptr {st})"));
+                    self.line(&format!("{ids} = call %List @burin_w_ids(ptr %w, ptr {st})"));
                     self.line(&format!("{p} = extractvalue %List {ids}, 0"));
                     self.line(&format!("{n} = extractvalue %List {ids}, 1"));
                     let k = self.n;
@@ -1124,7 +1124,7 @@ impl<'a, 'b> Act<'a, 'b> {
                     let mut vals = HashMap::new();
                     for (i, c) in ret.iter().enumerate() {
                         let x = self.v();
-                        self.line(&format!("{x} = call i64 @etch_col_i64(ptr {st}, i32 {i})"));
+                        self.line(&format!("{x} = call i64 @burin_col_i64(ptr {st}, i32 {i})"));
                         vals.insert(c.clone(), x);
                     }
                     if delete {
@@ -1138,7 +1138,7 @@ impl<'a, 'b> Act<'a, 'b> {
                             .collect();
                         self.edges(&ent, &cols, &vals, &real_sets, regs, lists, screens, None, false)?;
                     }
-                    let _ = writeln!(self.b, "  br label %{h}\n{done}:\n  call void @etch_done(ptr {st}, i32 {rc})");
+                    let _ = writeln!(self.b, "  br label %{h}\n{done}:\n  call void @burin_done(ptr {st}, i32 {rc})");
                 }
             }
         }
@@ -1204,7 +1204,7 @@ fn patch_fn(reg: &RegInfo, (_, slot, field): Patch, store: bool) -> String {
         ("find", field, String::new())
     };
     format!(
-        "define i1 @etch_{kind}_{name}_{slot}_{field}(ptr %rec, i64 %item, i64 %value) {{
+        "define i1 @burin_{kind}_{name}_{slot}_{field}(ptr %rec, i64 %item, i64 %value) {{
 entry:
   %lp = getelementptr inbounds {list_ty}, ptr %rec, i32 0, i32 {lslot}
   %l = load %List, ptr %lp
@@ -1318,8 +1318,8 @@ pub fn lower(m: &Model, md: &mut Module, qid: &mut usize, screens: &[ScreenList]
             let mut f = String::new();
             let parts: Vec<&str> = args.iter().map(|(_, s)| if *s == Shape::Str { "%Str" } else { "i64" }).collect();
             let _ = writeln!(f, "%Args_{name} = type {{ {} }}", parts.join(", "));
-            let _ = writeln!(f, "define i32 @etch_act_{name}(ptr noalias %ctx, ptr noalias %db, ptr noalias %w, i64 %viewer, ptr noalias %vrec, ptr noalias %args, ptr noalias %d) {{\nentry:");
-            let _ = writeln!(f, "  %now = call i64 @etch_w_now(ptr %w)");
+            let _ = writeln!(f, "define i32 @burin_act_{name}(ptr noalias %ctx, ptr noalias %db, ptr noalias %w, i64 %viewer, ptr noalias %vrec, ptr noalias %args, ptr noalias %d) {{\nentry:");
+            let _ = writeln!(f, "  %now = call i64 @burin_w_now(ptr %w)");
             f.push_str(&a.allocas);
             f.push_str(&a.b.replace("%Args,", &format!("%Args_{name},")));
             let _ = writeln!(f, "  ret i32 0");

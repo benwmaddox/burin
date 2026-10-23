@@ -2,7 +2,7 @@
 //! them post, each acting as a browser does. Plain HTTP/1.1 to one server; one JSON object on
 //! stdout.
 //!
-//!   mixload --base URL --people people.json --app etch|crudspec|rails|rust|flow
+//!   mixload --base URL --people people.json --app burin|crudspec|rails|rust|flow
 //!           [--cookies cookies.json] [--conc 32] [--duration 10] [--post-rate 0] [--gzip 1]
 //!           [--check-every 20] [--seed 1] [--visits 20] [--sidebar-reload 0.05] [--sidebar PATH|none]
 //!
@@ -12,14 +12,14 @@
 //! with Turbo-Frame: user_sidebar; crudspec builds its sidebar into every page). Then they visit
 //! rooms (`--visits` pages a session on average): a Turbo visit asks for the page only, the frame
 //! is kept; after a visit the sidebar is reloaded with probability `--sidebar-reload` (Rails
-//! reloads it when the tab is shown again). etch's page says when the room was unread for the
+//! reloads it when the tab is shown again). burin's page says when the room was unread for the
 //! viewer, and its script marks it read: so does this. Static files are never asked for (a
 //! browser keeps them).
 //!
 //! Posters (`--post-rate`, open loop): someone (by weight) posts to one of their rooms, as the
-//! browser's form does: etch and crudspec answer with a redirect, which the browser follows (the
+//! browser's form does: burin and crudspec answer with a redirect, which the browser follows (the
 //! post's time includes that page); Rails' composer asks for a Turbo Stream and gets no page.
-//! etch and crudspec sign in with a session token (people.json); the others with a cookie and
+//! burin and crudspec sign in with a session token (people.json); the others with a cookie and
 //! CSRF token per person (`--cookies`: {"<id>": {"cookie": "...", "csrf": "..."}}).
 //!
 //! Fail closed: a read counts only with status 200 and a page; every `--check-every`th page is
@@ -204,7 +204,7 @@ async fn main() -> Res<()> {
         None => json!({}),
     };
     let room_w: HashMap<i64, f64> = pj["rooms"].as_object().ok_or("rooms")?.iter().map(|(k, v)| (k.parse().unwrap(), v.as_f64().unwrap())).collect();
-    let token_apps = app == "etch" || app == "crudspec";
+    let token_apps = app == "burin" || app == "crudspec";
     let mut people = vec![];
     for p in pj["people"].as_array().ok_or("people")? {
         let id = p["id"].as_i64().unwrap();
@@ -304,13 +304,13 @@ async fn main() -> Res<()> {
                             invalid.fetch_add(1, Ordering::Relaxed);
                         }
                         let close = r.headers.get("connection").map(|v| v == "close").unwrap_or(false);
-                        // etch's page script: the room was unread for the viewer, so it marks it read
-                        if good && !close && app == "etch" && head_text(&r).contains("<meta name=\"current-room-unread\" content=\"true\">") {
+                        // burin's page script: the room was unread for the viewer, so it marks it read
+                        if good && !close && app == "burin" && head_text(&r).contains("<meta name=\"current-room-unread\" content=\"true\">") {
                             let body = format!("room={room}");
                             let referer = format!("http://{addr}/rooms/{room}");
                             match send(conn.as_mut().unwrap(), &addr, "POST", "/_do/read_room", &[("cookie", p.cookie.clone()), ("content-type", "application/x-www-form-urlencoded".into()), ("referer", referer)], Bytes::from(body)).await {
                                 Ok(rr) => {
-                                    if rr.headers.get("x-etch-outcome").map(|v| v == "ok").unwrap_or(false) {
+                                    if rr.headers.get("x-burin-outcome").map(|v| v == "ok").unwrap_or(false) {
                                         marked.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
@@ -397,7 +397,7 @@ async fn main() -> Res<()> {
                 inflight.push(tokio::spawn(async move {
                     let t0 = Instant::now();
                     let Ok(mut c) = connect(&addr).await else { return };
-                    let token_app = app == "etch" || app == "crudspec";
+                    let token_app = app == "burin" || app == "crudspec";
                     let r = if token_app {
                         let body = format!("room={room}&body={}&client_id=mix-{k}", urlencode(&text));
                         // from the room's page (the browser sends it as the referer)
@@ -409,7 +409,7 @@ async fn main() -> Res<()> {
                     };
                     let good = match r {
                         Ok(r) if token_app => {
-                            let said_ok = r.headers.get("x-etch-outcome").or(r.headers.get("x-crudspec-outcome")).map(|v| v == "ok").unwrap_or(false);
+                            let said_ok = r.headers.get("x-burin-outcome").or(r.headers.get("x-crudspec-outcome")).map(|v| v == "ok").unwrap_or(false);
                             // the browser follows redirects to the page they lead to
                             let mut good = said_ok;
                             let mut at = r;

@@ -1,4 +1,4 @@
 #!/bin/bash
 export EXTRA_ENV="$1"
 shift
-bash /mnt/d/code/etch/bench/mix/profile-rust.sh "$@"
+bash /mnt/d/code/burin/bench/mix/profile-rust.sh "$@"

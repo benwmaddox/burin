@@ -31,7 +31,7 @@ async function act(who, name, fields) {
   const body = new URLSearchParams();
   for (const [k, v] of fields) body.append(k, String(v));
   const r = await fetch(`${base}/_do/${name}`, { method: "POST", redirect: "manual", headers: { Cookie: `session_token=${who.token}` }, body });
-  note(`${name}: ${r.headers.get("x-etch-outcome") ?? r.status}`);
+  note(`${name}: ${r.headers.get("x-burin-outcome") ?? r.status}`);
 }
 async function read(who, room) {
   const r = await fetch(`${base}/rooms/${room}`, { redirect: "manual", headers: { Cookie: `session_token=${who.token}`, ...(rnd() < 0.5 ? { "Accept-Encoding": "gzip" } : {}) } });

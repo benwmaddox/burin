@@ -73,25 +73,25 @@ fn put(out: &mut Vec<u8>, s: &str, esc: i64) {
 
 /// # Safety: `out` is a live Vec; (p, n) a live byte range.
 #[no_mangle]
-pub unsafe extern "C" fn etch_put(out: *mut Vec<u8>, p: *const u8, n: i64) {
+pub unsafe extern "C" fn burin_put(out: *mut Vec<u8>, p: *const u8, n: i64) {
     buf(out).extend_from_slice(bytes(p, n));
 }
 
-/// # Safety: as etch_put; the bytes are UTF-8.
+/// # Safety: as burin_put; the bytes are UTF-8.
 #[no_mangle]
-pub unsafe extern "C" fn etch_esc(out: *mut Vec<u8>, p: *const u8, n: i64) {
+pub unsafe extern "C" fn burin_esc(out: *mut Vec<u8>, p: *const u8, n: i64) {
     html::esc(buf(out), std::str::from_utf8_unchecked(bytes(p, n)));
 }
 
 /// # Safety: `v` is a live Vec.
 #[no_mangle]
-pub unsafe extern "C" fn etch_clear(v: *mut Vec<u8>) {
+pub unsafe extern "C" fn burin_clear(v: *mut Vec<u8>) {
     buf(v).clear();
 }
 
 /// # Safety: `out` is a live Vec.
 #[no_mangle]
-pub unsafe extern "C" fn etch_int(out: *mut Vec<u8>, n: i64) {
+pub unsafe extern "C" fn burin_int(out: *mut Vec<u8>, n: i64) {
     if n != i64::MIN {
         crate::out::push_int_signed(buf(out), n);
     }
@@ -99,7 +99,7 @@ pub unsafe extern "C" fn etch_int(out: *mut Vec<u8>, n: i64) {
 
 /// The text in `t` as a JSON string literal. # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_json(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+pub unsafe extern "C" fn burin_json(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     // as html::json_string, written as it goes (no allocation)
     let o = buf(out);
     put(o, "\"", esc);
@@ -125,7 +125,7 @@ pub unsafe extern "C" fn etch_json(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64)
 
 /// # Safety: `ctx` is a live Ctx; live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_sign(ctx: *const Ctx, out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+pub unsafe extern "C" fn burin_sign(ctx: *const Ctx, out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     // base64url and a dot: nothing to escape
     let _ = esc;
     (*ctx).signer.token_into(text(t), buf(out));
@@ -133,13 +133,13 @@ pub unsafe extern "C" fn etch_sign(ctx: *const Ctx, out: *mut Vec<u8>, t: *mut V
 
 /// # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_autolink(out: *mut Vec<u8>, t: *mut Vec<u8>) {
+pub unsafe extern "C" fn burin_autolink(out: *mut Vec<u8>, t: *mut Vec<u8>) {
     buf(out).extend_from_slice(html::autolink(&html::esc_string(text(t))).as_bytes());
 }
 
 /// # Safety: `ctx` is a live Ctx; live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_asset(ctx: *const Ctx, out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+pub unsafe extern "C" fn burin_asset(ctx: *const Ctx, out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     let name = text(t);
     match (*ctx).assets.get(name) {
         Some(url) => put(buf(out), url, esc),
@@ -152,13 +152,13 @@ pub unsafe extern "C" fn etch_asset(ctx: *const Ctx, out: *mut Vec<u8>, t: *mut 
 
 /// # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_first_word(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+pub unsafe extern "C" fn burin_first_word(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     put(buf(out), text(t).split_whitespace().next().unwrap_or(""), esc);
 }
 
 /// # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_initials(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+pub unsafe extern "C" fn burin_initials(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     let o = buf(out);
     for c in text(t).split_whitespace().filter_map(|w| w.chars().next()) {
         put(o, c.encode_utf8(&mut [0u8; 4]), esc);
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn etch_initials(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: 
 
 /// # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_upper(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+pub unsafe extern "C" fn burin_upper(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     let o = buf(out);
     for c in text(t).chars().flat_map(char::to_uppercase) {
         put(o, c.encode_utf8(&mut [0u8; 4]), esc);
@@ -177,13 +177,13 @@ pub unsafe extern "C" fn etch_upper(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64
 /// `choose`: the CRC-32 of a text, modulo n (Campfire picks an avatar's color this way).
 /// # Safety: a live Vec.
 #[no_mangle]
-pub unsafe extern "C" fn etch_crc_mod(t: *mut Vec<u8>, n: i64) -> i64 {
+pub unsafe extern "C" fn burin_crc_mod(t: *mut Vec<u8>, n: i64) -> i64 {
     (crc32fast::hash(&*t) as i64).rem_euclid(n.max(1))
 }
 
 /// # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_lower(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+pub unsafe extern "C" fn burin_lower(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     let o = buf(out);
     for c in text(t).chars().map(|c| c.to_ascii_lowercase()) {
         put(o, c.encode_utf8(&mut [0u8; 4]), esc);
@@ -192,7 +192,7 @@ pub unsafe extern "C" fn etch_lower(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64
 
 /// # Safety: live Vecs and byte ranges.
 #[no_mangle]
-pub unsafe extern "C" fn etch_replace(out: *mut Vec<u8>, t: *mut Vec<u8>, f: *const u8, fl: i64, r: *const u8, rl: i64, esc: i64) {
+pub unsafe extern "C" fn burin_replace(out: *mut Vec<u8>, t: *mut Vec<u8>, f: *const u8, fl: i64, r: *const u8, rl: i64, esc: i64) {
     let from = std::str::from_utf8_unchecked(bytes(f, fl));
     let to = std::str::from_utf8_unchecked(bytes(r, rl));
     put(buf(out), &text(t).replace(from, to), esc);
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn etch_replace(out: *mut Vec<u8>, t: *mut Vec<u8>, f: *co
 /// A time or number as text. kind 0: ISO UTC; 1: the date; 2: the clock (in the server's time
 /// zone); 3: a duration ("2h 5m"); 4: an Int grouped by thousands ("1,234"). # Safety: a live Vec.
 #[no_mangle]
-pub unsafe extern "C" fn etch_time(out: *mut Vec<u8>, kind: i64, ms: i64, esc: i64) {
+pub unsafe extern "C" fn burin_time(out: *mut Vec<u8>, kind: i64, ms: i64, esc: i64) {
     if ms == i64::MIN {
         return;
     }
@@ -217,20 +217,20 @@ pub unsafe extern "C" fn etch_time(out: *mut Vec<u8>, kind: i64, ms: i64, esc: i
 
 /// # Safety: `ctx` is a live Ctx; a live Vec.
 #[no_mangle]
-pub unsafe extern "C" fn etch_config(ctx: *const Ctx, out: *mut Vec<u8>, k: i64, esc: i64) {
+pub unsafe extern "C" fn burin_config(ctx: *const Ctx, out: *mut Vec<u8>, k: i64, esc: i64) {
     let c = &*ctx;
     put(buf(out), &c.configs[k as usize], esc);
 }
 
 /// # Safety: live byte ranges.
 #[no_mangle]
-pub unsafe extern "C" fn etch_str_eq(a: *const u8, an: i64, b: *const u8, bn: i64) -> bool {
+pub unsafe extern "C" fn burin_str_eq(a: *const u8, an: i64, b: *const u8, bn: i64) -> bool {
     !a.is_null() && bytes(a, an) == bytes(b, bn)
 }
 
 /// An integer parameter; none (i64::MIN) as NULL. # Safety: a live statement.
 #[no_mangle]
-pub unsafe extern "C" fn etch_bind_i64(st: *mut ffi::sqlite3_stmt, i: i32, v: i64) {
+pub unsafe extern "C" fn burin_bind_i64(st: *mut ffi::sqlite3_stmt, i: i32, v: i64) {
     if v == i64::MIN {
         ffi::sqlite3_bind_null(st, i);
     } else {
@@ -240,7 +240,7 @@ pub unsafe extern "C" fn etch_bind_i64(st: *mut ffi::sqlite3_stmt, i: i32, v: i6
 
 /// `sign in`: the new session's token, for the reply's cookie. # Safety: live writer and text.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_sign_in(w: *mut Writer, token: *const Str) {
+pub unsafe extern "C" fn burin_w_sign_in(w: *mut Writer, token: *const Str) {
     let t = &*token;
     (*w).signed_in = Some(bytes(t.ptr, t.len).to_vec());
 }
@@ -248,7 +248,7 @@ pub unsafe extern "C" fn etch_w_sign_in(w: *mut Writer, token: *const Str) {
 /// A for each's rows: every id the statement returns (its first column), in the writer's arena,
 /// read before the body runs (the body may write the table read). # Safety: live writer, statement.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_ids(w: *mut Writer, st: *mut ffi::sqlite3_stmt) -> List {
+pub unsafe extern "C" fn burin_w_ids(w: *mut Writer, st: *mut ffi::sqlite3_stmt) -> List {
     let mut ids: Vec<i64> = vec![];
     while ffi::sqlite3_step(st) == ffi::SQLITE_ROW {
         ids.push(ffi::sqlite3_column_int64(st, 0));
@@ -262,7 +262,7 @@ pub unsafe extern "C" fn etch_w_ids(w: *mut Writer, st: *mut ffi::sqlite3_stmt) 
 /// `go screen(row)`: where the action goes (the route around the row's id). # Safety: live
 /// writer and byte ranges.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_go(w: *mut Writer, pre: *const u8, pre_n: i64, id: i64, post: *const u8, post_n: i64) {
+pub unsafe extern "C" fn burin_w_go(w: *mut Writer, pre: *const u8, pre_n: i64, id: i64, post: *const u8, post_n: i64) {
     let mut s = String::from_utf8_lossy(bytes(pre, pre_n)).into_owned();
     s.push_str(&id.to_string());
     s.push_str(&String::from_utf8_lossy(bytes(post, post_n)));
@@ -271,14 +271,14 @@ pub unsafe extern "C" fn etch_w_go(w: *mut Writer, pre: *const u8, pre_n: i64, i
 
 /// `sign out`: the reply clears the session's cookie. # Safety: a live writer.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_sign_out(w: *mut Writer) {
+pub unsafe extern "C" fn burin_w_sign_out(w: *mut Writer) {
     (*w).signed_out = true;
 }
 
 /// A text's length in characters (as SQLite's length() counts them): an action's `max N` check.
 /// # Safety: a live %Str.
 #[no_mangle]
-pub unsafe extern "C" fn etch_str_chars(s: *const Str) -> i64 {
+pub unsafe extern "C" fn burin_str_chars(s: *const Str) -> i64 {
     let s = &*s;
     if s.ptr.is_null() {
         return 0;
@@ -315,7 +315,7 @@ impl Drop for Db {
 
 /// The prepared statement for query `qid` (prepared on first use, kept). # Safety: live Db; SQL valid.
 #[no_mangle]
-pub unsafe extern "C" fn etch_stmt(db: *mut Db, qid: i64, sql: *const u8, len: i64) -> *mut ffi::sqlite3_stmt {
+pub unsafe extern "C" fn burin_stmt(db: *mut Db, qid: i64, sql: *const u8, len: i64) -> *mut ffi::sqlite3_stmt {
     let db = &mut *db;
     let k = qid as usize;
     if db.stmts.len() <= k {
@@ -336,7 +336,7 @@ pub unsafe extern "C" fn etch_stmt(db: *mut Db, qid: i64, sql: *const u8, len: i
 /// A number an action computed in SQL: none unless it is an INTEGER (SQLite turns an overflow
 /// into a REAL; a fragment's code gives none for it). # Safety: a live statement on a row.
 #[no_mangle]
-pub unsafe extern "C" fn etch_col_int(st: *mut ffi::sqlite3_stmt, i: i32) -> i64 {
+pub unsafe extern "C" fn burin_col_int(st: *mut ffi::sqlite3_stmt, i: i32) -> i64 {
     if ffi::sqlite3_column_type(st, i) == ffi::SQLITE_INTEGER {
         ffi::sqlite3_column_int64(st, i)
     } else {
@@ -346,7 +346,7 @@ pub unsafe extern "C" fn etch_col_int(st: *mut ffi::sqlite3_stmt, i: i32) -> i64
 
 /// # Safety: a live statement on a row.
 #[no_mangle]
-pub unsafe extern "C" fn etch_col_i64(st: *mut ffi::sqlite3_stmt, i: i32) -> i64 {
+pub unsafe extern "C" fn burin_col_i64(st: *mut ffi::sqlite3_stmt, i: i32) -> i64 {
     if ffi::sqlite3_column_type(st, i) == ffi::SQLITE_NULL {
         i64::MIN
     } else {
@@ -356,7 +356,7 @@ pub unsafe extern "C" fn etch_col_i64(st: *mut ffi::sqlite3_stmt, i: i32) -> i64
 
 /// A text column, copied into the arena (none: a null pointer). # Safety: live statement, arena, dst.
 #[no_mangle]
-pub unsafe extern "C" fn etch_col_str(st: *mut ffi::sqlite3_stmt, i: i32, arena: *mut Arena, dst: *mut Str) {
+pub unsafe extern "C" fn burin_col_str(st: *mut ffi::sqlite3_stmt, i: i32, arena: *mut Arena, dst: *mut Str) {
     if ffi::sqlite3_column_type(st, i) == ffi::SQLITE_NULL {
         *dst = Str::NONE;
         return;
@@ -370,7 +370,7 @@ pub unsafe extern "C" fn etch_col_str(st: *mut ffi::sqlite3_stmt, i: i32, arena:
 
 /// `size` zeroed bytes from the arena, 8-aligned. # Safety: a live arena.
 #[no_mangle]
-pub unsafe extern "C" fn etch_alloc(arena: *mut Arena, size: i64) -> *mut u8 {
+pub unsafe extern "C" fn burin_alloc(arena: *mut Arena, size: i64) -> *mut u8 {
     let p = (*arena).take(size as usize);
     std::ptr::write_bytes(p, 0, size as usize);
     p
@@ -417,7 +417,7 @@ impl Arena {
 /// Marks where a cached piece goes in a per-request fragment's bytes: its place, its kind and its
 /// key (two entries: the place with the kind in the high bits, then the key). # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_piece(pieces: *mut Vec<usize>, out: *mut Vec<u8>, kind: i64, key: i64) {
+pub unsafe extern "C" fn burin_piece(pieces: *mut Vec<usize>, out: *mut Vec<u8>, kind: i64, key: i64) {
     (*pieces).push((*out).len() | ((kind as usize) << 48));
     (*pieces).push(key as usize);
 }
@@ -429,7 +429,7 @@ pub fn split_at(s: usize) -> (usize, usize) {
 
 /// "a", "a and b", "a, b, and c", from items each ended by a NUL. # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_sentence(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+pub unsafe extern "C" fn burin_sentence(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     let all = text(t);
     let all = all.strip_suffix('\0').unwrap_or(all);
     let n = if all.is_empty() { 0 } else { all.split('\0').count() };
@@ -444,7 +444,7 @@ pub unsafe extern "C" fn etch_sentence(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: 
 
 /// Binds a text field's value (none: NULL). # Safety: live statement; `s` a live Str.
 #[no_mangle]
-pub unsafe extern "C" fn etch_bind_str(st: *mut ffi::sqlite3_stmt, i: i32, s: *const Str) {
+pub unsafe extern "C" fn burin_bind_str(st: *mut ffi::sqlite3_stmt, i: i32, s: *const Str) {
     let s = &*s;
     if s.ptr.is_null() {
         ffi::sqlite3_bind_null(st, i);
@@ -501,13 +501,13 @@ pub struct Deltas {
 
 /// # Safety: a live Deltas.
 #[no_mangle]
-pub unsafe extern "C" fn etch_delta_patch(d: *mut Deltas, reg: i64, key: i64, item: i64, list: i64, field: i64, value: i64) {
+pub unsafe extern "C" fn burin_delta_patch(d: *mut Deltas, reg: i64, key: i64, item: i64, list: i64, field: i64, value: i64) {
     (*d).patches.push((reg, key, item, list, field, value));
 }
 
 /// # Safety: a live Deltas.
 #[no_mangle]
-pub unsafe extern "C" fn etch_delta_find(d: *mut Deltas, reg: i64, row: i64, list: i64, field: i64) {
+pub unsafe extern "C" fn burin_delta_find(d: *mut Deltas, reg: i64, row: i64, list: i64, field: i64) {
     let d = &mut *d;
     if !d.finds.contains(&(reg, row, list, field)) {
         d.finds.push((reg, row, list, field));
@@ -517,13 +517,13 @@ pub unsafe extern "C" fn etch_delta_find(d: *mut Deltas, reg: i64, row: i64, lis
 /// `size` zeroed bytes from the writer's arena (a forwarded record), kept until the next batch.
 /// # Safety: a live Writer.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_alloc(w: *mut Writer, size: i64) -> *mut u8 {
-    etch_alloc(&mut (*w).arena, size)
+pub unsafe extern "C" fn burin_w_alloc(w: *mut Writer, size: i64) -> *mut u8 {
+    burin_alloc(&mut (*w).arena, size)
 }
 
 /// # Safety: a live Deltas.
 #[no_mangle]
-pub unsafe extern "C" fn etch_delta(d: *mut Deltas, op: i32, a: i64, key: i64, item: i64) {
+pub unsafe extern "C" fn burin_delta(d: *mut Deltas, op: i32, a: i64, key: i64, item: i64) {
     let d = &mut *d;
     if !d.list.contains(&(op, a, key, item)) {
         d.list.push((op, a, key, item));
@@ -532,31 +532,31 @@ pub unsafe extern "C" fn etch_delta(d: *mut Deltas, op: i32, a: i64, key: i64, i
 
 /// # Safety: a live Writer.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_now(w: *mut Writer) -> i64 {
+pub unsafe extern "C" fn burin_w_now(w: *mut Writer) -> i64 {
     (*w).now
 }
 
 /// A new seq. # Safety: a live Writer.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_seq(w: *mut Writer) -> i64 {
+pub unsafe extern "C" fn burin_w_seq(w: *mut Writer) -> i64 {
     (*w).seq += 1;
     (*w).seq
 }
 
 /// The seq last handed out. # Safety: a live Writer.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_seq_now(w: *mut Writer) -> i64 {
+pub unsafe extern "C" fn burin_w_seq_now(w: *mut Writer) -> i64 {
     (*w).seq
 }
 
 /// A new id for a row of `ent` (one more than the largest, read once). # Safety: live Writer, Db.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_id(w: *mut Writer, db: *mut Db, ent: *const u8, n: i64) -> i64 {
+pub unsafe extern "C" fn burin_w_id(w: *mut Writer, db: *mut Db, ent: *const u8, n: i64) -> i64 {
     let name = std::str::from_utf8_unchecked(bytes(ent, n)).to_string();
     let w = &mut *w;
     if !w.next_ids.contains_key(&name) {
         let sql = format!("SELECT coalesce(max(id), 0) + 1 FROM \"{name}\"");
-        let st = etch_stmt(db, 1_000_000 + w.next_ids.len() as i64, sql.as_ptr(), sql.len() as i64);
+        let st = burin_stmt(db, 1_000_000 + w.next_ids.len() as i64, sql.as_ptr(), sql.len() as i64);
         ffi::sqlite3_step(st);
         let v = ffi::sqlite3_column_int64(st, 0);
         ffi::sqlite3_reset(st);
@@ -570,7 +570,7 @@ pub unsafe extern "C" fn etch_w_id(w: *mut Writer, db: *mut Db, ent: *const u8, 
 
 /// A random token of n URL-safe characters, in the writer's arena. # Safety: live Writer, dst.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_token(w: *mut Writer, n: i64, dst: *mut Str) {
+pub unsafe extern "C" fn burin_w_token(w: *mut Writer, n: i64, dst: *mut Str) {
     const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let n = n as usize;
     let mut raw = vec![0u8; n];
@@ -584,9 +584,9 @@ pub unsafe extern "C" fn etch_w_token(w: *mut Writer, n: i64, dst: *mut Str) {
 
 /// Runs a statement that returns no rows. # Safety: a live statement.
 #[no_mangle]
-pub unsafe extern "C" fn etch_exec(st: *mut ffi::sqlite3_stmt) {
+pub unsafe extern "C" fn burin_exec(st: *mut ffi::sqlite3_stmt) {
     let rc = ffi::sqlite3_step(st);
-    etch_done(st, rc);
+    burin_done(st, rc);
 }
 
 thread_local! {
@@ -602,7 +602,7 @@ pub fn take_write_failure() -> Option<String> {
 /// Resets a statement; an error is kept for the writer (which rolls the action back).
 /// # Safety: a live statement.
 #[no_mangle]
-pub unsafe extern "C" fn etch_done(st: *mut ffi::sqlite3_stmt, rc: i32) {
+pub unsafe extern "C" fn burin_done(st: *mut ffi::sqlite3_stmt, rc: i32) {
     ffi::sqlite3_reset(st);
     if rc != ffi::SQLITE_DONE {
         let db = ffi::sqlite3_db_handle(st);
@@ -616,7 +616,7 @@ pub unsafe extern "C" fn etch_done(st: *mut ffi::sqlite3_stmt, rc: i32) {
 /// Copies text into the writer's arena (a forwarded record's text outlives the action's
 /// arguments). # Safety: a live Writer; `src` a live Str; `dst` writable.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_copy(w: *mut Writer, src: *const Str, dst: *mut Str) {
+pub unsafe extern "C" fn burin_w_copy(w: *mut Writer, src: *const Str, dst: *mut Str) {
     let s = &*src;
     if s.ptr.is_null() {
         *dst = Str::NONE;
@@ -628,13 +628,13 @@ pub unsafe extern "C" fn etch_w_copy(w: *mut Writer, src: *const Str, dst: *mut 
     *dst = Str { ptr: p, len: s.len };
 }
 
-// ---- external functions (`extern fn`): include/etch.h
+// ---- external functions (`extern fn`): include/burin.h
 
 /// Appends text to an external function's result (what C code calls; Rust code may too).
 /// Text that isn't UTF-8 is replaced where it's used. # Safety: `out` the buffer the function
 /// was given; `p` readable for `n` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn etch_ext_write(out: *mut Vec<u8>, p: *const u8, n: i64) {
+pub unsafe extern "C" fn burin_ext_write(out: *mut Vec<u8>, p: *const u8, n: i64) {
     if n > 0 && !p.is_null() {
         buf(out).extend_from_slice(std::slice::from_raw_parts(p, n as usize));
     }
@@ -642,19 +642,19 @@ pub unsafe extern "C" fn etch_ext_write(out: *mut Vec<u8>, p: *const u8, n: i64)
 
 /// A buffer's bytes and length, for an external function's text argument. # Safety: a live Vec.
 #[no_mangle]
-pub unsafe extern "C" fn etch_vec_ptr(v: *mut Vec<u8>) -> *const u8 {
+pub unsafe extern "C" fn burin_vec_ptr(v: *mut Vec<u8>) -> *const u8 {
     (*v).as_ptr()
 }
 /// # Safety: a live Vec.
 #[no_mangle]
-pub unsafe extern "C" fn etch_vec_len(v: *mut Vec<u8>) -> i64 {
+pub unsafe extern "C" fn burin_vec_len(v: *mut Vec<u8>) -> i64 {
     (*v).len() as i64
 }
 
 /// An external function's text result, into the page (escaped when `esc`): what isn't UTF-8 is
 /// replaced (U+FFFD), so the page stays valid text. # Safety: live Vecs.
 #[no_mangle]
-pub unsafe extern "C" fn etch_emit(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+pub unsafe extern "C" fn burin_emit(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
     let o = buf(out);
     match std::str::from_utf8(&*t) {
         Ok(s) => put(o, s, esc),
@@ -664,7 +664,7 @@ pub unsafe extern "C" fn etch_emit(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64)
 
 /// The writer's buffer for an external function's text result, emptied. # Safety: a live Writer.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_ext_out(w: *mut Writer) -> *mut Vec<u8> {
+pub unsafe extern "C" fn burin_w_ext_out(w: *mut Writer) -> *mut Vec<u8> {
     let w = &mut *w;
     w.ext.clear();
     &mut w.ext
@@ -673,7 +673,7 @@ pub unsafe extern "C" fn etch_w_ext_out(w: *mut Writer) -> *mut Vec<u8> {
 /// The external function's text result, kept in the writer's arena as the action's text (what
 /// isn't UTF-8 replaced). # Safety: a live Writer; `dst` writable.
 #[no_mangle]
-pub unsafe extern "C" fn etch_w_ext_take(w: *mut Writer, dst: *mut Str) {
+pub unsafe extern "C" fn burin_w_ext_take(w: *mut Writer, dst: *mut Str) {
     let w = &mut *w;
     if std::str::from_utf8(&w.ext).is_err() {
         w.ext = String::from_utf8_lossy(&w.ext).into_owned().into_bytes();

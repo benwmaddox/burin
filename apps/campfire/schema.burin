@@ -1,4 +1,4 @@
-// Campfire's data (data/campfire is a copy of a Campfire database; etch keeps it as its own).
+// Campfire's data (data/campfire is a copy of a Campfire database; burin keeps it as its own).
 // Phase 1 covers the room page and posting a message: only the fields those read or write.
 
 config host: Text                        // the address links are made with (start time)

@@ -1,7 +1,7 @@
 //! sendlab: how cheaply can a page made of many immutable ranges go out over TCP (loopback)?
 //! The sender's CPU per page (its thread's user + kernel time) for each way of sending:
 //!
-//!   writev     what etch does: one call, the kernel copies every byte
+//!   writev     what burin does: one call, the kernel copies every byte
 //!   zerocopy   sendmsg(MSG_ZEROCOPY): pages pinned, completions read from the error queue
 //!   sendfile   the ranges in a memfd (page cache), one sendfile per range
 //!   sendfile1  the whole page as one contiguous range in a memfd (a best case)
@@ -31,7 +31,7 @@ fn thread_cpu() -> f64 {
     t.tv_sec as f64 + t.tv_nsec as f64 * 1e-9
 }
 
-/// The page's ranges, sized like etch's room page: a head, 40 messages, a tail, a sidebar in
+/// The page's ranges, sized like burin's room page: a head, 40 messages, a tail, a sidebar in
 /// pieces with its splices, an end (raw: 345 KB in 53 ranges; gz: 74 KB in 57).
 fn ranges(gz: bool) -> Vec<Vec<u8>> {
     let mut sizes = vec![if gz { 1200 } else { 3400 }];

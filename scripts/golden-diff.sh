@@ -1,8 +1,8 @@
 #!/bin/bash
 # What differs between the last golden run's pages (scripts/golden.sh) and the expected ones, tag
 # by tag (the pages are one long line).
-#   bash /mnt/d/code/etch/scripts/golden-diff.sh
-G=/mnt/d/code/etch/data/golden-pages; O=/tmp/etch-golden
+#   bash /mnt/d/code/burin/scripts/golden-diff.sh
+G=/mnt/d/code/burin/data/golden-pages; O=/tmp/burin-golden
 for n in david-2:room jason-2:room-jason david-sidebar:sidebar jason-sidebar:sidebar-jason; do
   a=${n%%:*}; b=${n#*:}
   echo "== $a"

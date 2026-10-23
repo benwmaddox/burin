@@ -16,7 +16,7 @@ view all_posts() = Post order by .created
 fn app_of(src: &str) -> Result<App, String> {
     let mut decls = parse::parse_file(src, 0).map_err(|e| format!("parse: {}", e.msg))?;
     decls.extend(parse::prelude(1).map_err(|e| format!("the prelude: {}", e.msg))?);
-    Ok(App { files: vec!["t.etch".into(), parse::PRELUDE_NAME.into()], decls })
+    Ok(App { files: vec!["t.burin".into(), parse::PRELUDE_NAME.into()], decls })
 }
 
 fn verdict(extra: &str) -> Result<(), String> {
@@ -109,11 +109,11 @@ fn a_per_request_fragment_merges_the_cached_ones_it_calls() {
 fragment mine() per viewer <<<{{for x in recent()}}{{if x.author == viewer}}{{post(x)}}{{end}}{{end}}>>>";
     let decls = parse::parse_file(&format!("{BASE}
 {src}"), 0).map_err(|e| e.msg).unwrap();
-    let app = App { files: vec!["t.etch".into()], decls };
+    let app = App { files: vec!["t.burin".into()], decls };
     let m = check::Model::new(&app).map_err(|e| e.msg).unwrap();
     check::check(&m).map_err(|e| e.msg).unwrap();
     let (ll, _) = crate::llvm::module(&m, &["post", "mine"], "", "").unwrap();
-    assert!(ll.contains("call void @etch_piece(ptr %splits"), "no merged piece");
+    assert!(ll.contains("call void @burin_piece(ptr %splits"), "no merged piece");
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn int_arithmetic_and_none() {
     let m = |body: &str| {
         let src = format!("{BASE}\n{BUILD}");
         let decls = parse::parse_file(&src, 0).map_err(|e| e.msg).unwrap();
-        let app = App { files: vec!["t.etch".into()], decls };
+        let app = App { files: vec!["t.burin".into()], decls };
         let m = check::Model::new(&app).map_err(|e| e.msg).unwrap();
         let e = parse::parse_expr(body).map_err(|e| e.msg).unwrap();
         let sc = check::Scope::default().with("b", crate::ast::Type::Ref("Build".into()));
@@ -221,13 +221,13 @@ fn a_page_adds_numbers_instead_of_joining_them() {
     let src = format!("{BUILD}\nview builds() = Build order by .created window 5 last");
     let frag = r#"fragment p() <<<{{for b in builds()}}<p>{{b.level + 1}} {{text(b.done - b.started)}} {{grouped(b.level * 1000)}}</p>{{end}}>>>"#;
     let decls = parse::parse_file(&format!("{BASE}\n{src}\n{frag}"), 0).map_err(|e| e.msg).unwrap();
-    let app = App { files: vec!["t.etch".into()], decls };
+    let app = App { files: vec!["t.burin".into()], decls };
     let m = check::Model::new(&app).map_err(|e| e.msg).unwrap();
     check::check(&m).map_err(|e| e.msg).unwrap();
     let (ll, _) = crate::llvm::module(&m, &["p"], "", "").unwrap();
     assert!(ll.contains("@llvm.sadd.with.overflow.i64(i64"), "no addition");
     assert!(ll.contains("@llvm.ssub.with.overflow.i64(i64"), "no subtraction");
-    assert!(ll.contains("call void @etch_time(ptr") && ll.contains("i64 3, i64"), "no duration text");
+    assert!(ll.contains("call void @burin_time(ptr") && ll.contains("i64 3, i64"), "no duration text");
     assert!(ll.contains("i64 4, i64"), "no grouped number");
 }
 

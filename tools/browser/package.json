@@ -1,5 +1,5 @@
 {
-  "name": "etch-browser-tests",
+  "name": "burin-browser-tests",
   "private": true,
   "type": "module",
   "description": "Real-browser checks (Chromium through playwright-core; no browser download: it uses the Chromium already in ~/.cache/ms-playwright)",

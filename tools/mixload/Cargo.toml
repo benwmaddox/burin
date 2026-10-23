@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 description = "The mixed benchmark's load: many people reading many rooms at different rates, some posting"
 
-# standalone: bench tooling, not part of etch's workspace
+# standalone: bench tooling, not part of burin's workspace
 [workspace]
 
 [dependencies]

@@ -1,13 +1,13 @@
 //! The hot-path rules (DESIGN.md principle 2) on the generated app: once warm, answering a room
 //! page on the fast path allocates and frees nothing. Its cached pieces are borrowed from the
 //! snapshot; what it writes is its status line, length and date, and its per-request parts (the
-//! sidebar, the title), rendered into reused buffers. Needs ETCH_TEST_DATA: a copy of the golden
-//! data. ETCH_TRACE_ALLOCS=1 prints where the first allocations come from.
+//! sidebar, the title), rendered into reused buffers. Needs BURIN_TEST_DATA: a copy of the golden
+//! data. BURIN_TRACE_ALLOCS=1 prints where the first allocations come from.
 
 use campfire_app::gen::Spec;
-use etch_rt::abi::Ctx;
-use etch_rt::app::App;
-use etch_rt::{Out, Req};
+use burin_rt::abi::Ctx;
+use burin_rt::app::App;
+use burin_rt::{Out, Req};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use std::sync::Arc;
 struct Counting;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static FREES: AtomicUsize = AtomicUsize::new(0);
-/// ETCH_TRACE_ALLOCS: where the first allocations on a measured request come from
+/// BURIN_TRACE_ALLOCS: where the first allocations on a measured request come from
 static TRACE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static TRACED: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
@@ -79,19 +79,19 @@ static A: Counting = Counting;
 
 #[test]
 fn the_fast_path_allocates_and_frees_nothing_and_copies_only_headers() {
-    let data = match std::env::var("ETCH_TEST_DATA") {
+    let data = match std::env::var("BURIN_TEST_DATA") {
         Ok(d) => d,
         Err(_) => {
-            eprintln!("skipped: ETCH_TEST_DATA isn't set");
+            eprintln!("skipped: BURIN_TEST_DATA isn't set");
             return;
         }
     };
     let host = "127.0.0.1:13790";
     let dir = std::path::Path::new(&data);
     let ctx = Arc::new(Ctx {
-        signer: etch_rt::sign::Signer::new(&etch_rt::keys::secret(dir)),
+        signer: burin_rt::sign::Signer::new(&burin_rt::keys::secret(dir)),
         assets: Default::default(),
-        configs: vec![host.to_string(), etch_rt::keys::vapid_public(dir)],
+        configs: vec![host.to_string(), burin_rt::keys::vapid_public(dir)],
     });
     let db = dir.join("app.sqlite").to_string_lossy().into_owned();
     let c = rusqlite::Connection::open(&db).unwrap();
@@ -116,7 +116,7 @@ fn the_fast_path_allocates_and_frees_nothing_and_copies_only_headers() {
         out.reset();
         std::thread::sleep(std::time::Duration::from_millis(50));
         // read before counting starts (reading it allocates)
-        let trace = std::env::var("ETCH_TRACE_ALLOCS").map(|v| v == "1").unwrap_or(false);
+        let trace = std::env::var("BURIN_TRACE_ALLOCS").map(|v| v == "1").unwrap_or(false);
         for i in 0..3 {
             // apart, so a request lands in a new second (its Date header is made again)
             if i > 0 {

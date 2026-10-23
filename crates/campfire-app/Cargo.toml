@@ -6,5 +6,5 @@ license.workspace = true
 description = "Campfire, all generated from apps/campfire: this crate is the generated module and the runtime's main"
 
 [dependencies]
-etch-rt = { path = "../etch-rt" }
+burin-rt = { path = "../burin-rt" }
 rusqlite = { version = "0.32", features = ["bundled"] }

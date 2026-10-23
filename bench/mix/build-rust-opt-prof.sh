@@ -1,7 +1,7 @@
 #!/bin/bash
 # The Rust port variant with frame pointers (for perf call stacks; not for measuring), into
 # ~/linuxbench/rust-opt/bin/campfire-prof.
-#   bash /mnt/d/code/etch/bench/mix/build-rust-opt-prof.sh
+#   bash /mnt/d/code/burin/bench/mix/build-rust-opt-prof.sh
 set -euo pipefail
 source ~/.cargo/env 2>/dev/null || true
 cd /mnt/d/code/campfire-rust-opt

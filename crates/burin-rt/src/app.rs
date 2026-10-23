@@ -481,7 +481,7 @@ impl<G: Glue> App<G> {
         let stats = Arc::new(Stats::default());
         {
             let (ctx, snap, stats) = (ctx.clone(), snap.clone(), stats.clone());
-            std::thread::Builder::new().name("etch-writer".into()).spawn(move || writer::<G>(w, ctx, snap, rx, stats, seq, scrub_ms)).unwrap();
+            std::thread::Builder::new().name("burin-writer".into()).spawn(move || writer::<G>(w, ctx, snap, rx, stats, seq, scrub_ms)).unwrap();
         }
         {
             let snap = snap.clone();
@@ -640,7 +640,7 @@ impl<G: Glue> App<G> {
         if req.method == b"GET" && path == b"/up" {
             return respond(out, 200, "text/plain", &[], b"ok");
         }
-        if req.method == b"GET" && path == b"/_etch/stats" {
+        if req.method == b"GET" && path == b"/_burin/stats" {
             let st = &self.stats;
             let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
             let s = format!(
@@ -1238,7 +1238,7 @@ pub fn redirect_with(out: &mut Out, to: &str, outcome: Option<&str>, headers: &[
             b.extend_from_slice(b"\r\n");
         }
         if let Some(o) = outcome {
-            b.extend_from_slice(b"X-Etch-Outcome: ");
+            b.extend_from_slice(b"X-Burin-Outcome: ");
             b.extend_from_slice(o.as_bytes());
             b.extend_from_slice(b"\r\n");
         }
@@ -1372,7 +1372,7 @@ fn asset_urls(dir: &std::path::Path) -> HashMap<String, String> {
 /// Serves a generated app:
 ///   app --data DIR --assets DIR [--port 3000] [--host HOST] [--workers N] [--verify] [--exit-after S]
 /// Configs: `host` is --host (default 127.0.0.1:PORT); `vapid_public` the data folder's web-push
-/// key; any other from the environment (ETCH_CONFIG_<NAME>).
+/// key; any other from the environment (BURIN_CONFIG_<NAME>).
 pub fn main<G: Glue>(configs: &[&str], session_cookie: &'static [u8]) {
     let args: Vec<String> = std::env::args().collect();
     let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
@@ -1410,7 +1410,7 @@ pub fn main<G: Glue>(configs: &[&str], session_cookie: &'static [u8]) {
         .map(|c| match *c {
             "host" => host.clone(),
             "vapid_public" => std::env::var("VAPID_PUBLIC_KEY").unwrap_or_else(|_| crate::keys::vapid_public(dir)),
-            other => std::env::var(format!("ETCH_CONFIG_{}", other.to_uppercase())).unwrap_or_default(),
+            other => std::env::var(format!("BURIN_CONFIG_{}", other.to_uppercase())).unwrap_or_default(),
         })
         .collect();
     let ctx = Arc::new(Ctx { signer: crate::sign::Signer::new(&secret), assets: assets.as_ref().map(|a| asset_urls(std::path::Path::new(a))).unwrap_or_default(), configs: values });

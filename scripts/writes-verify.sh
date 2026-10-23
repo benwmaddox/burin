@@ -2,13 +2,13 @@
 # Correctness under writes: on a copy of the golden data, posts messages (as both viewers, into
 # the bench room and into another room both are in) between reads, with --verify on: every fast
 # page must equal a fresh render from SQLite.
-#   bash /mnt/d/code/etch/scripts/writes-verify.sh [posts]
+#   bash /mnt/d/code/burin/scripts/writes-verify.sh [posts]
 set -e
 N=${1:-60}
-BIN=${ETCH_BIN:-$HOME/hw/etch-gen-release}
-D=/tmp/etch-wv; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/etch/data/campfire-golden $D/data; rm -f $D/data/app.lock
+BIN=${BURIN_BIN:-$HOME/hw/burin-gen-release}
+D=/tmp/burin-wv; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/burin/data/campfire-golden $D/data; rm -f $D/data/app.lock
 PORT=13791
-TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/etch/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
+TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/burin/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
 PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 100); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done
@@ -31,5 +31,5 @@ done
 echo
 sleep 0.3
 for r in 486777696 654632876; do get $DAVID $r; get $JASON $r; done; echo
-curl -sS http://127.0.0.1:$PORT/_etch/stats; echo
+curl -sS http://127.0.0.1:$PORT/_burin/stats; echo
 grep -v "^started" $D/server.log | head -20 || true

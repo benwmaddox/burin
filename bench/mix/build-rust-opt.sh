@@ -2,7 +2,7 @@
 # The optimized variant of the Rust port (D:\code\campfire-rust-opt, branch "optimized"):
 # release build (fat LTO, as the port ships) into ~/linuxbench/rust-opt/bin/campfire. Its target
 # directory is in WSL home. Cores 0-7.
-#   bash /mnt/d/code/etch/bench/mix/build-rust-opt.sh
+#   bash /mnt/d/code/burin/bench/mix/build-rust-opt.sh
 set -euo pipefail
 source ~/.cargo/env 2>/dev/null || true
 SRC=/mnt/d/code/campfire-rust-opt; OUT=$HOME/linuxbench/rust-opt

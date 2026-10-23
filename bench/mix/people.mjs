@@ -16,7 +16,7 @@ const rooms = db.prepare("SELECT id, type FROM rooms").all();
 const ranked = [...shuffle(rooms.filter((r) => r.type === "Rooms::Open")), ...shuffle(rooms.filter((r) => r.type !== "Rooms::Open"))];
 const roomWeight = Object.fromEntries(ranked.map((r, i) => [String(r.id), +(1 / (i + 1)).toFixed(5)]));
 
-// people: everyone signs in with the bench password (gen-rails.mjs gives it to all); etch and
+// people: everyone signs in with the bench password (gen-rails.mjs gives it to all); burin and
 // crudspec use the session token, Rails, Rust and Flow sign in
 const users = shuffle(db.prepare("SELECT u.id, u.email_address email, s.token FROM users u JOIN sessions s ON s.user_id = u.id WHERE u.status = 0 AND u.role != 2 GROUP BY u.id").all());
 const people = users.map((u, i) => ({

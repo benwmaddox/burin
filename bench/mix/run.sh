@@ -3,24 +3,24 @@
 # while some post (tools/mixload), on the mixed data (bench/mix/build-data.sh). The server runs
 # alone in its own network namespace and cgroup, pinned to SRV_CPUS (4 vCPUs); the load on
 # LG_CPUS. Phases: a cold start (the first seconds after start), then steady reads at each post
-# rate. Reports reads/s, CPU per read, read and post latency, memory, and etch's or crudspec's
+# rate. Reports reads/s, CPU per read, read and post latency, memory, and burin's or crudspec's
 # cache figures. Holds the shared bench lock.
 # Run as root:
-#   wsl -d Ubuntu -u root -- bash /mnt/d/code/etch/bench/mix/run.sh <etch|crudspec|rust|rustopt> <run> [secs] [rates…]
+#   wsl -d Ubuntu -u root -- bash /mnt/d/code/burin/bench/mix/run.sh <burin|crudspec|rust|rustopt> <run> [secs] [rates…]
 # rust is the Rust port as published (~/linuxbench/rust); rustopt its optimized variant
 # (D:/code/campfire-rust-opt, built by build-rust-opt.sh; RUSTOPT_ENV adds settings).
 set -euo pipefail
 [ -n "${BENCH_LOCKED:-}" ] || { exec 9>>/home/ben/linuxbench/bench.lock; flock -x 9; }
 APP=$1; RUN=$2; SECS=${3:-15}; shift 2; [ $# -gt 0 ] && shift; RATES=("$@"); [ ${#RATES[@]} -eq 0 ] && RATES=(0 10 50)
 CONNS=${CONNS:-64}
-U=ben; UH=/home/$U; L=$UH/linuxbench; M=$UH/etch-mix
+U=ben; UH=/home/$U; L=$UH/linuxbench; M=$UH/burin-mix
 FIX=/mnt/d/code/AgentLang/.agentlang/once-campfire-verification/fixtures/default
-OUT=/mnt/d/code/etch/bench/runs/mix-$RUN; W=$UH/etch-bench/mix-$RUN
-NS=etchmix; CG=/sys/fs/cgroup/etchmix-srv
+OUT=/mnt/d/code/burin/bench/runs/mix-$RUN; W=$UH/burin-bench/mix-$RUN
+NS=burinmix; CG=/sys/fs/cgroup/burinmix-srv
 SRV_CPUS=${SRV_CPUS:-8-11}; LG_CPUS=${LG_CPUS:-12-19}
-MIX=$UH/etch-target-mixload/release/mixload
+MIX=$UH/burin-target-mixload/release/mixload
 LGBIN=$UH/cm258/loadgen-linux/release/loadgen
-case "$APP" in etch|crudspec|rust|rustopt) ;; *) echo "app: etch, crudspec, rust or rustopt"; exit 64;; esac
+case "$APP" in burin|crudspec|rust|rustopt) ;; *) echo "app: burin, crudspec, rust or rustopt"; exit 64;; esac
 test ! -e "$OUT" || { echo "run $OUT exists"; exit 2; }
 test ! -e "$CG" || { echo "cgroup $CG exists"; exit 2; }
 mkdir -p "$OUT"
@@ -33,8 +33,8 @@ LG() { inns taskset -c "$LG_CPUS" setpriv --reuid=$U --regid=$U --init-groups "$
 asu rm -rf "$W"; asu mkdir -p -m 700 "$W"
 ENVV=(HOME=$UH TZ=America/New_York)
 case "$APP" in
-  etch) asu cp -a "$M/etch" "$W/data"; CMD=(${ETCH:-$UH/hw/etch-gen-release} --data "$W/data" --assets /mnt/d/code/etch/apps/campfire/assets --port 13774) ;;
-  crudspec) asu cp -a "$M/crudspec" "$W/data"; CMD=(${CRUDSPEC:-$UH/hw/campfire-pk} --data "$W/data" --assets /mnt/d/code/etch/apps/campfire/assets --port 13774) ;;
+  burin) asu cp -a "$M/burin" "$W/data"; CMD=(${BURIN:-$UH/hw/burin-gen-release} --data "$W/data" --assets /mnt/d/code/burin/apps/campfire/assets --port 13774) ;;
+  crudspec) asu cp -a "$M/crudspec" "$W/data"; CMD=(${CRUDSPEC:-$UH/hw/campfire-pk} --data "$W/data" --assets /mnt/d/code/burin/apps/campfire/assets --port 13774) ;;
   rust|rustopt)
     asu mkdir -p "$W/storage/db" "$W/storage/logs"; asu cp "$M/rails.sqlite3" "$W/storage/db/production.sqlite3"; asu cp -r "$FIX/storage" "$W/storage/files"
     ENVV+=(LANG=C.UTF-8 USER=$U RAILS_ENV=production PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
@@ -76,7 +76,7 @@ if [ "$APP" = rust ] || [ "$APP" = rustopt ]; then
   field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s)[process.argv[1]]||"")}catch{}})' "$1"; }
   # each person's session cookie, signed as Rails signs it (their session is in the data; signing
   # in through the app is limited to 10 people per 3 minutes from one address)
-  asu node /mnt/d/code/etch/bench/mix/rails-cookie.mjs make "$FIX/reference.env" "$M/people.json" "$W/storage/db/production.sqlite3" sha256 1000 64 sha1 2>/dev/null > "$W/signed.json"
+  asu node /mnt/d/code/burin/bench/mix/rails-cookie.mjs make "$FIX/reference.env" "$M/people.json" "$W/storage/db/production.sqlite3" sha256 1000 64 sha1 2>/dev/null > "$W/signed.json"
   echo "{" > "$W/cookies.json"; first=1; n=0; failed=
   while IFS=$'\t' read -r id email pass room; do
     c=$(node -e 'const s=require(process.argv[1]); process.stdout.write((s[process.argv[2]]||{}).cookie||"")' "$W/signed.json" "$id")
@@ -91,7 +91,7 @@ if [ "$APP" = rust ] || [ "$APP" = rustopt ]; then
 fi
 
 cg_usec() { awk '$1=="usage_usec"{print $2}' "$CG/cpu.stat"; }
-stats() { case "$APP" in etch) inns curl -fsS http://127.0.0.1:13774/_etch/stats 2>/dev/null || echo '{}';; *) echo '{}';; esac; }
+stats() { case "$APP" in burin) inns curl -fsS http://127.0.0.1:13774/_burin/stats 2>/dev/null || echo '{}';; *) echo '{}';; esac; }
 NCPU=$(taskset -c "$SRV_CPUS" nproc)
 phase() { # name rate secs
   local S0 C0 S1 C1
@@ -103,13 +103,13 @@ phase() { # name rate secs
     const s0 = JSON.parse(process.argv[2] || "{}"), s1 = JSON.parse(process.argv[3] || "{}");
     const cpu = (Number(process.argv[4]) - Number(process.argv[5])) / 1e6, secs = r.secs, ok = r.reads.ok;
     const d = (k) => (s1[k] ?? 0) - (s0[k] ?? 0);
-    const etch = s1.fast !== undefined ? { fast_share: +(d("fast") / Math.max(1, d("fast") + d("cold"))).toFixed(3), write_reads: d("write_reads"), cleared: d("cleared") } : {};
+    const burin = s1.fast !== undefined ? { fast_share: +(d("fast") / Math.max(1, d("fast") + d("cold"))).toFixed(3), write_reads: d("write_reads"), cleared: d("cleared") } : {};
     console.log(JSON.stringify({ phase: process.argv[6], posts_per_s: Number(process.argv[7]), reads_per_s: r.reads.per_s, reads_invalid: r.reads.invalid, read_errors: r.reads.errors,
       cpu_ms_per_read: +(cpu * 1000 / Math.max(1, ok)).toFixed(3), server_util: +(cpu / (secs * Number(process.argv[8]))).toFixed(2),
       read_p50_ms: r.reads.p50_ms, read_p99_ms: r.reads.p99_ms, avg_bytes: r.reads.avg_bytes, rooms_read: r.reads.rooms_read, people_reading: r.reads.people_reading,
       posts_ok: r.posts.ok, posts_sent: r.posts.sent, post_p50_ms: r.posts.p50_ms, post_p99_ms: r.posts.p99_ms,
       sidebars_per_s: r.sidebars?.per_s ?? null, sidebar_p99_ms: r.sidebars?.p99_ms ?? null, sidebar_bytes: r.sidebars?.avg_bytes ?? null,
-      marked_read: r.marked_read ?? 0, sessions: r.sessions ?? null, secs: r.secs, model: r.model ?? null, ...etch }));
+      marked_read: r.marked_read ?? 0, sessions: r.sessions ?? null, secs: r.secs, model: r.model ?? null, ...burin }));
   ' "$OUT/$1.json" "$C0" "$C1" "$S1" "$S0" "$1" "$2" "$NCPU" | tee -a "$OUT/summary.jsonl"
 }
 phase cold 0 "$SECS"

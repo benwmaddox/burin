@@ -5,20 +5,20 @@
 # against the read-only contract. Reports reads/s, CPU per read, the writes' latency, and the
 # fragment cache's hit rate.
 # Run as root:
-#   wsl -d Ubuntu -u root -- bash /mnt/d/code/etch/bench/writes.sh <run-name> [secs] [rates...]
+#   wsl -d Ubuntu -u root -- bash /mnt/d/code/burin/bench/writes.sh <run-name> [secs] [rates...]
 set -euo pipefail
 [ -n "${BENCH_LOCKED:-}" ] || { exec 9>>/home/ben/linuxbench/bench.lock; flock -x 9; }   # the bench lock the sessions share (a driver may hold it already)
 RUN=$1; SECS=${2:-10}; shift; [ $# -gt 0 ] && shift; RATES=("$@"); [ ${#RATES[@]} -eq 0 ] && RATES=(0 1 5 20 50)
 CONNS=${CONNS:-32}
 U=ben; UH=/home/$U
-REPO=/mnt/d/code/etch
-SNAPDATA=${SNAPDATA:-/mnt/d/code/etch/data/campfire}
+REPO=/mnt/d/code/burin
+SNAPDATA=${SNAPDATA:-/mnt/d/code/burin/data/campfire}
 ROOM=486777696
 WROOM=${WROOM:-$ROOM}   # the room the writer posts into (another room the reader is in: 654632876)
-OUT=/mnt/d/code/etch/bench/runs/$RUN; W=$UH/etch-bench/$RUN
-NS=etchbench; CG=/sys/fs/cgroup/etchbench-srv
+OUT=/mnt/d/code/burin/bench/runs/$RUN; W=$UH/burin-bench/$RUN
+NS=burinbench; CG=/sys/fs/cgroup/burinbench-srv
 SRV_CPUS=${SRV_CPUS:-8-11}; LG_CPUS=${LG_CPUS:-12-19}
-LGBIN=/mnt/d/code/etch/tools/loadgen
+LGBIN=/mnt/d/code/burin/tools/loadgen
 test -n "${GOBIN:-}" || { echo "GOBIN=<the compiled app> is required"; exit 64; }
 test ! -e "$OUT" || { echo "run $RUN exists"; exit 2; }
 test ! -e "$CG" || { echo "cgroup $CG exists"; exit 2; }
@@ -47,7 +47,7 @@ ip netns add $NS; ip -n $NS link set lo up
 mkdir "$CG"
 ( cd "$REPO"; echo $BASHPID > "$CG/cgroup.procs"
   exec nsenter --net=/run/netns/$NS taskset -c "$SRV_CPUS" setpriv --reuid=$U --regid=$U --init-groups env -i HOME=$UH TZ=America/New_York CRUDSPEC_PPROF=6060 ${PAGE_KEYS:+CRUDSPEC_PAGE_KEYS=1} \
-    "$GOBIN" --data "$W/data" --assets /mnt/d/code/etch/apps/campfire/assets --port 13774 ) \
+    "$GOBIN" --data "$W/data" --assets /mnt/d/code/burin/apps/campfire/assets --port 13774 ) \
   > "$W/server.log" 2>&1 &
 BOOT=$!
 for i in $(seq 1 600); do inns curl -fsS -o /dev/null http://127.0.0.1:13774/up 2>/dev/null && break; sleep 0.1; done
@@ -59,7 +59,7 @@ inns taskset -c "$LG_CPUS" setpriv --reuid=$U --regid=$U --init-groups "$LGBIN" 
 NCPU=$(taskset -c "$SRV_CPUS" nproc)
 for R in "${RATES[@]}"; do
   S0=$(cg_usec); C0=$(cache)
-  inns taskset -c "$LG_CPUS" setpriv --reuid=$U --regid=$U --init-groups node /mnt/d/code/etch/bench/post-writer.mjs http://127.0.0.1:13774 "$COOKIE" "$WROOM" "$R" "$SECS" > "$W/writer-$R.json" &
+  inns taskset -c "$LG_CPUS" setpriv --reuid=$U --regid=$U --init-groups node /mnt/d/code/burin/bench/post-writer.mjs http://127.0.0.1:13774 "$COOKIE" "$WROOM" "$R" "$SECS" > "$W/writer-$R.json" &
   WP=$!
   inns taskset -c "$LG_CPUS" setpriv --reuid=$U --regid=$U --init-groups "$LGBIN" http --base http://127.0.0.1:13774 --cookie "$COOKIE" --path "/rooms/$ROOM" --conc "$CONNS" --duration "$SECS" --gzip ${GZIP:-0} > "$OUT/cell-$R.json"
   wait $WP; S1=$(cg_usec); C1=$(cache)

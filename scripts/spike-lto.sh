@@ -1,11 +1,11 @@
 #!/bin/bash
-# Spike: a hand-written LLVM IR function (as etch will generate) linked into a Rust binary with
+# Spike: a hand-written LLVM IR function (as burin will generate) linked into a Rust binary with
 # cross-language LTO (rustc's LLVM 21 tools, rust-lld), calling a Rust runtime helper that should
 # be inlined into it. Prints whether the helper survives as a call.
 set -e
 source ~/.cargo/env 2>/dev/null || true
 BIN=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin
-S=/tmp/etch-spike; rm -rf $S; mkdir -p $S/src; cd $S
+S=/tmp/burin-spike; rm -rf $S; mkdir -p $S/src; cd $S
 # the datalayout and triple rustc uses
 echo 'pub fn f() {}' > dl.rs; rustc --crate-type=lib --emit=llvm-ir -o dl.ll dl.rs
 DL=$(grep '^target datalayout' dl.ll); TT=$(grep '^target triple' dl.ll)
@@ -13,7 +13,7 @@ cat > gen.ll <<EOF
 $DL
 $TT
 declare i64 @rt_mix(i64, i64)
-define i64 @etch_gen_f(i64 %x) {
+define i64 @burin_gen_f(i64 %x) {
   %a = call i64 @rt_mix(i64 %x, i64 7)
   %b = call i64 @rt_mix(i64 %a, i64 %x)
   ret i64 %b
@@ -33,7 +33,7 @@ codegen-units = 1
 EOF
 cat > build.rs <<'EOF'
 fn main() {
-    println!("cargo:rustc-link-search=native=/tmp/etch-spike");
+    println!("cargo:rustc-link-search=native=/tmp/burin-spike");
     println!("cargo:rustc-link-lib=static=gen");
 }
 EOF
@@ -43,11 +43,11 @@ pub extern "C" fn rt_mix(a: i64, b: i64) -> i64 {
     a.wrapping_mul(31) ^ b
 }
 extern "C" {
-    fn etch_gen_f(x: i64) -> i64;
+    fn burin_gen_f(x: i64) -> i64;
 }
 #[inline(never)]
 fn run(x: i64) -> i64 {
-    unsafe { etch_gen_f(x) }
+    unsafe { burin_gen_f(x) }
 }
 fn main() {
     let x: i64 = std::env::args().count() as i64;
@@ -61,4 +61,4 @@ $BIN/llvm-objdump -d --no-show-raw-insn target/release/spike | awk '/<_ZN5spike3
 SYM=$($BIN/llvm-nm target/release/spike | grep -oE "_ZN5spike3run[A-Za-z0-9_]*" | head -1)
 echo "--- run():"
 $BIN/llvm-objdump -d --no-show-raw-insn --disassemble-symbols=$SYM target/release/spike | tail -n +7
-echo "--- symbols left: $($BIN/llvm-nm target/release/spike | grep -cE 'rt_mix|etch_gen_f')"
+echo "--- symbols left: $($BIN/llvm-nm target/release/spike | grep -cE 'rt_mix|burin_gen_f')"

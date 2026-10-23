@@ -1,16 +1,16 @@
 #!/bin/bash
-# The second app, end to end: etch creates its schema in an empty folder; a seed adds people,
+# The second app, end to end: burin creates its schema in an empty folder; a seed adds people,
 # sessions, boards, memberships and posts; with --verify, two viewers read, post, and read again.
-#   bash /mnt/d/code/etch/scripts/board-check.sh
+#   bash /mnt/d/code/burin/scripts/board-check.sh
 set -e
-BIN=${ETCH_BIN:-$HOME/hw/etch-board-release}
-D=/tmp/etch-board; rm -rf $D; mkdir -p $D/data
+BIN=${BURIN_BIN:-$HOME/hw/burin-board-release}
+D=/tmp/burin-board; rm -rf $D; mkdir -p $D/data
 PORT=13798
 # the schema, made by the app on its first start
 "$BIN" --data $D/data --port $PORT --workers 1 --exit-after 1 > $D/first.log 2>&1 || true
 python3 - <<'EOF'
 import sqlite3, time
-db = sqlite3.connect('/tmp/etch-board/data/app.sqlite')
+db = sqlite3.connect('/tmp/burin-board/data/app.sqlite')
 now = int(time.time() * 1000) - 3_600_000
 seq = 0
 def row(table, cols):
@@ -36,7 +36,7 @@ PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 100); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done
 get() { curl -sS -o $D/$3.html -w "%{http_code} " -H "Cookie: sid=$1" $4 http://127.0.0.1:$PORT/boards/$2; }
-post() { curl -sS -o /dev/null -D - -H "Cookie: sid=$1" --data-urlencode "board=$2" --data-urlencode "text=$3" http://127.0.0.1:$PORT/_do/add_post | grep -i x-etch-outcome | tr -d '\r'; }
+post() { curl -sS -o /dev/null -D - -H "Cookie: sid=$1" --data-urlencode "board=$2" --data-urlencode "text=$3" http://127.0.0.1:$PORT/_do/add_post | grep -i x-burin-outcome | tr -d '\r'; }
 echo "reads (cold, then fast): $(get ada-token 1 a1) $(get bob-token 1 b1) $(sleep 0.3; get ada-token 1 a2) $(get bob-token 1 b2) $(get bob-token 1 b3 '--compressed')"
 echo "bob on Ada's board: $(get bob-token 2 x) (a redirect)"
 echo "post by bob: $(post bob-token 1 'hello from bob <script>x</script>')"
@@ -44,11 +44,11 @@ echo "blank post: $(post bob-token 1 '   ')"
 echo "post on a board bob isn't in: $(post bob-token 2 'sneaky')"
 sleep 0.3
 echo "reads after: $(get ada-token 1 a4) $(get bob-token 1 b4) $(get bob-token 1 b5 '--compressed')"
-curl -sS http://127.0.0.1:$PORT/_etch/stats; echo
+curl -sS http://127.0.0.1:$PORT/_burin/stats; echo
 grep -v '^started' $D/server.log | head -5 || true
 python3 - <<'EOF'
 import re
-D = '/tmp/etch-board/'
+D = '/tmp/burin-board/'
 a, b = open(D + 'a4.html').read(), open(D + 'b4.html').read()
 posts = re.findall(r'<li class="post" id="post-(\d+)" data-author-id="(\d+)"><b>([^<]*)</b> <span>([^<]*)</span>', b)
 me = re.search(r'<aside id="me" data-user-id="(\d+)"', b).group(1)
@@ -61,8 +61,8 @@ print("ada's panel:", re.search(r'Signed in as <b>([^<]*)</b>', a).group(1))
 print('escaped:', '&lt;script&gt;' in b and '<script>x' not in b)
 EOF
 # audiences kept current: bob joins Ada's board (then served fast), leaves the first (then refused)
-act() { curl -sS -o /dev/null -D - -H "Cookie: sid=$1" --data-urlencode "board=$2" http://127.0.0.1:$PORT/_do/$3 | grep -i x-etch-outcome | tr -d '\r'; }
-fast() { curl -sS http://127.0.0.1:$PORT/_etch/stats | sed 's/.*"fast":\([0-9]*\).*/\1/'; }
+act() { curl -sS -o /dev/null -D - -H "Cookie: sid=$1" --data-urlencode "board=$2" http://127.0.0.1:$PORT/_do/$3 | grep -i x-burin-outcome | tr -d '\r'; }
+fast() { curl -sS http://127.0.0.1:$PORT/_burin/stats | sed 's/.*"fast":\([0-9]*\).*/\1/'; }
 echo "bob joins board 2: $(act bob-token 2 join); joins again: $(act bob-token 2 join)"
 sleep 0.2; f0=$(fast)
 echo "bob reads board 2: $(get bob-token 2 j1) $(get bob-token 2 j2 --compressed) (fast: $(( $(fast) - f0 )) of 2); ada: $(get ada-token 2 j3)"
@@ -70,4 +70,4 @@ grep -q 'Signed in as <b>Bob' $D/j1.html && echo "  bob sees board 2 as himself"
 echo "bob leaves board 1: $(act bob-token 1 leave); leaves again: $(act bob-token 1 leave)"
 sleep 0.2; f0=$(fast)
 echo "bob reads board 1: $(get bob-token 1 l1) (fast: $(( $(fast) - f0 ))); ada: $(get ada-token 1 l2) $(get cy-token 1 l3 2>/dev/null || true)"
-curl -sS http://127.0.0.1:$PORT/_etch/stats; echo
+curl -sS http://127.0.0.1:$PORT/_burin/stats; echo

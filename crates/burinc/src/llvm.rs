@@ -4,13 +4,13 @@
 //! - its **input record**: a flat C struct with exactly the values its template uses (paths such
 //!   as `m.creator.name`, and scalars such as `first(Account).restrict_room_creation`), then a
 //!   (pointer, count) per list it reads; lists nest (a list per item of a list);
-//! - `etch_load_<f>(ctx, db, key, rec, arena) -> i1`: fills the record from SQLite: one SELECT for
+//! - `burin_load_<f>(ctx, db, key, rec, arena) -> i1`: fills the record from SQLite: one SELECT for
 //!   the record, one per list (per item, for a nested list), items in arrays of the lists' bounds;
-//! - `etch_bits_<f>(in, viewer) -> i64`: its variant key: each viewer-dependent condition's bit,
+//! - `burin_bits_<f>(in, viewer) -> i64`: its variant key: each viewer-dependent condition's bit,
 //!   shifted in, in template order (in loops, one per item). The compiler proves the key fits 64
 //!   bits from the lists' bounds and refuses a fragment whose key wouldn't. A `per viewer` register
 //!   is keyed by the viewer instead, and has no variant key;
-//! - `etch_build_<f>(ctx, in, viewer, out, tmps, splits)`: its bytes: appends of constant ranges
+//! - `burin_build_<f>(ctx, in, viewer, out, tmps, splits)`: its bytes: appends of constant ranges
 //!   (escaped and merged at compile time), escaped holes, a branch per condition, a loop per list.
 //!   In a `per viewer` register, a hole that depends on a parameter is a **splice**: the builder
 //!   marks the place (`splits`), and the hole is its own small register, keyed by the parameter.
@@ -309,7 +309,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         }
         let b = std::mem::take(&mut self.pending);
         let g = self.md.str_const(&b);
-        self.line(&format!("call void @etch_put(ptr {out}, ptr {g}, i64 {})", b.len()));
+        self.line(&format!("call void @burin_put(ptr {out}, ptr {g}, i64 {})", b.len()));
     }
     fn tmp(&mut self) -> String {
         let k = self.depth;
@@ -322,7 +322,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         let (p, t) = (self.v(), self.v());
         self.line(&format!("{p} = getelementptr ptr, ptr %tmps, i64 {k}"));
         self.line(&format!("{t} = load ptr, ptr {p}"));
-        self.line(&format!("call void @etch_clear(ptr {t})"));
+        self.line(&format!("call void @burin_clear(ptr {t})"));
         t
     }
     fn untmp(&mut self) {
@@ -347,7 +347,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     self.text(roots, a, &t, false)?;
                     self.flush(&t);
                     let (ptr, len) = (self.v(), self.v());
-                    self.line(&format!("{ptr} = call ptr @etch_vec_ptr(ptr {t})\n  {len} = call i64 @etch_vec_len(ptr {t})"));
+                    self.line(&format!("{ptr} = call ptr @burin_vec_ptr(ptr {t})\n  {len} = call i64 @burin_vec_len(ptr {t})"));
                     list.push(format!("ptr {ptr}, i64 {len}"));
                 }
                 Type::Bool => {
@@ -684,7 +684,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     if !self.bits {
                         let sep = if list.is_empty() { "" } else { ", " };
                         self.line(&format!("call void @{}({list}{sep}ptr {r})", self.m.extern_symbol(f)));
-                        self.line(&format!("call void @etch_emit(ptr {out}, ptr {r}, i64 {e1})"));
+                        self.line(&format!("call void @burin_emit(ptr {out}, ptr {r}, i64 {e1})"));
                     }
                     self.untmp();
                     for _ in 0..n {
@@ -695,7 +695,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 _ => {
                     let (v, _) = self.value(roots, e)?;
                     if !self.bits {
-                        self.line(&format!("call void @etch_int(ptr {out}, i64 {v})"));
+                        self.line(&format!("call void @burin_int(ptr {out}, i64 {v})"));
                     }
                 }
             },
@@ -705,18 +705,18 @@ impl<'a, 'b> Gen<'a, 'b> {
                     let (v, _) = self.value(roots, &args[0])?;
                     if !self.bits {
                         if dur {
-                            self.line(&format!("call void @etch_time(ptr {out}, i64 3, i64 {v}, i64 {e1})"));
+                            self.line(&format!("call void @burin_time(ptr {out}, i64 3, i64 {v}, i64 {e1})"));
                         } else if f == "grouped" {
-                            self.line(&format!("call void @etch_time(ptr {out}, i64 4, i64 {v}, i64 {e1})"));
+                            self.line(&format!("call void @burin_time(ptr {out}, i64 4, i64 {v}, i64 {e1})"));
                         } else {
-                            self.line(&format!("call void @etch_int(ptr {out}, i64 {v})"));
+                            self.line(&format!("call void @burin_int(ptr {out}, i64 {v})"));
                         }
                     }
                 }
-                "json" | "quote" => via_tmp(self, &args[0], &|t| format!("call void @etch_json(ptr {out}, ptr {t}, i64 {e1})"))?,
-                "sign" => via_tmp(self, &args[0], &|t| format!("call void @etch_sign(ptr %ctx, ptr {out}, ptr {t}, i64 {e1})"))?,
-                "autolink" => via_tmp(self, &args[0], &|t| format!("call void @etch_autolink(ptr {out}, ptr {t})"))?,
-                "asset" => via_tmp(self, &args[0], &|t| format!("call void @etch_asset(ptr %ctx, ptr {out}, ptr {t}, i64 {e1})"))?,
+                "json" | "quote" => via_tmp(self, &args[0], &|t| format!("call void @burin_json(ptr {out}, ptr {t}, i64 {e1})"))?,
+                "sign" => via_tmp(self, &args[0], &|t| format!("call void @burin_sign(ptr %ctx, ptr {out}, ptr {t}, i64 {e1})"))?,
+                "autolink" => via_tmp(self, &args[0], &|t| format!("call void @burin_autolink(ptr {out}, ptr {t})"))?,
+                "asset" => via_tmp(self, &args[0], &|t| format!("call void @burin_asset(ptr %ctx, ptr {out}, ptr {t}, i64 {e1})"))?,
                 "choose" => {
                     let items: Vec<String> = match &args[0] {
                         Expr::Name(n, _) => match self.m.consts.get(n) {
@@ -730,7 +730,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     self.flush(&t);
                     if !self.bits {
                         let i = self.v();
-                        self.line(&format!("{i} = call i64 @etch_crc_mod(ptr {t}, i64 {})", items.len()));
+                        self.line(&format!("{i} = call i64 @burin_crc_mod(ptr {t}, i64 {})", items.len()));
                         let done = self.label("chosen");
                         let labels: Vec<String> = (0..items.len()).map(|_| self.label("choice")).collect();
                         let cases: String = labels.iter().enumerate().map(|(k, l)| format!("i64 {k}, label %{l} ")).collect();
@@ -739,7 +739,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                             self.block(l);
                             let b = if esc { esc_bytes(items[k].as_bytes()) } else { items[k].clone().into_bytes() };
                             let g = self.md.str_const(&b);
-                            self.line(&format!("call void @etch_put(ptr {out}, ptr {g}, i64 {})", b.len()));
+                            self.line(&format!("call void @burin_put(ptr {out}, ptr {g}, i64 {})", b.len()));
                             self.line(&format!("br label %{done}"));
                         }
                         self.block(&done);
@@ -748,7 +748,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 "first_word" | "initials" | "lower" | "upper" => {
                     let f = f.clone();
-                    via_tmp(self, &args[0], &|t| format!("call void @etch_{f}(ptr {out}, ptr {t}, i64 {e1})"))?
+                    via_tmp(self, &args[0], &|t| format!("call void @burin_{f}(ptr {out}, ptr {t}, i64 {e1})"))?
                 }
                 "replace" => {
                     let (from, to) = match (self.constant(roots, &args[1]), self.constant(roots, &args[2])) {
@@ -757,13 +757,13 @@ impl<'a, 'b> Gen<'a, 'b> {
                     };
                     let (gf, gt) = (self.md.str_const(from.as_bytes()), self.md.str_const(to.as_bytes()));
                     let (fl, tl) = (from.len(), to.len());
-                    via_tmp(self, &args[0], &|t| format!("call void @etch_replace(ptr {out}, ptr {t}, ptr {gf}, i64 {fl}, ptr {gt}, i64 {tl}, i64 {e1})"))?
+                    via_tmp(self, &args[0], &|t| format!("call void @burin_replace(ptr {out}, ptr {t}, ptr {gf}, i64 {fl}, ptr {gt}, i64 {tl}, i64 {e1})"))?
                 }
                 "iso" | "date" | "clock" => {
                     let k = ["iso", "date", "clock"].iter().position(|x| x == f).unwrap();
                     let (v, _) = self.value(roots, &args[0])?;
                     if !self.bits {
-                        self.line(&format!("call void @etch_time(ptr {out}, i64 {k}, i64 {v}, i64 {e1})"));
+                        self.line(&format!("call void @burin_time(ptr {out}, i64 {k}, i64 {v}, i64 {e1})"));
                     }
                 }
                 "sentence" => {
@@ -802,7 +802,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     }
                     self.close_loop(l);
                     if !self.bits {
-                        self.line(&format!("call void @etch_sentence(ptr {out}, ptr {t}, i64 {e1})"));
+                        self.line(&format!("call void @burin_sentence(ptr {out}, ptr {t}, i64 {e1})"));
                     }
                     self.untmp();
                 }
@@ -810,7 +810,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 _ if self.numeric(e) && matches!(f.as_str(), "min" | "max" | "clamp" | "abs") => {
                     let (v, _) = self.value(roots, e)?;
                     if !self.bits {
-                        self.line(&format!("call void @etch_int(ptr {out}, i64 {v})"));
+                        self.line(&format!("call void @burin_int(ptr {out}, i64 {v})"));
                     }
                 }
                 _ => return Err(format!("`{f}` can't be lowered in a fragment yet")),
@@ -818,7 +818,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             Expr::Field(o, f, _) if matches!(&**o, Expr::Name(n, _) if n == "config") => {
                 let k = self.m.app.decls.iter().filter_map(|d| if let Decl::Config { name, .. } = d { Some(name) } else { None }).position(|n| n == f).unwrap();
                 if !self.bits {
-                    self.line(&format!("call void @etch_config(ptr %ctx, ptr {out}, i64 {k}, i64 {e1})"));
+                    self.line(&format!("call void @burin_config(ptr %ctx, ptr {out}, i64 {k}, i64 {e1})"));
                 }
             }
             _ => {
@@ -827,12 +827,12 @@ impl<'a, 'b> Gen<'a, 'b> {
                     return Ok(());
                 }
                 match shape {
-                    Shape::I64 => self.line(&format!("call void @etch_int(ptr {out}, i64 {v})")),
+                    Shape::I64 => self.line(&format!("call void @burin_int(ptr {out}, i64 {v})")),
                     Shape::Str => {
                         let (p, l) = (self.v(), self.v());
                         self.line(&format!("{p} = extractvalue %Str {v}, 0"));
                         self.line(&format!("{l} = extractvalue %Str {v}, 1"));
-                        self.line(&format!("call void @etch_{}(ptr {out}, ptr {p}, i64 {l})", if esc { "esc" } else { "put" }));
+                        self.line(&format!("call void @burin_{}(ptr {out}, ptr {p}, i64 {l})", if esc { "esc" } else { "put" }));
                     }
                 }
             }
@@ -900,7 +900,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                         let (p, n, eq) = (self.v(), self.v(), self.v());
                         self.line(&format!("{p} = extractvalue %Str {lv}, 0"));
                         self.line(&format!("{n} = extractvalue %Str {lv}, 1"));
-                        self.line(&format!("{eq} = call i1 @etch_str_eq(ptr {p}, i64 {n}, ptr {g}, i64 {})", c.len()));
+                        self.line(&format!("{eq} = call i1 @burin_str_eq(ptr {p}, i64 {n}, ptr {g}, i64 {})", c.len()));
                         self.line(&format!("{v} = xor i1 {eq}, {}", if *op == BinOp::Eq { "false" } else { "true" }));
                     } else {
                         self.line(&format!("{v} = icmp {pred} i64 {lv}, {c}"));
@@ -1074,7 +1074,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                                     Some(a) => self.value(roots, a)?.0,
                                     None => "0".into(),
                                 };
-                                self.line(&format!("call void @etch_piece(ptr %splits, ptr {out}, i64 {kind}, i64 {key})"));
+                                self.line(&format!("call void @burin_piece(ptr %splits, ptr {out}, i64 {kind}, i64 {key})"));
                                 continue;
                             }
                         }
@@ -1099,7 +1099,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                                     self.splices.len() - 1
                                 }
                             };
-                            self.line(&format!("call void @etch_split(ptr %splits, ptr {out}, i64 {site})"));
+                            self.line(&format!("call void @burin_split(ptr %splits, ptr {out}, i64 {site})"));
                         }
                         continue;
                     }
@@ -1207,7 +1207,7 @@ fn register(m: &Model, md: &mut Module, name: &str, params: &[Param], nodes: &[T
     let mut f = String::new();
     types(name, &schema, &mut vec![], &mut f);
     let _ = writeln!(f, "; {name}: its bytes ({tmps} temporary buffers){}", if per_viewer { ", per request" } else { ", cached" });
-    let _ = writeln!(f, "define void @etch_build_{name}(ptr noalias %ctx, ptr noalias %in, ptr noalias %viewer, ptr noalias %out, ptr noalias %tmps, ptr noalias %splits) {{\nentry:\n{body}  ret void\n}}\n");
+    let _ = writeln!(f, "define void @burin_build_{name}(ptr noalias %ctx, ptr noalias %in, ptr noalias %viewer, ptr noalias %out, ptr noalias %tmps, ptr noalias %splits) {{\nentry:\n{body}  ret void\n}}\n");
     md.funcs.push_str(&f);
     let root = match params.first().map(|p| (p.name.clone(), p.ty.strip_opt().clone())) {
         Some((r, Type::Ref(e))) if params.len() == 1 => Some((r, e)),
@@ -1241,7 +1241,7 @@ fn emit_lists(m: &Model, md: &mut Module, b: &mut String, n: &mut usize, qid: &m
         *qid += 1;
         let (st, size, sz, arr) = (v(), v(), v(), v());
         let _ = writeln!(b, "  ; {}", sel.sql);
-        let _ = writeln!(b, "  {st} = call ptr @etch_stmt(ptr %db, i64 {qid}, ptr {g}, i64 {})", sel.sql.len());
+        let _ = writeln!(b, "  {st} = call ptr @burin_stmt(ptr %db, i64 {qid}, ptr {g}, i64 {})", sel.sql.len());
         for (bi, bind) in sel.binds.iter().enumerate() {
             let crate::sql::Bind::Path(e) = bind;
             let (root, path) = path_of(e).ok_or("a query's parameter isn't a path")?;
@@ -1264,12 +1264,12 @@ fn emit_lists(m: &Model, md: &mut Module, b: &mut String, n: &mut usize, qid: &m
                     let _ = writeln!(b, "  {x} = load i64, ptr {p}\n  call i32 @sqlite3_bind_int64(ptr {st}, i32 {}, i64 {x})", bi + 1);
                 }
                 Shape::Str => {
-                    let _ = writeln!(b, "  call void @etch_bind_str(ptr {st}, i32 {}, ptr {p})", bi + 1);
+                    let _ = writeln!(b, "  call void @burin_bind_str(ptr {st}, i32 {}, ptr {p})", bi + 1);
                 }
             }
         }
         // the array, sized by the list's bound: allocated once
-        let _ = writeln!(b, "  {size} = getelementptr {ity}, ptr null, i64 {bound}\n  {sz} = ptrtoint ptr {size} to i64\n  {arr} = call ptr @etch_alloc(ptr %arena, i64 {sz})");
+        let _ = writeln!(b, "  {size} = getelementptr {ity}, ptr null, i64 {bound}\n  {sz} = ptrtoint ptr {size} to i64\n  {arr} = call ptr @burin_alloc(ptr %arena, i64 {sz})");
         let idx = v();
         let (head, step, item, done) = (format!("lh{idx}").replace('%', ""), format!("ls{idx}").replace('%', ""), format!("li{idx}").replace('%', ""), format!("ld{idx}").replace('%', ""));
         let (rc, ok, i, full, it, nx, cnt, l1, l2, lp) = (v(), v(), v(), v(), v(), v(), v(), v(), v(), v());
@@ -1282,10 +1282,10 @@ fn emit_lists(m: &Model, md: &mut Module, b: &mut String, n: &mut usize, qid: &m
             let _ = writeln!(b, "  {p} = getelementptr inbounds {ity}, ptr {it}, i32 0, i32 {fi}");
             match sh {
                 Shape::I64 => {
-                    let _ = writeln!(b, "  {x} = call i64 @etch_col_i64(ptr {st}, i32 {fi})\n  store i64 {x}, ptr {p}");
+                    let _ = writeln!(b, "  {x} = call i64 @burin_col_i64(ptr {st}, i32 {fi})\n  store i64 {x}, ptr {p}");
                 }
                 Shape::Str => {
-                    let _ = writeln!(b, "  call void @etch_col_str(ptr {st}, i32 {fi}, ptr %arena, ptr {p})");
+                    let _ = writeln!(b, "  call void @burin_col_str(ptr {st}, i32 {fi}, ptr %arena, ptr {p})");
                 }
             }
         }
@@ -1312,13 +1312,13 @@ fn emit_lists(m: &Model, md: &mut Module, b: &mut String, n: &mut usize, qid: &m
     Ok(())
 }
 
-/// `etch_load_<f>(ctx, db, key, rec, arena) -> i1`: fills the register's record from SQLite. False
+/// `burin_load_<f>(ctx, db, key, rec, arena) -> i1`: fills the register's record from SQLite. False
 /// when its row is gone.
 fn loader(m: &Model, md: &mut Module, reg: &RegInfo, qid: &mut usize) -> Result<String, String> {
     let mut b = String::new();
     let mut n = 0usize;
     let ty = type_name(&reg.name, &[]);
-    let _ = writeln!(b, "define i1 @etch_load_{}(ptr noalias %ctx, ptr noalias %db, i64 %key, i64 %viewer, ptr noalias %rec, ptr noalias %arena) {{\nentry:", reg.name);
+    let _ = writeln!(b, "define i1 @burin_load_{}(ptr noalias %ctx, ptr noalias %db, i64 %key, i64 %viewer, ptr noalias %rec, ptr noalias %arena) {{\nentry:", reg.name);
     let schema = &reg.schema;
     let root_name = reg.root.as_ref().map(|(r, _)| r.clone()).unwrap_or_default();
     let only_key = schema.scalars.is_empty() && schema.fields.iter().all(|(p, _)| *p == root_name);
@@ -1333,7 +1333,7 @@ fn loader(m: &Model, md: &mut Module, reg: &RegInfo, qid: &mut usize) -> Result<
         let g = md.str_const(sel.sql.as_bytes());
         *qid += 1;
         let _ = writeln!(b, "  ; {}", sel.sql);
-        let _ = writeln!(b, "  %st = call ptr @etch_stmt(ptr %db, i64 {qid}, ptr {g}, i64 {})", sel.sql.len());
+        let _ = writeln!(b, "  %st = call ptr @burin_stmt(ptr %db, i64 {qid}, ptr {g}, i64 {})", sel.sql.len());
         // the scalars' parameters first (the row itself, or the viewer), then the row's id
         for (bi, bind) in sel.binds.iter().enumerate() {
             let crate::sql::Bind::Path(e) = bind;
@@ -1354,10 +1354,10 @@ fn loader(m: &Model, md: &mut Module, reg: &RegInfo, qid: &mut usize) -> Result<
             let _ = writeln!(b, "  %f{i} = getelementptr inbounds {ty}, ptr %rec, i32 0, i32 {i}");
             match sh {
                 Shape::I64 => {
-                    let _ = writeln!(b, "  %x{i} = call i64 @etch_col_i64(ptr %st, i32 {i})\n  store i64 %x{i}, ptr %f{i}");
+                    let _ = writeln!(b, "  %x{i} = call i64 @burin_col_i64(ptr %st, i32 {i})\n  store i64 %x{i}, ptr %f{i}");
                 }
                 Shape::Str => {
-                    let _ = writeln!(b, "  call void @etch_col_str(ptr %st, i32 {i}, ptr %arena, ptr %f{i})");
+                    let _ = writeln!(b, "  call void @burin_col_str(ptr %st, i32 {i}, ptr %arena, ptr %f{i})");
                 }
             }
         }
@@ -1368,7 +1368,7 @@ fn loader(m: &Model, md: &mut Module, reg: &RegInfo, qid: &mut usize) -> Result<
     Ok(b)
 }
 
-/// The viewer's record: `etch_load_viewer(ctx, db, key, viewer, rec, arena) -> i1` (the viewer is the key).
+/// The viewer's record: `burin_load_viewer(ctx, db, key, viewer, rec, arena) -> i1` (the viewer is the key).
 fn viewer_loader(m: &Model, md: &mut Module, qid: &mut usize) -> Result<String, String> {
     let ent = m.viewer_entity().ok_or("no viewer declaration")?.to_string();
     let reg = RegInfo { name: "viewer".into(), schema: md.viewer.clone(), tmps: 0, bits: 0, per_viewer: false, root: Some(("viewer".into(), ent)), splices: vec![], reads: vec![] };
@@ -1381,57 +1381,57 @@ const DECLS: &str = r#"%Str = type { ptr, i64 }
 declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)
 declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)
 declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)
-declare void @etch_put(ptr, ptr, i64)
-declare void @etch_esc(ptr, ptr, i64)
-declare void @etch_clear(ptr)
-declare void @etch_int(ptr, i64)
-declare void @etch_json(ptr, ptr, i64)
-declare void @etch_sign(ptr, ptr, ptr, i64)
-declare void @etch_autolink(ptr, ptr)
-declare void @etch_asset(ptr, ptr, ptr, i64)
-declare void @etch_first_word(ptr, ptr, i64)
-declare void @etch_initials(ptr, ptr, i64)
-declare void @etch_lower(ptr, ptr, i64)
-declare void @etch_sentence(ptr, ptr, i64)
-declare void @etch_piece(ptr, ptr, i64, i64)
-declare void @etch_replace(ptr, ptr, ptr, i64, ptr, i64, i64)
-declare void @etch_time(ptr, i64, i64, i64)
-declare void @etch_config(ptr, ptr, i64, i64)
-declare i1 @etch_str_eq(ptr, i64, ptr, i64)
-declare ptr @etch_stmt(ptr, i64, ptr, i64)
-declare i64 @etch_col_i64(ptr, i32)
-declare i64 @etch_col_int(ptr, i32)
-declare void @etch_col_str(ptr, i32, ptr, ptr)
-declare void @etch_bind_str(ptr, i32, ptr)
-declare void @etch_bind_i64(ptr, i32, i64)
-declare ptr @etch_alloc(ptr, i64)
+declare void @burin_put(ptr, ptr, i64)
+declare void @burin_esc(ptr, ptr, i64)
+declare void @burin_clear(ptr)
+declare void @burin_int(ptr, i64)
+declare void @burin_json(ptr, ptr, i64)
+declare void @burin_sign(ptr, ptr, ptr, i64)
+declare void @burin_autolink(ptr, ptr)
+declare void @burin_asset(ptr, ptr, ptr, i64)
+declare void @burin_first_word(ptr, ptr, i64)
+declare void @burin_initials(ptr, ptr, i64)
+declare void @burin_lower(ptr, ptr, i64)
+declare void @burin_sentence(ptr, ptr, i64)
+declare void @burin_piece(ptr, ptr, i64, i64)
+declare void @burin_replace(ptr, ptr, ptr, i64, ptr, i64, i64)
+declare void @burin_time(ptr, i64, i64, i64)
+declare void @burin_config(ptr, ptr, i64, i64)
+declare i1 @burin_str_eq(ptr, i64, ptr, i64)
+declare ptr @burin_stmt(ptr, i64, ptr, i64)
+declare i64 @burin_col_i64(ptr, i32)
+declare i64 @burin_col_int(ptr, i32)
+declare void @burin_col_str(ptr, i32, ptr, ptr)
+declare void @burin_bind_str(ptr, i32, ptr)
+declare void @burin_bind_i64(ptr, i32, i64)
+declare ptr @burin_alloc(ptr, i64)
 declare i32 @sqlite3_bind_int64(ptr, i32, i64)
 declare i32 @sqlite3_step(ptr)
 declare i32 @sqlite3_reset(ptr)
-declare void @etch_exec(ptr)
-declare void @etch_done(ptr, i32)
-declare void @etch_delta(ptr, i32, i64, i64, i64)
-declare i64 @etch_w_now(ptr)
-declare i64 @etch_w_seq(ptr)
-declare i64 @etch_w_seq_now(ptr)
-declare i64 @etch_w_id(ptr, ptr, ptr, i64)
-declare void @etch_w_token(ptr, i64, ptr)
-declare ptr @etch_w_alloc(ptr, i64)
-declare void @etch_w_copy(ptr, ptr, ptr)
-declare void @etch_delta_patch(ptr, i64, i64, i64, i64, i64, i64)
-declare void @etch_delta_find(ptr, i64, i64, i64, i64)
-declare i64 @etch_str_chars(ptr)
-declare void @etch_w_sign_in(ptr, ptr)
-declare void @etch_w_sign_out(ptr)
-declare i64 @etch_crc_mod(ptr, i64)
-declare void @etch_upper(ptr, ptr, i64)
-declare ptr @etch_vec_ptr(ptr)
-declare i64 @etch_vec_len(ptr)
-declare void @etch_emit(ptr, ptr, i64)
-declare ptr @etch_w_ext_out(ptr)
-declare void @etch_w_ext_take(ptr, ptr)
-declare %List @etch_w_ids(ptr, ptr)
-declare void @etch_w_go(ptr, ptr, i64, i64, ptr, i64)
+declare void @burin_exec(ptr)
+declare void @burin_done(ptr, i32)
+declare void @burin_delta(ptr, i32, i64, i64, i64)
+declare i64 @burin_w_now(ptr)
+declare i64 @burin_w_seq(ptr)
+declare i64 @burin_w_seq_now(ptr)
+declare i64 @burin_w_id(ptr, ptr, ptr, i64)
+declare void @burin_w_token(ptr, i64, ptr)
+declare ptr @burin_w_alloc(ptr, i64)
+declare void @burin_w_copy(ptr, ptr, ptr)
+declare void @burin_delta_patch(ptr, i64, i64, i64, i64, i64, i64)
+declare void @burin_delta_find(ptr, i64, i64, i64, i64)
+declare i64 @burin_str_chars(ptr)
+declare void @burin_w_sign_in(ptr, ptr)
+declare void @burin_w_sign_out(ptr)
+declare i64 @burin_crc_mod(ptr, i64)
+declare void @burin_upper(ptr, ptr, i64)
+declare ptr @burin_vec_ptr(ptr)
+declare i64 @burin_vec_len(ptr)
+declare void @burin_emit(ptr, ptr, i64)
+declare ptr @burin_w_ext_out(ptr)
+declare void @burin_w_ext_take(ptr, ptr)
+declare %List @burin_w_ids(ptr, ptr)
+declare void @burin_w_go(ptr, ptr, i64, i64, ptr, i64)
 "#;
 
 /// The module for these registers, and a Rust header with the same records.
@@ -1461,7 +1461,7 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
     }
     for (r, reads) in md.registers.iter_mut().zip(reads_of) {
         r.reads = reads;
-        if std::env::var("ETCH_SHOW_READS").is_ok() {
+        if std::env::var("BURIN_SHOW_READS").is_ok() {
             eprintln!("{} reads {}", r.name, r.reads.iter().map(|(e, c)| format!("{e}.{c}")).collect::<Vec<_>>().join(" "));
         }
     }
@@ -1496,7 +1496,7 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
         }
     }
     let mut ll = String::new();
-    let _ = writeln!(ll, "; generated by etchc from the app's spec: do not edit\n{datalayout}\n{triple}\n");
+    let _ = writeln!(ll, "; generated by burinc from the app's spec: do not edit\n{datalayout}\n{triple}\n");
     ll.push_str(DECLS);
     ll.push_str(&extern_decls(m));
     let mut vt = String::new();
@@ -1517,24 +1517,24 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
         }
         let _ = writeln!(rs, "}}");
         let _ = writeln!(rs, "pub const OUTCOMES_{}: &[&str] = &[{}];", a.name.to_uppercase(), a.outcomes.iter().map(|o| format!("{o:?}")).collect::<Vec<_>>().join(", "));
-        let _ = writeln!(rs, "extern \"C\" {{\n    pub fn etch_act_{}(ctx: *const etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, w: *mut etch_rt::abi::Writer, viewer: i64, vrec: *const Viewer, args: *const Args_{}, d: *mut etch_rt::abi::Deltas) -> i32;\n}}\n", a.name, a.name);
+        let _ = writeln!(rs, "extern \"C\" {{\n    pub fn burin_act_{}(ctx: *const burin_rt::abi::Ctx, db: *mut burin_rt::abi::Db, w: *mut burin_rt::abi::Writer, viewer: i64, vrec: *const Viewer, args: *const Args_{}, d: *mut burin_rt::abi::Deltas) -> i32;\n}}\n", a.name, a.name);
     }
     // patches of kept records: (register, list, field) to the generated function
     let _ = writeln!(rs, "extern \"C\" {{");
     for (r, l, f) in &patches {
-        let _ = writeln!(rs, "    fn etch_patch_{}_{l}_{f}(rec: *mut u8, item: i64, value: i64) -> bool;", md.registers[*r].name);
+        let _ = writeln!(rs, "    fn burin_patch_{}_{l}_{f}(rec: *mut u8, item: i64, value: i64) -> bool;", md.registers[*r].name);
     }
     for (r, l, f) in &finds {
-        let _ = writeln!(rs, "    fn etch_find_{}_{l}_{f}(rec: *mut u8, item: i64, value: i64) -> bool;", md.registers[*r].name);
+        let _ = writeln!(rs, "    fn burin_find_{}_{l}_{f}(rec: *mut u8, item: i64, value: i64) -> bool;", md.registers[*r].name);
     }
     let _ = writeln!(rs, "}}\n/// Patches the item with this id in a kept record: false if it isn't there.\npub unsafe fn patch(reg: i64, list: i64, field: i64, rec: *mut u8, item: i64, value: i64) -> bool {{\n    match (reg, list, field) {{");
     for (r, l, f) in &patches {
-        let _ = writeln!(rs, "        ({r}, {l}, {f}) => etch_patch_{}_{l}_{f}(rec, item, value),", md.registers[*r].name);
+        let _ = writeln!(rs, "        ({r}, {l}, {f}) => burin_patch_{}_{l}_{f}(rec, item, value),", md.registers[*r].name);
     }
     let _ = writeln!(rs, "        _ => false,\n    }}\n}}");
     let _ = writeln!(rs, "/// Whether a kept record's list holds an item referencing this row.\npub unsafe fn find(reg: i64, list: i64, field: i64, rec: *mut u8, row: i64) -> bool {{\n    match (reg, list, field) {{");
     for (r, l, f) in &finds {
-        let _ = writeln!(rs, "        ({r}, {l}, {f}) => etch_find_{}_{l}_{f}(rec, row, 0),", md.registers[*r].name);
+        let _ = writeln!(rs, "        ({r}, {l}, {f}) => burin_find_{}_{l}_{f}(rec, row, 0),", md.registers[*r].name);
     }
     let _ = writeln!(rs, "        _ => true,\n    }}\n}}");
     rs.push_str(&crate::glue::glue(m, &md, &screens, &acts)?);
@@ -1547,7 +1547,7 @@ fn rust_name(path: &str) -> String {
 
 /// `#[repr(C)]` structs matching the records, and the generated functions' declarations.
 fn rust_header(md: &Module) -> String {
-    let mut s = String::from("// generated by etchc from the app's spec: do not edit\nuse etch_rt::abi::{Str, List};\n\n");
+    let mut s = String::from("// generated by burinc from the app's spec: do not edit\nuse burin_rt::abi::{Str, List};\n\n");
     fn rec(s: &mut String, name: &str, sch: &Schema, at: &mut Vec<usize>) {
         let ty = format!("In_{name}{}", at.iter().map(|k| format!("_{k}")).collect::<String>());
         let _ = writeln!(s, "#[repr(C)]\n#[derive(Clone, Copy)]\npub struct {} {{", if name.is_empty() { "Viewer".to_string() } else { ty.clone() });
@@ -1566,11 +1566,11 @@ fn rust_header(md: &Module) -> String {
     }
     rec(&mut s, "", &md.viewer, &mut vec![]);
     let _ = writeln!(s, "extern \"C\" {{");
-    let _ = writeln!(s, "    pub fn etch_load_viewer(ctx: *const etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, viewer: i64, rec: *mut Viewer, arena: *mut etch_rt::abi::Arena) -> bool;");
+    let _ = writeln!(s, "    pub fn burin_load_viewer(ctx: *const burin_rt::abi::Ctx, db: *mut burin_rt::abi::Db, key: i64, viewer: i64, rec: *mut Viewer, arena: *mut burin_rt::abi::Arena) -> bool;");
     for r in &md.registers {
         let name = &r.name;
-        let _ = writeln!(s, "    pub fn etch_load_{name}(ctx: *const etch_rt::abi::Ctx, db: *mut etch_rt::abi::Db, key: i64, viewer: i64, rec: *mut In_{name}, arena: *mut etch_rt::abi::Arena) -> bool;");
-        let _ = writeln!(s, "    pub fn etch_build_{name}(ctx: *const etch_rt::abi::Ctx, input: *const In_{name}, viewer: *const Viewer, out: *mut Vec<u8>, tmps: *const *mut Vec<u8>, splits: *mut Vec<usize>);");
+        let _ = writeln!(s, "    pub fn burin_load_{name}(ctx: *const burin_rt::abi::Ctx, db: *mut burin_rt::abi::Db, key: i64, viewer: i64, rec: *mut In_{name}, arena: *mut burin_rt::abi::Arena) -> bool;");
+        let _ = writeln!(s, "    pub fn burin_build_{name}(ctx: *const burin_rt::abi::Ctx, input: *const In_{name}, viewer: *const Viewer, out: *mut Vec<u8>, tmps: *const *mut Vec<u8>, splits: *mut Vec<usize>);");
     }
     let _ = writeln!(s, "}}\n");
     for r in &md.registers {
@@ -1583,7 +1583,7 @@ fn rust_header(md: &Module) -> String {
 
 /// The `extern fn`s' declarations, as the C ABI has them: a number, flag, time or duration is an
 /// i64; a text argument its bytes' pointer and length; a text result is written into a buffer
-/// passed last (with `etch_ext_write`, include/etch.h).
+/// passed last (with `burin_ext_write`, include/burin.h).
 pub fn extern_decls(m: &Model) -> String {
     let mut names: Vec<&String> = m.externs.keys().collect();
     names.sort();

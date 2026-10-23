@@ -1,18 +1,18 @@
 #!/bin/bash
 # Boosts, unboosts, edits and deletes, with --verify on: every fast page must equal a fresh render
 # from SQLite; each refusal's outcome; and no write may clear the snapshot's screens ("cleared").
-#   bash /mnt/d/code/etch/scripts/edits-verify.sh
+#   bash /mnt/d/code/burin/scripts/edits-verify.sh
 set -e
-BIN=${ETCH_BIN:-$HOME/hw/etch-gen-release}
-D=/tmp/etch-ev; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/etch/data/campfire-golden $D/data; rm -f $D/data/app.lock
+BIN=${BURIN_BIN:-$HOME/hw/burin-gen-release}
+D=/tmp/burin-ev; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/burin/data/campfire-golden $D/data; rm -f $D/data/app.lock
 PORT=13796
-q() { node /mnt/d/code/etch/scripts/q.js $D/data/app.sqlite "$1"; }
+q() { node /mnt/d/code/burin/scripts/q.js $D/data/app.sqlite "$1"; }
 # a plain member, added to the room and signed in (the room has two administrators and a bot)
 MU=$(q "select id from User where role = 'member' and status = 'active' order by id limit 1")
-node /mnt/d/code/etch/scripts/x.js $D/data/app.sqlite "insert into Session (id, seq, created, updated, user, token) values (900000001, 1, 0, 0, $MU, 'membertokenmembertokenmember0000'); insert into Membership (id, seq, created, updated, room, user, involvement) values (900000002, 2, 0, 0, 486777696, $MU, 'everything')"
+node /mnt/d/code/burin/scripts/x.js $D/data/app.sqlite "insert into Session (id, seq, created, updated, user, token) values (900000001, 1, 0, 0, $MU, 'membertokenmembertokenmember0000'); insert into Membership (id, seq, created, updated, room, user, involvement) values (900000002, 2, 0, 0, 486777696, $MU, 'everything')"
 MEMBER=membertokenmembertokenmember0000
 R=486777696
-TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/etch/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
+TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/burin/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
 PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 100); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done
@@ -57,5 +57,5 @@ echo "delete someone else's, as a member: $(act $MEMBER delete_message "__arg_me
 echo "boost, as a member:                 $(act $MEMBER boost "__arg_message=#$OTHER" "content=👋")"
 echo "delete someone else's, as jason:    $(act $JASON delete_message "__arg_message=#$OTHER")"
 sleep 0.3; both; echo
-curl -sS http://127.0.0.1:$PORT/_etch/stats; echo
+curl -sS http://127.0.0.1:$PORT/_burin/stats; echo
 grep -v "^started" $D/server.log | head -20 || true

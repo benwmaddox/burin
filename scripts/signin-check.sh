@@ -2,22 +2,22 @@
 # Signing in and out, with --verify: the sign-in page; wrong passwords, unknown and forged
 # attempts refused; a good one sets the cookie, "/" goes to a room, and the room is then served
 # fast (the new session is in the snapshot); signing out clears it and the old cookie is refused.
-#   bash /mnt/d/code/etch/scripts/signin-check.sh
+#   bash /mnt/d/code/burin/scripts/signin-check.sh
 set -e
-BIN=${ETCH_BIN:-$HOME/hw/etch-gen-release}
-D=/tmp/etch-si; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/etch/data/campfire-golden $D/data; rm -f $D/data/app.lock
+BIN=${BURIN_BIN:-$HOME/hw/burin-gen-release}
+D=/tmp/burin-si; rm -rf $D; mkdir -p $D; cp -a /mnt/d/code/burin/data/campfire-golden $D/data; rm -f $D/data/app.lock
 PORT=13794
-q() { node /mnt/d/code/etch/scripts/q.js $D/data/app.sqlite "$1"; }
+q() { node /mnt/d/code/burin/scripts/q.js $D/data/app.sqlite "$1"; }
 # Kevin (a member) gets a password; he's added to the bench room
 KU=$(q "select id from User where email = 'kevin@37signals.com'")
 HASH=$("$BIN" --hash-password 'kevins pass')
-node /mnt/d/code/etch/scripts/x.js $D/data/app.sqlite "update User set password = '$HASH' where id = $KU; insert into Membership (id, seq, created, updated, room, user, involvement) values (900000002, 2, 0, 0, 486777696, $KU, 'everything')"
-TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/etch/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
+node /mnt/d/code/burin/scripts/x.js $D/data/app.sqlite "update User set password = '$HASH' where id = $KU; insert into Membership (id, seq, created, updated, room, user, involvement) values (900000002, 2, 0, 0, 486777696, $KU, 'everything')"
+TZ=America/New_York taskset -c 0-3 "$BIN" --data $D/data --assets /mnt/d/code/burin/apps/campfire/assets --port $PORT --workers 2 --verify > $D/server.log 2>&1 &
 PID=$!
 trap "kill $PID 2>/dev/null" EXIT
 for i in $(seq 1 100); do curl -fsS -o /dev/null http://127.0.0.1:$PORT/up 2>/dev/null && break; sleep 0.05; done
 U=http://127.0.0.1:$PORT
-stat() { curl -sS $U/_etch/stats | sed "s/.*\"$1\":\([0-9]*\).*/\1/"; }
+stat() { curl -sS $U/_burin/stats | sed "s/.*\"$1\":\([0-9]*\).*/\1/"; }
 # a sign-in attempt: its outcome, where it goes, its cookie, how long it took
 signin() { curl -sS -o /dev/null -D $D/h -w "%{time_total}" -H "Referer: $U/session/new" "$@" $U/_do/sign_in > $D/t
   tr -d '\r' < $D/h | awk -v t=$(cat $D/t) '/^[Xx]-[Ee]tch-[Oo]utcome/{o=$2} /^[Ll]ocation/{l=$2} /^[Ss]et-[Cc]ookie/{c=$2} END{printf "%s -> %s %s (%.0f ms)", o, l, (c ? "cookie " substr(c, 1, 22) "…" : "no cookie"), t * 1000}'; }
@@ -44,5 +44,5 @@ echo "sign out:              $(curl -sS -o /dev/null -D - -H "Cookie: session_to
 sleep 0.2; f0=$(stat fast)
 echo "the old cookie:        $(curl -sS -o /dev/null -w '%{http_code} -> %{redirect_url}' -H "Cookie: session_token=$TOKEN" $U/rooms/$R) (served fast: $(( $(stat fast) - f0 )))"
 echo "  sessions for kevin: $(q "select count(*) from Session where user = $KU")"
-curl -sS $U/_etch/stats; echo
+curl -sS $U/_burin/stats; echo
 grep -v "^started" $D/server.log | head -10 || true
