@@ -409,6 +409,8 @@ pub struct Stats {
     /// list blocks made, and the writer's microseconds compressing them
     pub blocks: AtomicU64,
     pub block_us: AtomicU64,
+    /// batches that changed nothing kept (no new snapshot)
+    pub quiet: AtomicU64,
     /// kept pages the scrubber compared with a fresh build, and the ones it found different (and
     /// rebuilt): a missed edge
     pub scrubbed: AtomicU64,
@@ -642,8 +644,8 @@ impl<G: Glue> App<G> {
             let st = &self.stats;
             let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
             let s = format!(
-                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"rendered":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"blocks":{},"block_us":{},"kept":{},"version":{}}}"#,
-                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.rendered), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced), g(&st.blocks), g(&st.block_us),
+                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"rendered":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"blocks":{},"block_us":{},"quiet":{},"kept":{},"version":{}}}"#,
+                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.rendered), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced), g(&st.blocks), g(&st.block_us), g(&st.quiet),
                 self.snap.load().regs.iter().map(|r| r.len()).sum::<usize>(), self.snap.load().version
             );
             return respond(out, 200, "application/json", &[], s.as_bytes());
@@ -917,6 +919,28 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
         tx.commit().expect("commit");
         stats.commits.fetch_add(1, Ordering::SeqCst);
         let t_commit = t0.elapsed();
+        // a batch that changed nothing kept (a member marking a room read: no piece, list or
+        // audience reads what it wrote): the published snapshot is still right, so it isn't
+        // copied and swapped (copying it is most of such a batch's cost)
+        if warm.is_empty() && keep.is_empty() && deltas.list.iter().all(|d| matches!(d.0, 1 | 6 | 15)) {
+            for &(op, _, key, _) in &deltas.list {
+                if op == 15 {
+                    if key == i64::MIN {
+                        viewers.clear();
+                    } else {
+                        viewers.remove(&key);
+                    }
+                }
+            }
+            stats.published.store(stats.commits.load(Ordering::SeqCst), Ordering::SeqCst);
+            stats.batches.fetch_add(1, Ordering::Relaxed);
+            stats.quiet.fetch_add(1, Ordering::Relaxed);
+            stats.acts.fetch_add(replies.iter().filter(|r: &&(SyncSender<_>, Result<Done, &str>)| r.1.is_ok()).count() as u64, Ordering::Relaxed);
+            for (to, r) in replies {
+                let _ = to.send(r);
+            }
+            continue;
+        }
         let mut next = cur.next();
         let mut forwarded: HashMap<i64, i64> = HashMap::new();
         let mut recheck: HashSet<(usize, i64)> = HashSet::new();

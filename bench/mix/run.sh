@@ -105,7 +105,9 @@ phase() { # name rate secs
     console.log(JSON.stringify({ phase: process.argv[6], posts_per_s: Number(process.argv[7]), reads_per_s: r.reads.per_s, reads_invalid: r.reads.invalid, read_errors: r.reads.errors,
       cpu_ms_per_read: +(cpu * 1000 / Math.max(1, ok)).toFixed(3), server_util: +(cpu / (secs * Number(process.argv[8]))).toFixed(2),
       read_p50_ms: r.reads.p50_ms, read_p99_ms: r.reads.p99_ms, avg_bytes: r.reads.avg_bytes, rooms_read: r.reads.rooms_read, people_reading: r.reads.people_reading,
-      posts_ok: r.posts.ok, posts_sent: r.posts.sent, post_p50_ms: r.posts.p50_ms, post_p99_ms: r.posts.p99_ms, ...etch }));
+      posts_ok: r.posts.ok, posts_sent: r.posts.sent, post_p50_ms: r.posts.p50_ms, post_p99_ms: r.posts.p99_ms,
+      sidebars_per_s: r.sidebars?.per_s ?? null, sidebar_p99_ms: r.sidebars?.p99_ms ?? null, sidebar_bytes: r.sidebars?.avg_bytes ?? null,
+      marked_read: r.marked_read ?? 0, sessions: r.sessions ?? null, secs: r.secs, model: r.model ?? null, ...etch }));
   ' "$OUT/$1.json" "$C0" "$C1" "$S1" "$S0" "$1" "$2" "$NCPU" | tee -a "$OUT/summary.jsonl"
 }
 phase cold 0 "$SECS"

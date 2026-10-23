@@ -117,7 +117,11 @@ fn the_fast_path_allocates_and_frees_nothing_and_copies_only_headers() {
         std::thread::sleep(std::time::Duration::from_millis(50));
         // read before counting starts (reading it allocates)
         let trace = std::env::var("ETCH_TRACE_ALLOCS").map(|v| v == "1").unwrap_or(false);
-        for _ in 0..3 {
+        for i in 0..3 {
+            // apart, so a request lands in a new second (its Date header is made again)
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
             COUNTED.with(|c| c.set(true));
             let before = ALLOCS.load(Ordering::SeqCst);
             TRACE.store(trace, Ordering::SeqCst);

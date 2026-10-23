@@ -41,10 +41,27 @@ pub fn http_date(b: &mut Vec<u8>) {
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if c.0 != secs {
-            let s = httpdate::fmt_http_date(now);
-            c.1.copy_from_slice(&s.as_bytes()[..29]);
-            c.0 = secs;
+            // formatted into the cached bytes themselves: no String (a request crossing into a
+            // new second allocated one)
+            use std::io::Write;
+            let cache = &mut *c;
+            let mut w = &mut cache.1[..];
+            let _ = write!(w, "{}", httpdate::HttpDate::from(now));
+            cache.0 = secs;
         }
         b.extend_from_slice(&c.1);
     });
+}
+
+#[cfg(test)]
+mod date_tests {
+    #[test]
+    fn the_date_header_is_httpdates_format() {
+        let mut b = vec![];
+        super::http_date(&mut b);
+        let s = String::from_utf8(b).unwrap();
+        assert_eq!(s.len(), 29);
+        assert!(httpdate::parse_http_date(&s).is_ok(), "{s}");
+        assert!(s.ends_with(" GMT"), "{s}");
+    }
 }

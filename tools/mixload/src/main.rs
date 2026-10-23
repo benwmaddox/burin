@@ -1,19 +1,30 @@
 //! The mixed benchmark's load: many people reading many rooms, at different rates, while some of
-//! them post. Plain HTTP/1.1 to one server; one JSON object on stdout.
+//! them post, each acting as a browser does. Plain HTTP/1.1 to one server; one JSON object on
+//! stdout.
 //!
 //!   mixload --base URL --people people.json --app etch|crudspec|rails|rust|flow
 //!           [--cookies cookies.json] [--conc 32] [--duration 10] [--post-rate 0] [--gzip 1]
-//!           [--check-every 20] [--seed 1]
+//!           [--check-every 20] [--seed 1] [--visits 20] [--sidebar-reload 0.05] [--sidebar PATH|none]
 //!
-//! Readers (`--conc`, closed loop): each request is someone chosen by how active they are (their
-//! weight), reading one of their rooms chosen by how popular it is. Posters (`--post-rate`, open
-//! loop): someone (by weight) posts to one of their rooms. etch and crudspec sign in with a
-//! session token (people.json); the others with a cookie and CSRF token per person
-//! (`--cookies`: {"<id>": {"cookie": "...", "csrf": "..."}}).
+//! Readers (`--conc`, closed loop) are browser sessions, one after another: someone chosen by how
+//! active they are (their weight) opens the app at one of their rooms (chosen by how popular it
+//! is): the page, then the sidebar's frame where the app has one (Rails' /users/me/sidebar, asked
+//! with Turbo-Frame: user_sidebar; crudspec builds its sidebar into every page). Then they visit
+//! rooms (`--visits` pages a session on average): a Turbo visit asks for the page only, the frame
+//! is kept; after a visit the sidebar is reloaded with probability `--sidebar-reload` (Rails
+//! reloads it when the tab is shown again). etch's page says when the room was unread for the
+//! viewer, and its script marks it read: so does this. Static files are never asked for (a
+//! browser keeps them).
 //!
-//! Fail closed: a read counts only with status 200 and a page; every `--check-every`th read is
-//! also decoded and must show the room it asked for and its messages. A post counts only when the
-//! server says it worked.
+//! Posters (`--post-rate`, open loop): someone (by weight) posts to one of their rooms, as the
+//! browser's form does: etch and crudspec answer with a redirect, which the browser follows (the
+//! post's time includes that page); Rails' composer asks for a Turbo Stream and gets no page.
+//! etch and crudspec sign in with a session token (people.json); the others with a cookie and
+//! CSRF token per person (`--cookies`: {"<id>": {"cookie": "...", "csrf": "..."}}).
+//!
+//! Fail closed: a read counts only with status 200 and a page; every `--check-every`th page is
+//! also decoded and must show the room it asked for; every sidebar must be the frame with rooms
+//! in it. A post counts only when the server says it worked (and the page it leads to loads).
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -106,26 +117,57 @@ fn hist() -> Histogram<u64> {
     Histogram::new_with_bounds(1, 60_000_000, 3).unwrap()
 }
 
-/// A read page's check: the room it asked for, and messages.
-fn page_ok(r: &Resp, room: i64) -> bool {
+/// A response's text (gzip decoded; empty when it isn't valid gzip).
+fn body_text(r: &Resp) -> String {
     let gz = r.headers.get("content-encoding").map(|v| v.as_bytes() == b"gzip").unwrap_or(false);
-    let body = if gz {
+    if gz {
         let mut out = Vec::new();
         if flate2::read::GzDecoder::new(&r.body[..]).read_to_end(&mut out).is_err() {
-            return false;
+            return String::new();
         }
-        out
+        String::from_utf8_lossy(&out).into_owned()
     } else {
-        r.body.to_vec()
-    };
-    let s = String::from_utf8_lossy(&body);
-    // the room it asked for (a room may have no messages yet)
-    s.contains(&format!("/rooms/{room}"))
+        String::from_utf8_lossy(&r.body).into_owned()
+    }
+}
+
+/// A page's head: its first bytes, decoded (what a meta tag is looked for in; cheap, so the load
+/// generator doesn't spend its cores decoding whole pages).
+fn head_text(r: &Resp) -> String {
+    const N: u64 = 8192;
+    let gz = r.headers.get("content-encoding").map(|v| v.as_bytes() == b"gzip").unwrap_or(false);
+    let mut out = Vec::new();
+    if gz {
+        let _ = flate2::read::GzDecoder::new(&r.body[..]).take(N).read_to_end(&mut out);
+    } else {
+        out.extend_from_slice(&r.body[..r.body.len().min(N as usize)]);
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A read page's check: the room it asked for (a room may have no messages yet).
+fn page_ok(r: &Resp, room: i64) -> bool {
+    body_text(r).contains(&format!("/rooms/{room}"))
+}
+
+/// A sidebar frame's check: the frame, with the viewer's rooms in it.
+fn sidebar_ok(r: &Resp) -> bool {
+    let s = body_text(r);
+    s.contains("user_sidebar") && s.contains("href=\"/rooms/")
+}
+
+/// A redirect's target, as a path on this server.
+fn location(r: &Resp, addr: &str) -> Option<String> {
+    let l = r.headers.get("location")?.to_str().ok()?;
+    let l = l.strip_prefix("http://").map(|x| x.strip_prefix(addr).unwrap_or(x)).unwrap_or(l);
+    l.starts_with('/').then(|| l.to_string())
 }
 
 fn arg<'a>(a: &'a HashMap<String, String>, k: &str) -> Option<&'a str> {
     a.get(k).map(String::as_str)
 }
+
+const ACCEPT_PAGE: &str = "text/html, application/xhtml+xml";
 
 #[tokio::main]
 async fn main() -> Res<()> {
@@ -146,6 +188,15 @@ async fn main() -> Res<()> {
     let gzip = arg(&a, "gzip").map(|v| v != "0").unwrap_or(true);
     let check_every: u64 = arg(&a, "check-every").and_then(|v| v.parse().ok()).unwrap_or(20);
     let seed: u64 = arg(&a, "seed").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let visits: f64 = arg(&a, "visits").and_then(|v| v.parse().ok()).unwrap_or(20.0);
+    let sidebar_reload: f64 = arg(&a, "sidebar-reload").and_then(|v| v.parse().ok()).unwrap_or(0.05);
+    // where the app's sidebar frame is (none: it's built into every page)
+    let sidebar: Option<String> = match arg(&a, "sidebar") {
+        Some("none") => None,
+        Some(p) => Some(p.to_string()),
+        None if app == "crudspec" => None,
+        None => Some("/users/me/sidebar".to_string()),
+    };
 
     let pj: Value = serde_json::from_str(&std::fs::read_to_string(arg(&a, "people").ok_or("--people")?)?)?;
     let cookies: Value = match arg(&a, "cookies") {
@@ -193,19 +244,24 @@ async fn main() -> Res<()> {
     let read_hist = Arc::new(Mutex::new(hist()));
     let statuses = Arc::new(Mutex::new(HashMap::<u16, u64>::new()));
     let seen = Arc::new(Mutex::new((HashSet::<i64>::new(), HashSet::<i64>::new())));
+    let (sb_ok, sb_bytes, marked, sessions) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let sb_hist = Arc::new(Mutex::new(hist()));
 
-    // the readers
+    // the readers: browser sessions, one after another
     let mut tasks = vec![];
     for w in 0..conc {
-        let (addr, people, pcum, ae) = (addr.clone(), people.clone(), pcum.clone(), ae.clone());
+        let (addr, people, pcum, ae, sidebar, app) = (addr.clone(), people.clone(), pcum.clone(), ae.clone(), sidebar.clone(), app.clone());
         let (ok, invalid, errors, checked, bytes, read_hist, statuses, seen) = (ok.clone(), invalid.clone(), errors.clone(), checked.clone(), bytes.clone(), read_hist.clone(), statuses.clone(), seen.clone());
+        let (sb_ok, sb_bytes, marked, sessions, sb_hist) = (sb_ok.clone(), sb_bytes.clone(), marked.clone(), sessions.clone(), sb_hist.clone());
         tasks.push(tokio::spawn(async move {
             let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) ^ (w as u64 + 1).wrapping_mul(0xD1B54A32D192ED03) | 1);
-            let mut h = hist();
+            let (mut h, mut hs) = (hist(), hist());
             let mut st = HashMap::<u16, u64>::new();
             let (mut rooms_seen, mut people_seen) = (HashSet::new(), HashSet::new());
             let mut conn: Option<SendRequest<Full<Bytes>>> = None;
             let mut n = 0u64;
+            // the session: whose, and how many pages are left in it (0: the next opens the app)
+            let (mut who, mut left) = (0usize, 0u64);
             while Instant::now() < deadline {
                 if conn.is_none() {
                     match connect(&addr).await {
@@ -217,10 +273,19 @@ async fn main() -> Res<()> {
                         }
                     }
                 }
-                let p = &people[pick_cum(&pcum, rng.next())];
+                let opening = left == 0;
+                if opening {
+                    who = pick_cum(&pcum, rng.next());
+                    // a geometric number of pages, `visits` on average, at least one
+                    let q = 1.0 - 1.0 / visits.max(1.0);
+                    left = if q <= 0.0 { 1 } else { 1 + (rng.next().max(1e-12).ln() / q.ln()).floor() as u64 };
+                    sessions.fetch_add(1, Ordering::Relaxed);
+                }
+                let p = &people[who];
                 let room = p.rooms[pick_cum(&p.cum, rng.next())];
+                left -= 1;
                 let t0 = Instant::now();
-                match send(conn.as_mut().unwrap(), &addr, "GET", &format!("/rooms/{room}"), &[("cookie", p.cookie.clone()), ("accept-encoding", ae.clone())], Bytes::new()).await {
+                match send(conn.as_mut().unwrap(), &addr, "GET", &format!("/rooms/{room}"), &[("cookie", p.cookie.clone()), ("accept-encoding", ae.clone()), ("accept", ACCEPT_PAGE.into())], Bytes::new()).await {
                     Ok(r) => {
                         h.record(t0.elapsed().as_micros().max(1) as u64).ok();
                         *st.entry(r.status).or_default() += 1;
@@ -238,17 +303,63 @@ async fn main() -> Res<()> {
                         } else {
                             invalid.fetch_add(1, Ordering::Relaxed);
                         }
-                        if r.headers.get("connection").map(|v| v == "close").unwrap_or(false) {
+                        let close = r.headers.get("connection").map(|v| v == "close").unwrap_or(false);
+                        // etch's page script: the room was unread for the viewer, so it marks it read
+                        if good && !close && app == "etch" && head_text(&r).contains("<meta name=\"current-room-unread\" content=\"true\">") {
+                            let body = format!("room={room}");
+                            let referer = format!("http://{addr}/rooms/{room}");
+                            match send(conn.as_mut().unwrap(), &addr, "POST", "/_do/read_room", &[("cookie", p.cookie.clone()), ("content-type", "application/x-www-form-urlencoded".into()), ("referer", referer)], Bytes::from(body)).await {
+                                Ok(rr) => {
+                                    if rr.headers.get("x-etch-outcome").map(|v| v == "ok").unwrap_or(false) {
+                                        marked.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                Err(_) => {
+                                    errors.fetch_add(1, Ordering::Relaxed);
+                                    conn = None;
+                                    continue;
+                                }
+                            }
+                        }
+                        if close {
                             conn = None;
+                            continue;
                         }
                     }
                     Err(_) => {
                         errors.fetch_add(1, Ordering::Relaxed);
                         conn = None;
+                        continue;
+                    }
+                }
+                // the sidebar's frame: when the app opens, and now and then after a visit
+                if let Some(path) = &sidebar {
+                    if opening || rng.next() < sidebar_reload {
+                        let t1 = Instant::now();
+                        match send(conn.as_mut().unwrap(), &addr, "GET", path, &[("cookie", p.cookie.clone()), ("accept-encoding", ae.clone()), ("accept", ACCEPT_PAGE.into()), ("turbo-frame", "user_sidebar".into())], Bytes::new()).await {
+                            Ok(r) => {
+                                hs.record(t1.elapsed().as_micros().max(1) as u64).ok();
+                                *st.entry(r.status).or_default() += 1;
+                                if r.status == 200 && sidebar_ok(&r) {
+                                    sb_ok.fetch_add(1, Ordering::Relaxed);
+                                    sb_bytes.fetch_add(r.body.len() as u64, Ordering::Relaxed);
+                                } else {
+                                    invalid.fetch_add(1, Ordering::Relaxed);
+                                }
+                                if r.headers.get("connection").map(|v| v == "close").unwrap_or(false) {
+                                    conn = None;
+                                }
+                            }
+                            Err(_) => {
+                                errors.fetch_add(1, Ordering::Relaxed);
+                                conn = None;
+                            }
+                        }
                     }
                 }
             }
             read_hist.lock().unwrap().add(&h).unwrap();
+            sb_hist.lock().unwrap().add(&hs).unwrap();
             let mut s = statuses.lock().unwrap();
             for (k, v) in st {
                 *s.entry(k).or_default() += v;
@@ -286,24 +397,40 @@ async fn main() -> Res<()> {
                 inflight.push(tokio::spawn(async move {
                     let t0 = Instant::now();
                     let Ok(mut c) = connect(&addr).await else { return };
-                    let r = if app == "etch" || app == "crudspec" {
+                    let token_app = app == "etch" || app == "crudspec";
+                    let r = if token_app {
                         let body = format!("room={room}&body={}&client_id=mix-{k}", urlencode(&text));
-                        send(&mut c, &addr, "POST", "/_do/post_message", &[("cookie", cookie), ("content-type", "application/x-www-form-urlencoded".into())], Bytes::from(body)).await
+                        // from the room's page (the browser sends it as the referer)
+                        let referer = format!("http://{addr}/rooms/{room}");
+                        send(&mut c, &addr, "POST", "/_do/post_message", &[("cookie", cookie.clone()), ("content-type", "application/x-www-form-urlencoded".into()), ("accept", "text/vnd.turbo-stream.html, text/html, application/xhtml+xml".into()), ("referer", referer)], Bytes::from(body)).await
                     } else {
                         let body = format!("message%5Bbody%5D={}&message%5Bclient_message_id%5D=mix-{k}-{}", urlencode(&text), room);
-                        send(&mut c, &addr, "POST", &format!("/rooms/{room}/messages"), &[("cookie", cookie), ("content-type", "application/x-www-form-urlencoded".into()), ("x-csrf-token", csrf), ("accept", "text/vnd.turbo-stream.html, text/html".into())], Bytes::from(body)).await
+                        send(&mut c, &addr, "POST", &format!("/rooms/{room}/messages"), &[("cookie", cookie.clone()), ("content-type", "application/x-www-form-urlencoded".into()), ("x-csrf-token", csrf), ("accept", "text/vnd.turbo-stream.html, text/html".into())], Bytes::from(body)).await
                     };
-                    let us = t0.elapsed().as_micros().max(1) as u64;
-                    if let Ok(r) = r {
-                        let good = if app == "etch" || app == "crudspec" {
-                            r.headers.get("x-etch-outcome").or(r.headers.get("x-crudspec-outcome")).map(|v| v == "ok").unwrap_or(false)
-                        } else {
-                            (200..400).contains(&r.status)
-                        };
-                        if good {
-                            posts_ok.fetch_add(1, Ordering::Relaxed);
-                            post_hist.lock().unwrap().record(us).ok();
+                    let good = match r {
+                        Ok(r) if token_app => {
+                            let said_ok = r.headers.get("x-etch-outcome").or(r.headers.get("x-crudspec-outcome")).map(|v| v == "ok").unwrap_or(false);
+                            // the browser follows redirects to the page they lead to
+                            let mut good = said_ok;
+                            let mut at = r;
+                            for _ in 0..3 {
+                                if !good || !(300..400).contains(&at.status) {
+                                    break;
+                                }
+                                let Some(to) = location(&at, &addr) else { good = false; break };
+                                match send(&mut c, &addr, "GET", &to, &[("cookie", cookie.clone()), ("accept", ACCEPT_PAGE.into()), ("accept-encoding", "gzip".into())], Bytes::new()).await {
+                                    Ok(next) => at = next,
+                                    Err(_) => good = false,
+                                }
+                            }
+                            good && at.status == 200
                         }
+                        Ok(r) => (200..400).contains(&r.status),
+                        Err(_) => false,
+                    };
+                    if good {
+                        posts_ok.fetch_add(1, Ordering::Relaxed);
+                        post_hist.lock().unwrap().record(t0.elapsed().as_micros().max(1) as u64).ok();
                     }
                 }));
             }
@@ -318,20 +445,26 @@ async fn main() -> Res<()> {
     poster.await?;
     let elapsed = start.elapsed().as_secs_f64();
     let h = read_hist.lock().unwrap();
+    let sh = sb_hist.lock().unwrap();
     let ph = post_hist.lock().unwrap();
     let ms = |h: &Histogram<u64>, q: f64| if h.is_empty() { Value::Null } else { json!((h.value_at_quantile(q) as f64 / 10.0).round() / 100.0) };
     let sn = seen.lock().unwrap();
     let okn = ok.load(Ordering::Relaxed);
+    let sbn = sb_ok.load(Ordering::Relaxed);
     println!(
         "{}",
         json!({
             "app": app, "conc": conc, "secs": (elapsed * 100.0).round() / 100.0, "people": people.len(),
+            "model": { "visits": visits, "sidebar_reload": sidebar_reload, "sidebar": sidebar },
             "reads": { "ok": okn, "per_s": ((okn as f64 / elapsed) * 10.0).round() / 10.0, "invalid": invalid.load(Ordering::Relaxed),
                        "errors": errors.load(Ordering::Relaxed), "checked": checked.load(Ordering::Relaxed),
                        "statuses": statuses.lock().unwrap().iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
                        "p50_ms": ms(&h, 0.5), "p99_ms": ms(&h, 0.99), "p999_ms": ms(&h, 0.999),
                        "avg_bytes": if okn > 0 { bytes.load(Ordering::Relaxed) / okn } else { 0 },
                        "rooms_read": sn.0.len(), "people_reading": sn.1.len() },
+            "sidebars": { "ok": sbn, "per_s": ((sbn as f64 / elapsed) * 10.0).round() / 10.0, "p50_ms": ms(&sh, 0.5), "p99_ms": ms(&sh, 0.99),
+                          "avg_bytes": if sbn > 0 { sb_bytes.load(Ordering::Relaxed) / sbn } else { 0 } },
+            "sessions": sessions.load(Ordering::Relaxed), "marked_read": marked.load(Ordering::Relaxed),
             "posts": { "sent": posted.load(Ordering::Relaxed), "ok": posts_ok.load(Ordering::Relaxed), "p50_ms": ms(&ph, 0.5), "p99_ms": ms(&ph, 0.99) }
         })
     );
