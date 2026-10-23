@@ -20,8 +20,8 @@ for who in david:$TOKEN jason:jasontokenjasontokenjasontoken00; do
   sleep 0.2
   curl -sS -D $OUT/$name.headers -o $OUT/$name-2.html -H "Cookie: session_token=$tok" http://127.0.0.1:$PORT/rooms/486777696
   # gzip, decoded by curl: must be the same page
-  # the on-demand part: who the viewer could start a direct room with
-  curl -sS -o $OUT/$name-ping.html -H "Cookie: session_token=$tok" http://127.0.0.1:$PORT/rooms/486777696/ping_suggestions
+  # the sidebar's frame, as the browser asks for it (once; it keeps it across visits)
+  curl -sS -o $OUT/$name-sidebar.html -H "Cookie: session_token=$tok" -H "Turbo-Frame: user_sidebar" http://127.0.0.1:$PORT/users/me/sidebar
   curl -sS --compressed -D $OUT/$name-gz.headers -o $OUT/$name-3.html -H "Cookie: session_token=$tok" http://127.0.0.1:$PORT/rooms/486777696
 done
 curl -sS http://127.0.0.1:$PORT/_etch/stats; echo
@@ -32,9 +32,9 @@ G='/mnt/d/code/etch/data/golden-pages'; O='/tmp/etch-golden'
 def norm(t):
     return t
 ok = True
-for name, g in [('david', 'room.html'), ('jason', 'room-jason.html')]:
+for name, g in [('david', 'room.html'), ('jason', 'room-jason.html'), ('david', 'sidebar.html'), ('jason', 'sidebar-jason.html')]:
     want = norm(open(f'{G}/{g}', encoding='utf-8').read())
-    for k in ('1', '2', '3'):
+    for k in (('sidebar',) if g.startswith('sidebar') else ('1', '2', '3')):
         got = open(f'{O}/{name}-{k}.html', encoding='utf-8').read()
         if got == want:
             print(f'{name}-{k}: identical ({len(got.encode())} bytes)')

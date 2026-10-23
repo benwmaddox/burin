@@ -7,3 +7,4 @@ tools/loadgen
 data/campfire/
 data/campfire-golden/
 tools/mixload/target/
+tools/browser/node_modules/

@@ -1,20 +1,32 @@
-# The page's viewer script (apps/campfire/scripts/viewer.js.html), applied here: the new page with
-# what it shows made visible, and what stays hidden removed, must equal the old golden page (built
-# on the server per viewer). Proves the move to the client changed nothing a viewer sees.
-#   python3 scripts/golden-viewer-js.py <new page> <old golden page>
+# What a browser shows, rebuilt here from the room page as served (a shell, as Rails Campfire's)
+# and its sidebar frame (/users/me/sidebar, which the browser puts into the shell's empty frame),
+# with the page's script applied (apps/campfire/scripts/viewer.js.html): must equal the old page,
+# built per viewer on the server. Proves the page's new shape changed nothing a viewer sees.
+#   python3 scripts/golden-viewer-js.py <room page> <sidebar frame> <old page>
+#
+# Declared differences (removed before comparing): Turbo's script and the meta tags in the head
+# (what the script reads), the frame's wrapper, and the hidden __h fields the old sidebar's
+# "start a ping" forms carried (etch never read them).
 import re, sys
-new, old = open(sys.argv[1], encoding='utf-8').read(), open(sys.argv[2], encoding='utf-8').read()
-me = re.search(r'<aside id="sidebar" data-user-id="(\d+)" data-role="([^"]*)"(?: data-read-room="\d+")?>', new)
-uid, admin = me.group(1), me.group(2) == 'administrator'
-page = new.replace(me.group(0), '<aside id="sidebar">')
-page = page.replace(open('/mnt/d/code/etch/apps/campfire/scripts/viewer.js.html', encoding='utf-8').read(), '')
-# the part loaded on demand (argv[3]: what its route answered), put where the script puts it
-if len(sys.argv) > 3:
-    ping = open(sys.argv[3], encoding='utf-8').read()
-    page, n = re.subn(r'<div class="" data-live-list data-ping-suggestions="[^"]*">', lambda m: '<div class="" data-live-list>' + ping, page, count=1)
-    assert n == 1, 'no on-demand container'
-# the room being read is marked read by the script (no visible change)
-page = re.sub(r' data-read-room="\d+"', '', page)
+new, side, old = (open(p, encoding='utf-8').read() for p in sys.argv[1:4])
+meta = lambda n: (re.search(r'<meta name="%s" content="([^"]*)">' % n, new) or [None, None])[1]
+uid, admin, room = meta('current-user-id'), meta('current-user-role') == 'administrator', meta('current-room-id')
+assert uid and room, 'no current-user-id or current-room-id meta'
+
+page = new.replace(open('/mnt/d/code/etch/apps/campfire/scripts/viewer.js.html', encoding='utf-8').read(), '')
+page = re.sub(r'<script type="module" src="/assets/turbo\.min\.js\?v=[0-9a-f]+"></script>', '', page)
+page = re.sub(r'<meta name="(current-room-id|current-user-id|current-user-name|current-user-role|current-room-unread)" content="[^"]*">', '', page)
+
+# the frame filled with what /users/me/sidebar answered
+m = re.fullmatch(r'<turbo-frame id="user_sidebar">(.*)</turbo-frame>\n', side, re.S)
+assert m, 'the sidebar answer is not one user_sidebar frame'
+inner = m.group(1)
+# the script: the room being read is never shown unread
+inner = inner.replace('<a href="/rooms/%s" class="align-center gap room btn txt-nowrap unread">' % room, '<a href="/rooms/%s" class="align-center gap room btn txt-nowrap">' % room)
+inner = inner.replace('<a href="/rooms/%s" class="direct unread">' % room, '<a href="/rooms/%s" class="direct">' % room)
+frame = '<aside id="sidebar"><turbo-frame id="user_sidebar" src="/users/me/sidebar" target="_top" data-turbo-permanent="true"></turbo-frame></aside>\n'
+assert page.count(frame) == 1, 'no sidebar frame in the page'
+page = page.replace(frame, '<aside id="sidebar">' + inner + '</aside>\n')
 
 # each message: its author, then its edit controls shown or removed, and "mine"
 def message(m):
@@ -32,6 +44,9 @@ page = re.sub(r'<div id="message_[^"]*" class="message message--formatted".*?(?=
 def boost(m):
     return m.group(0).replace(' boost__remove" data-booster-id="%s" hidden>' % uid, '" >') if 'data-booster-id="%s"' % uid in m.group(0) else ''
 page = re.sub(r'<form method="post" action="/_do/unboost" class="flex-inline boost__remove" data-booster-id="\d+" hidden>.*?</button></form>', boost, page, flags=re.S)
+
+# the old page, less what's declared above
+old = re.sub(r'(<form method="post" action="/_do/create_direct_room" class="flex-inline" ><input type="hidden" name="__arg_users" value="@\d+">)<input type="hidden" name="__h" value="[^"]*">', r'\1', old)
 if page == old:
     print('equal after the script: identical to the old page (%d bytes)' % len(old.encode()))
 else:

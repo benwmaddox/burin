@@ -3,6 +3,7 @@
 
 pub mod abi;
 pub mod app;
+pub mod files;
 pub mod gz;
 pub mod html;
 pub mod keys;

@@ -25,7 +25,7 @@ fn original_room(): Room = first(Room order by .created, .seq)
 screen room(room: Room) at "/rooms/{room}"
   require member(viewer, room) else go "/"
   cookie last_room = text(room.id)
-<<<{{head_top()}}{{room_title(room)}}{{head_mid()}}{{room_title(room)}}{{head_end(room)}}{{invitation(room)}}<div class="messages" data-live-list>{{for m in room_messages(room)}}{{message(m)}}{{end}}{{room_tail(room)}}{{sidebar(room)}}{{page_end()}}>>>
+<<<{{head_top()}}{{room_title(room)}}{{head_mid(room)}}{{viewer_meta(room)}}{{head_body()}}{{room_title(room)}}{{head_end(room)}}{{invitation(room)}}<div class="messages" data-live-list>{{for m in room_messages(room)}}{{message(m)}}{{end}}{{room_tail(room)}}{{sidebar_frame()}}{{page_end()}}>>>
 
 fragment icon(name: Text) <<<<img src="{{asset(name)}}" width="20" height="20" aria-hidden="true" class="colorize--black">>>>
 
@@ -37,9 +37,20 @@ fragment head_top() <<<\
 
 fragment room_title(room: Room) per viewer <<<{{display_name(room)}}>>>
 
-fragment head_mid() <<<\
+// Turbo (as Rails Campfire loads it): links and forms become fetches that swap the page's body,
+// keeping the sidebar's frame (data-turbo-permanent) loaded once.
+fragment head_mid(room: Room) <<<\
 </title>{{for css in stylesheets}}<link rel="stylesheet" href="{{asset(css)}}">{{end}}\
-<link rel="alternate" type="text/markdown" href="/llms.txt" title="For AI agents"></head>
+<script type="module" src="{{asset("turbo.min.js")}}"></script><meta name="current-room-id" content="{{room.id}}">\
+<link rel="alternate" type="text/markdown" href="/llms.txt" title="For AI agents">>>>
+
+// Who is reading (Rails' current-user meta tags; the role for the page's script), and whether
+// this room has posts they haven't read (the page's script then marks it read).
+fragment viewer_meta(room: Room) per viewer <<<\
+<meta name="current-user-id" content="{{viewer.id}}"><meta name="current-user-name" content="{{viewer.name}}"><meta name="current-user-role" content="{{viewer.role}}">\
+{{if unread_here(room)}}<meta name="current-room-unread" content="true">{{end}}>>>
+
+fragment head_body() <<<</head>
 <body class="sidebar">
 <a href="#main-content" class="skip-navigation btn">Skip to main content</a>
 <nav id="nav"><div class="btn btn--reversed btn--faux room--current"><h1 class="room__contents txt-medium overflow-ellipsis">>>>
@@ -121,24 +132,10 @@ data-unfurl-src="/_view/unfurl_link?link=" onkeydown="if(event.key==='Enter'&&!e
 <div class="typing-indicator__author spinner"></div></div></div></footer></main>
 >>>
 
-// per viewer: rendered for each request (never kept); it merges the cached pieces it calls. It
-// carries the viewer's id and role for the page's script (scripts/viewer.js.html)
-fragment sidebar(page_room: Room) per viewer <<<\
-<aside id="sidebar" data-user-id="{{viewer.id}}" data-role="{{viewer.role}}"{{if unread_here(page_room)}} data-read-room="{{page_room.id}}"{{end}}><div class="sidebar__container overflow-y overflow-hide-scrollbar"><div class="directs gap overflow-x overflow-hide-scrollbar">\
-<a href="/rooms/directs/new" class="direct direct__new"><div class="avatar avatar--icon">{{icon("messages-add.svg")}}</div>\
-<div class="direct__author flex max-width min-width border-radius pad-inline-half"><span class="for-screen-reader">New</span><span class="txt-small overflow-clip">Ping</span></div></a>\
-<div class="" data-live-list>\
-{{for ms in sidebar_directs()}}<a href="/rooms/{{ms.room.id}}" class="direct{{if unread(ms) and ms.room != page_room}} unread{{end}}"><div class="avatar__group">\
-{{for o in others(ms.room) limit 4}}<span class="avatar"><img src="/avatars/User/{{o.user.id}}" alt=""></span>{{end}}</div>\
-<div class="direct__author flex align-center gap max-width min-width border-radius txt-small"><span class="txt-nowrap overflow-ellipsis">{{direct_label(ms.room)}}</span></div></a>{{end}}\
-</div><div class="" data-live-list data-ping-suggestions="/rooms/{{page_room.id}}/ping_suggestions">\
-</div></div><div class="rooms position-relative flex flex-column gap"><div class="" data-live-list>\
-{{for ms in sidebar_open()}}<a href="/rooms/{{ms.room.id}}" class="align-center gap room btn txt-nowrap{{if unread(ms) and ms.room != page_room}} unread{{end}}">\
-<span class="overflow-ellipsis">{{ms.room.name}}</span></a>{{end}}</div>\
-{{if may_create_rooms(viewer)}}<a href="/rooms/opens/new" class="rooms__new-btn btn room align-center gap txt-reversed" title="New Chat Room">{{icon("add.svg")}}</a>{{end}}\
-</div></div><div class="flex align-end sidebar__tools gap justify-end"><a href="/users/me/profile" class="btn avatar flex-item-no-shrink sidebar__tool">\
-<img aria-hidden="true" src="/avatars/User/{{viewer.id}}" width="48" height="48"><span class="for-screen-reader">My Settings</span></a>\
-<a href="/account/edit" class="btn align-center gap txt-reversed sidebar__tool">{{icon("settings.svg")}}<span class="for-screen-reader">Account Settings</span></a></div></aside>
+// The sidebar, as Rails Campfire has it: an empty frame the browser fills from /users/me/sidebar,
+// kept across visits (data-turbo-permanent): loaded once, not built into every page.
+fragment sidebar_frame() <<<\
+<aside id="sidebar"><turbo-frame id="user_sidebar" src="/users/me/sidebar" target="_top" data-turbo-permanent="true"></turbo-frame></aside>
 >>>
 
 fragment page_end() <<<{{include("scripts/viewer.js.html")}}\
@@ -160,14 +157,30 @@ fragment invitation(room: Room) <<<\
 {{icon("copy-paste.svg")}}<span class="for-screen-reader">Copy join link</span></button></div></div>\
 </div></div></div>{{end}}>>>
 
-// The people the viewer could start a direct room with: loaded on demand (the page's script asks
-// the first time the direct rooms' strip is pointed at or focused), not built for every page.
-screen ping_suggestions(room: Room) at "/rooms/{room}/ping_suggestions" cold
-  require member(viewer, room) else go "/"
-<<<{{ping_suggestion_list(room)}}>>>
+// The sidebar's frame (users/sidebars/show.html.erb): the viewer's rooms, unread ones marked, and
+// people they could start a direct room with. Rendered per request: the browser asks once and
+// keeps it (the page's script never shows the room being read as unread).
+screen user_sidebar() at "/users/me/sidebar" cold
+<<<{{sidebar_panel()}}>>>
 
-fragment ping_suggestion_list(page_room: Room) per viewer <<<{{for u in direct_placeholders()}}<form method="post" action="/_do/create_direct_room" class="flex-inline" ><input type="hidden" name="__arg_users" value="@{{u.id}}">\
-<input type="hidden" name="__h" value="{{plain_token(page_room)}}"><button type="submit" class="direct borderless fill-transparent unpad"><div class="avatar">\
+fragment sidebar_panel() per viewer <<<\
+<turbo-frame id="user_sidebar"><div class="sidebar__container overflow-y overflow-hide-scrollbar"><div class="directs gap overflow-x overflow-hide-scrollbar">\
+<a href="/rooms/directs/new" class="direct direct__new"><div class="avatar avatar--icon">{{icon("messages-add.svg")}}</div>\
+<div class="direct__author flex max-width min-width border-radius pad-inline-half"><span class="for-screen-reader">New</span><span class="txt-small overflow-clip">Ping</span></div></a>\
+<div class="" data-live-list>\
+{{for ms in sidebar_directs()}}<a href="/rooms/{{ms.room.id}}" class="direct{{if unread(ms)}} unread{{end}}"><div class="avatar__group">\
+{{for o in others(ms.room) limit 4}}<span class="avatar"><img src="/avatars/User/{{o.user.id}}" alt=""></span>{{end}}</div>\
+<div class="direct__author flex align-center gap max-width min-width border-radius txt-small"><span class="txt-nowrap overflow-ellipsis">{{direct_label(ms.room)}}</span></div></a>{{end}}\
+</div><div class="" data-live-list>{{for u in direct_placeholders()}}<form method="post" action="/_do/create_direct_room" class="flex-inline" ><input type="hidden" name="__arg_users" value="@{{u.id}}">\
+<button type="submit" class="direct borderless fill-transparent unpad"><div class="avatar">\
 <img aria-hidden="true" src="/avatars/User/{{u.id}}" width="48" height="48"></div>\
 <div class="direct__author flex align-center gap max-width min-width border-radius txt-small"><div class="txt-nowrap overflow-ellipsis">\
-<span class="for-screen-reader">Start a ping with</span><span class="">{{first_word(u.name)}}</span></div></div></button></form>{{end}}>>>
+<span class="for-screen-reader">Start a ping with</span><span class="">{{first_word(u.name)}}</span></div></div></button></form>{{end}}\
+</div></div><div class="rooms position-relative flex flex-column gap"><div class="" data-live-list>\
+{{for ms in sidebar_open()}}<a href="/rooms/{{ms.room.id}}" class="align-center gap room btn txt-nowrap{{if unread(ms)}} unread{{end}}">\
+<span class="overflow-ellipsis">{{ms.room.name}}</span></a>{{end}}</div>\
+{{if may_create_rooms(viewer)}}<a href="/rooms/opens/new" class="rooms__new-btn btn room align-center gap txt-reversed" title="New Chat Room">{{icon("add.svg")}}</a>{{end}}\
+</div></div><div class="flex align-end sidebar__tools gap justify-end"><a href="/users/me/profile" class="btn avatar flex-item-no-shrink sidebar__tool">\
+<img aria-hidden="true" src="/avatars/User/{{viewer.id}}" width="48" height="48"><span class="for-screen-reader">My Settings</span></a>\
+<a href="/account/edit" class="btn align-center gap txt-reversed sidebar__tool">{{icon("settings.svg")}}<span class="for-screen-reader">Account Settings</span></a></div></turbo-frame>
+>>>

@@ -6,3 +6,7 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
 The Campfire application in apps/campfire/ reimplements the behavior of ONCE Campfire by
 37signals, LLC, which is distributed under the MIT license. Its assets (apps/campfire/assets/)
 come from Campfire; that license is reproduced in apps/campfire/assets/MIT-LICENSE.
+
+apps/campfire/assets/javascripts/turbo.min.js is Turbo 8.0.13 as bundled by turbo-rails 2.0.16
+(Copyright 2020 Basecamp; Turbo Copyright 37signals LLC), distributed under the MIT license,
+reproduced in apps/campfire/assets/javascripts/TURBO-RAILS-MIT-LICENSE. It is unmodified.

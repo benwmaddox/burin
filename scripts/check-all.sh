@@ -18,4 +18,5 @@ echo "== unread";      bash scripts/unread-check.sh 2>&1 | grep -E "FAIL|PASS"
 echo "== direct";      bash scripts/direct-check.sh 2>&1 | tail -3
 echo "== board";         ETCH_BIN=$HOME/hw/etch-board-release bash scripts/board-check.sh 2>&1 | tail -16
 echo "== numbers";       ETCH_BIN=$HOME/hw/etch-numbers-release bash scripts/numbers-check.sh 2>&1 | grep -E "MISMATCH|PASS|FAIL"
+echo "== browser";     bash scripts/browser-smoke.sh 2>&1 | grep -E "FAIL|PASS"
 echo "== hot path";      bash scripts/hot-path-test.sh 2>&1 | tail -4

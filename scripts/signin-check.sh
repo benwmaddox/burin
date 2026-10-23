@@ -38,8 +38,8 @@ f0=$(stat fast)
 for i in 1 2 3; do curl -sS -o /dev/null -w '%{http_code} ' -H "Cookie: session_token=$TOKEN" $U/rooms/$R; done
 curl -sS -o /dev/null -w '%{http_code} ' --compressed -H "Cookie: session_token=$TOKEN" $U/rooms/$R
 echo "(served fast: $(( $(stat fast) - f0 )) of 4)"
-curl -sS -o $D/k.html -H "Cookie: session_token=$TOKEN" $U/rooms/486777696
-echo "kevin's page shows his sidebar: $(grep -c "/avatars/User/$KU\" width=\"48\" height=\"48\"><span class=\"for-screen-reader\">My Settings" $D/k.html)"
+curl -sS -o $D/k.html -H "Cookie: session_token=$TOKEN" -H "Turbo-Frame: user_sidebar" $U/users/me/sidebar
+echo "kevin's sidebar is his: $(grep -c "/avatars/User/$KU\" width=\"48\" height=\"48\"><span class=\"for-screen-reader\">My Settings" $D/k.html)"
 echo "sign out:              $(curl -sS -o /dev/null -D - -H "Cookie: session_token=$TOKEN" -X POST $U/_do/sign_out | tr -d '\r' | awk '/^[Xx]-[Ee]tch-[Oo]utcome/{o=$2} /^[Ll]ocation/{l=$2} /^[Ss]et-[Cc]ookie/{c=$2} END{printf "%s -> %s %s", o, l, c}')"
 sleep 0.2; f0=$(stat fast)
 echo "the old cookie:        $(curl -sS -o /dev/null -w '%{http_code} -> %{redirect_url}' -H "Cookie: session_token=$TOKEN" $U/rooms/$R) (served fast: $(( $(stat fast) - f0 )))"

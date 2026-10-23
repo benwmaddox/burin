@@ -429,6 +429,8 @@ pub struct App<G: Glue> {
     pub verify: bool,
     pub stats: Arc<Stats>,
     pub session_cookie: &'static [u8],
+    /// the static files (`--assets`), set once at start
+    pub files: std::sync::OnceLock<crate::files::Files>,
     _g: std::marker::PhantomData<G>,
 }
 
@@ -494,7 +496,7 @@ impl<G: Glue> App<G> {
                 }
             });
         }
-        Arc::new(App { ctx, snap, writer: tx, db_path: db_path.to_string(), host: host.to_string(), verify, stats, session_cookie, _g: std::marker::PhantomData })
+        Arc::new(App { ctx, snap, writer: tx, db_path: db_path.to_string(), host: host.to_string(), verify, stats, session_cookie, files: std::sync::OnceLock::new(), _g: std::marker::PhantomData })
     }
 
     fn with_reader<T>(&self, f: impl FnOnce(&Connection) -> T) -> T {
@@ -650,7 +652,10 @@ impl<G: Glue> App<G> {
         if req.method == b"POST" {
             if let Some(name) = path.strip_prefix(b"/_do/") {
                 let name = String::from_utf8_lossy(name).into_owned();
-                let mut form = parse_form(req.body);
+                let mut form = match multipart_boundary(req.content_type) {
+                    Some(b) => parse_multipart(req.body, b),
+                    None => parse_form(req.body),
+                };
                 // hidden arguments come only from here, never from the form
                 form.retain(|(k, _)| !k.starts_with("__verified") && !k.starts_with("__hashed") && k != "__session");
                 let viewer = match (viewer, G::public_act(&name)) {
@@ -790,8 +795,41 @@ fn per_request<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, viewer: i
     }
 }
 
+impl<G: Glue> App<G> {
+    /// A static file: gzip when the browser takes it, kept for a year (its link names its hash).
+    fn file(&self, req: &Req, out: &mut Out) {
+        let Some(f) = self.files.get().and_then(|fs| fs.get(req.path)) else {
+            return respond(out, 404, "text/plain", &[], b"not found");
+        };
+        let (body, gz) = match (&f.gz, req.gzip) {
+            (Some(g), true) => (g, true),
+            _ => (&f.raw, false),
+        };
+        out.push_own(|b| {
+            b.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Length: ");
+            push_int(b, body.len() as u64);
+            b.extend_from_slice(b"\r\nContent-Type: ");
+            b.extend_from_slice(f.ctype.as_bytes());
+            b.extend_from_slice(b"\r\nCache-Control: public, max-age=31536000, immutable\r\n");
+            if f.gz.is_some() {
+                b.extend_from_slice(b"Vary: Accept-Encoding\r\n");
+            }
+            if gz {
+                b.extend_from_slice(b"Content-Encoding: gzip\r\n");
+            }
+            b.extend_from_slice(b"Date: ");
+            http_date(b);
+            b.extend_from_slice(b"\r\n\r\n");
+            b.extend_from_slice(body);
+        });
+    }
+}
+
 impl<G: Glue> crate::Handler for App<G> {
     fn handle(&self, req: &Req, out: &mut Out) {
+        if req.method == b"GET" && req.path.starts_with(b"/assets/") {
+            return self.file(req, out);
+        }
         if !self.fast(req, out) {
             out.reset();
             self.cold(req, out);
@@ -1185,6 +1223,48 @@ pub fn redirect_with(out: &mut Out, to: &str, outcome: Option<&str>, headers: &[
 }
 
 /// application/x-www-form-urlencoded
+/// A multipart/form-data body's boundary (a browser's form with enctype="multipart/form-data").
+fn multipart_boundary(ctype: &[u8]) -> Option<&[u8]> {
+    let s = ctype.strip_prefix(b"multipart/form-data")?;
+    let i = s.windows(9).position(|w| w.eq_ignore_ascii_case(b"boundary="))?;
+    let b = &s[i + 9..];
+    let b = b.split(|&c| c == b';').next()?;
+    let b = b.strip_prefix(b"\"").and_then(|x| x.strip_suffix(b"\"")).unwrap_or(b);
+    (!b.is_empty()).then_some(b)
+}
+
+/// A multipart/form-data body's text fields, by name (a file's part is skipped: no attachments).
+pub fn parse_multipart(body: &[u8], boundary: &[u8]) -> Vec<(String, String)> {
+    let mut delim = b"--".to_vec();
+    delim.extend_from_slice(boundary);
+    let find = |hay: &[u8], needle: &[u8], from: usize| hay.get(from..).and_then(|h| h.windows(needle.len()).position(|w| w == needle)).map(|i| i + from);
+    let mut out = vec![];
+    let Some(mut at) = find(body, &delim, 0) else { return out };
+    loop {
+        at += delim.len();
+        if body.get(at..at + 2) == Some(b"--") {
+            break; // the closing delimiter
+        }
+        let Some(head_end) = find(body, b"\r\n\r\n", at) else { break };
+        let head = &body[at..head_end];
+        let start = head_end + 4;
+        let Some(next) = find(body, &delim, start) else { break };
+        // the part ends with CRLF before the next delimiter
+        let end = if next >= 2 && &body[next - 2..next] == b"\r\n" { next - 2 } else { next };
+        let head = String::from_utf8_lossy(head);
+        let disp = head.lines().find(|l| l.to_ascii_lowercase().starts_with("content-disposition:")).unwrap_or("");
+        let attr = |k: &str| {
+            let pat = format!("{k}=\"");
+            disp.find(&pat).map(|i| &disp[i + pat.len()..]).and_then(|r| r.find('"').map(|j| r[..j].to_string()))
+        };
+        if let (Some(name), None) = (attr("name"), attr("filename")) {
+            out.push((name, String::from_utf8_lossy(&body[start..end.max(start)]).into_owned()));
+        }
+        at = next;
+    }
+    out
+}
+
 pub fn parse_form(body: &[u8]) -> Vec<(String, String)> {
     body.split(|&c| c == b'&')
         .filter(|p| !p.is_empty())
@@ -1249,8 +1329,10 @@ fn asset_urls(dir: &std::path::Path) -> HashMap<String, String> {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
+        // the same order as files::Files::load: a name found twice links the file served
+        let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for p in entries {
             if p.is_dir() {
                 stack.push(p);
             } else if let (Some(name), Ok(bytes)) = (p.file_name().and_then(|n| n.to_str()), std::fs::read(&p)) {
@@ -1307,7 +1389,7 @@ pub fn main<G: Glue>(configs: &[&str], session_cookie: &'static [u8]) {
             other => std::env::var(format!("ETCH_CONFIG_{}", other.to_uppercase())).unwrap_or_default(),
         })
         .collect();
-    let ctx = Arc::new(Ctx { signer: crate::sign::Signer::new(&secret), assets: assets.map(|a| asset_urls(std::path::Path::new(&a))).unwrap_or_default(), configs: values });
+    let ctx = Arc::new(Ctx { signer: crate::sign::Signer::new(&secret), assets: assets.as_ref().map(|a| asset_urls(std::path::Path::new(a))).unwrap_or_default(), configs: values });
     let db_path = dir.join("app.sqlite").to_string_lossy().into_owned();
     // the next seq: past every table's
     let seq = {
@@ -1317,6 +1399,27 @@ pub fn main<G: Glue>(configs: &[&str], session_cookie: &'static [u8]) {
     };
     let scrub_ms: u64 = arg("--scrub-ms").map(|v| v.parse().expect("--scrub-ms N")).unwrap_or(100);
     let app = App::<G>::start(ctx, &db_path, &host, verify, session_cookie, seq, scrub_ms);
+    let _ = app.files.set(assets.as_deref().map(|a| crate::files::Files::load(std::path::Path::new(a))).unwrap_or_else(crate::files::Files::empty));
     println!("started in {} ms ({workers} workers{})", start.elapsed().as_millis(), if verify { ", verifying" } else { "" });
     crate::http::serve(format!("0.0.0.0:{port}").parse().unwrap(), workers, app).expect("serve");
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+
+    #[test]
+    fn multipart_fields_as_a_browser_sends_them() {
+        let ct = b"multipart/form-data; boundary=----WebKitFormBoundaryX1";
+        let b = multipart_boundary(ct).unwrap();
+        assert_eq!(b, b"----WebKitFormBoundaryX1");
+        let body = b"------WebKitFormBoundaryX1\r\nContent-Disposition: form-data; name=\"room\"\r\n\r\n42\r\n\
+------WebKitFormBoundaryX1\r\nContent-Disposition: form-data; name=\"body\"\r\n\r\nline one\r\nline two \xe2\x9c\x93\r\n\
+------WebKitFormBoundaryX1\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"\"\r\nContent-Type: application/octet-stream\r\n\r\n\r\n\
+------WebKitFormBoundaryX1\r\nContent-Disposition: form-data; name=\"empty\"\r\n\r\n\r\n\
+------WebKitFormBoundaryX1--\r\n";
+        let f = parse_multipart(body, b);
+        assert_eq!(f, vec![("room".to_string(), "42".to_string()), ("body".into(), "line one\r\nline two \u{2713}".into()), ("empty".into(), "".into())]);
+        assert!(multipart_boundary(b"application/x-www-form-urlencoded").is_none());
+    }
 }
