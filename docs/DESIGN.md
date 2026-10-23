@@ -404,6 +404,26 @@ stream on its topic as the same bytes. The runtime's side is `crates/burin-rt/sr
 
 The Rails port and the Rust port get the same clients over Action Cable.
 
+**Measured (s7, 23 Oct 2026, `bench/runs/mix-s7-*`; streams reopen every 30 s on average):**
+
+| posts/s | no streams | 117 streams | 1,000 streams |
+|---|---|---|---|
+| Pages/s at 0 | 47.9k | 48.6k | 45.4k |
+| Pages/s at 10 | 39.8k | 39.5k | 35.9k |
+| Pages/s at 50 | 28.9k | 28.2k | 23.1k |
+| Delivery p50 / p99 at 50 | – | 6.1 / 9.8 ms | 7.2 / 12.6 ms |
+
+- 117 streams is one per person in the data; 1,000 is about 8.5 tabs each.
+- Every due post was delivered in every run (85k due at 50 posts/s with 1,000 streams).
+- One stream per person costs nothing measurable. At 1,000 streams, 50 posts/s costs 20% of page
+  throughput, under the 30% kill line but over the 15% target. Nearly all of that cost is the
+  kernel's socket writes: each post's `unread` goes to nearly every stream, and each read signal
+  to all of the reader's tabs, about 90k writes a second. The server's user-space work fell.
+- Each worker writes a wake's events to a stream at once, and finds a signal's few viewers
+  through an index rather than checking every stream. Neither moved the 1,000-stream number.
+- Delivery p50 (about 6 ms) misses the 5 ms target. It is the writer's batch time: a post's own
+  answer takes as long.
+
 **Kill criteria:** p99 over 250 ms, a delivered share under 99%, or more than 30% of page
 throughput lost. Any one of these means rethinking where events are built: the single writer
 building every event, and the workers' inboxes.

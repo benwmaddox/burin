@@ -9,10 +9,13 @@
 #   wsl -d Ubuntu -u root -- bash /mnt/d/code/burin/bench/mix/run.sh <burin|crudspec|rust|rustopt> <run> [secs] [rates…]
 # rust is the Rust port as published (~/linuxbench/rust); rustopt its optimized variant
 # (D:/code/campfire-rust-opt, built by build-rust-opt.sh; RUSTOPT_ENV adds settings).
+# LIVE=N adds N live clients (tools/mixload --live; LIVE_HOLD seconds a room is open, 30 by default):
+# their delivery latency and delivered share join the summary.
 set -euo pipefail
 [ -n "${BENCH_LOCKED:-}" ] || { exec 9>>/home/ben/linuxbench/bench.lock; flock -x 9; }
 APP=$1; RUN=$2; SECS=${3:-15}; shift 2; [ $# -gt 0 ] && shift; RATES=("$@"); [ ${#RATES[@]} -eq 0 ] && RATES=(0 10 50)
 CONNS=${CONNS:-64}
+LIVE=${LIVE:-0}; LIVE_HOLD=${LIVE_HOLD:-30}; LIVEARGS=(); [ "$LIVE" -gt 0 ] && LIVEARGS=(--live "$LIVE" --live-hold "$LIVE_HOLD")
 U=ben; UH=/home/$U; L=$UH/linuxbench; M=$UH/burin-mix
 FIX=/mnt/d/code/AgentLang/.agentlang/once-campfire-verification/fixtures/default
 OUT=/mnt/d/code/burin/bench/runs/mix-$RUN; W=$UH/burin-bench/mix-$RUN
@@ -63,7 +66,7 @@ mkdir "$CG"
 BOOT=$!
 for i in $(seq 1 1200); do inns curl -fsS -o /dev/null http://127.0.0.1:13774/up 2>/dev/null && break; sleep 0.1; done
 inns curl -fsS -o /dev/null http://127.0.0.1:13774/up || { note "not ready"; tail -20 "$W/server.log"; exit 3; }
-note "ready app=$APP run=$RUN conns=$CONNS secs=$SECS rates=${RATES[*]} server_cpus=$SRV_CPUS loadgen_cpus=$LG_CPUS"
+note "ready app=$APP run=$RUN conns=$CONNS live=$LIVE secs=$SECS rates=${RATES[*]} server_cpus=$SRV_CPUS loadgen_cpus=$LG_CPUS"
 
 # Rails-style apps: everyone signs in (a cookie each) and gets a CSRF token for posting
 COOKIES=()
@@ -96,20 +99,21 @@ NCPU=$(taskset -c "$SRV_CPUS" nproc)
 phase() { # name rate secs
   local S0 C0 S1 C1
   S0=$(cg_usec); C0=$(stats)
-  LG "$MIX" --base http://127.0.0.1:13774 --people "$M/people.json" "${COOKIES[@]}" --app "$APP" --conc "$CONNS" --duration "$3" --post-rate "$2" --seed "${SEED:-1}" > "$OUT/$1.json"
+  LG "$MIX" --base http://127.0.0.1:13774 --people "$M/people.json" "${COOKIES[@]}" --app "$APP" --conc "$CONNS" --duration "$3" --post-rate "$2" --seed "${SEED:-1}" "${LIVEARGS[@]}" > "$OUT/$1.json"
   S1=$(cg_usec); C1=$(stats)
   node -e '
     const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
     const s0 = JSON.parse(process.argv[2] || "{}"), s1 = JSON.parse(process.argv[3] || "{}");
     const cpu = (Number(process.argv[4]) - Number(process.argv[5])) / 1e6, secs = r.secs, ok = r.reads.ok;
     const d = (k) => (s1[k] ?? 0) - (s0[k] ?? 0);
-    const burin = s1.fast !== undefined ? { fast_share: +(d("fast") / Math.max(1, d("fast") + d("cold"))).toFixed(3), write_reads: d("write_reads"), cleared: d("cleared") } : {};
+    const burin = s1.fast !== undefined ? { fast_share: +(d("fast") / Math.max(1, d("fast") + d("cold"))).toFixed(3), write_reads: d("write_reads"), cleared: d("cleared"), live_events: d("live"), streams_missed: d("missed"), streams_refreshed: d("refreshed") } : {};
     console.log(JSON.stringify({ phase: process.argv[6], posts_per_s: Number(process.argv[7]), reads_per_s: r.reads.per_s, reads_invalid: r.reads.invalid, read_errors: r.reads.errors,
       cpu_ms_per_read: +(cpu * 1000 / Math.max(1, ok)).toFixed(3), server_util: +(cpu / (secs * Number(process.argv[8]))).toFixed(2),
       read_p50_ms: r.reads.p50_ms, read_p99_ms: r.reads.p99_ms, avg_bytes: r.reads.avg_bytes, rooms_read: r.reads.rooms_read, people_reading: r.reads.people_reading,
       posts_ok: r.posts.ok, posts_sent: r.posts.sent, post_p50_ms: r.posts.p50_ms, post_p99_ms: r.posts.p99_ms,
       sidebars_per_s: r.sidebars?.per_s ?? null, sidebar_p99_ms: r.sidebars?.p99_ms ?? null, sidebar_bytes: r.sidebars?.avg_bytes ?? null,
-      marked_read: r.marked_read ?? 0, sessions: r.sessions ?? null, secs: r.secs, model: r.model ?? null, ...burin }));
+      marked_read: r.marked_read ?? 0, sessions: r.sessions ?? null,
+      ...(r.live ? { live_clients: r.live.clients, live_streams: r.live.streams, live_due: r.live.due, live_share: r.live.share, delivery_p50_ms: r.live.delivery.p50_ms, delivery_p99_ms: r.live.delivery.p99_ms, delivery_max_ms: r.live.delivery.max_ms, live_errors: r.live.errors + r.live.invalid } : {}), secs: r.secs, model: r.model ?? null, ...burin }));
   ' "$OUT/$1.json" "$C0" "$C1" "$S1" "$S0" "$1" "$2" "$NCPU" | tee -a "$OUT/summary.jsonl"
 }
 phase cold 0 "$SECS"

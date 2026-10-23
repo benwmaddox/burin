@@ -151,6 +151,8 @@ fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::R
     let mut free: Vec<usize> = vec![];
     // live streams by topic
     let mut subs: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+    // the live streams by viewer
+    let mut by_viewer: std::collections::HashMap<i64, Vec<usize>> = std::collections::HashMap::new();
     let mut beat = std::time::Instant::now();
     loop {
         if let Err(e) = poll.poll(&mut events, Some(HEARTBEAT)) {
@@ -180,12 +182,25 @@ fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::R
                 continue;
             }
             if ev.token() == WAKE {
-                // what the writer published: to this worker's streams on each topic
+                // what the writer published: to this worker's streams on each topic, each
+                // stream's events written together (one write for a wake's events, not one each)
                 let pushes = std::mem::take(&mut *inbox.lock().unwrap());
+                let mut dirty: Vec<usize> = vec![];
                 for p in pushes {
                     match p {
                         crate::live::Push::Event(e) => {
-                            for &i in subs.get(&e.topic).map(|v| v.as_slice()).unwrap_or(&[]) {
+                            let all = subs.get(&e.topic).map(|v| v.as_slice()).unwrap_or(&[]);
+                            // a signal for a few viewers (a room read: one): their streams (every
+                            // stream is on the signals topic), not every stream's viewer checked
+                            let few: Vec<usize>;
+                            let to = match &e.audience {
+                                Some(a) if e.topic == crate::live::SIGNALS && a.len() * 8 < all.len() => {
+                                    few = a.iter().filter_map(|v| by_viewer.get(v)).flatten().copied().collect();
+                                    &few[..]
+                                }
+                                _ => all,
+                            };
+                            for &i in to {
                                 if let Some(Some(c)) = conns.get_mut(i) {
                                     let Some(l) = c.live.as_mut() else { continue };
                                     if e.id <= l.0.last {
@@ -195,10 +210,10 @@ fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::R
                                     if !e.is_for(l.0.viewer) {
                                         continue;
                                     }
-                                    l.1.extend_from_slice(&e.bytes);
-                                    if !flush_live(c, &poll) {
-                                        closing.push(i);
+                                    if l.1.is_empty() {
+                                        dirty.push(i);
                                     }
+                                    l.1.extend_from_slice(&e.bytes);
                                 }
                             }
                         }
@@ -210,6 +225,13 @@ fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::R
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+                for i in dirty {
+                    if let Some(Some(c)) = conns.get_mut(i) {
+                        if !flush_live(c, &poll) {
+                            closing.push(i);
                         }
                     }
                 }
@@ -248,6 +270,7 @@ fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::R
                     for t in &live.topics {
                         subs.entry(*t).or_default().push(i);
                     }
+                    by_viewer.entry(live.viewer).or_default().push(i);
                     let head = std::mem::take(&mut live.head);
                     c.live = Some(Box::new((live, head)));
                     if !flush_live(c, &poll) {
@@ -282,6 +305,12 @@ fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::R
                             }
                         }
                     }
+                    if let Some(v) = by_viewer.get_mut(&l.0.viewer) {
+                        v.retain(|&k| k != i);
+                        if v.is_empty() {
+                            by_viewer.remove(&l.0.viewer);
+                        }
+                    }
                     h.live_closed(&l.0);
                 }
                 free.push(i);
@@ -310,8 +339,14 @@ fn flush_live(c: &mut Conn, poll: &Poll) -> bool {
     if pending.len() > MAX_BEHIND {
         return false;
     }
-    let interest = if pending.is_empty() { Interest::READABLE } else { Interest::READABLE | Interest::WRITABLE };
-    let _ = poll.registry().reregister(&mut c.stream, c.tok, interest);
+    // asked to be told when it can write only while bytes wait (`writing`: a live stream is
+    // handed over registered for reads only), so a stream that keeps up costs one write an event
+    let want = !pending.is_empty();
+    if want != c.writing {
+        let interest = if want { Interest::READABLE | Interest::WRITABLE } else { Interest::READABLE };
+        let _ = poll.registry().reregister(&mut c.stream, c.tok, interest);
+        c.writing = want;
+    }
     true
 }
 

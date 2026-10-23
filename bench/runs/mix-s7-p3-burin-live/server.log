@@ -1,0 +1,4 @@
+started in 2004 ms (4 workers)
+slow batch: 36 ms (0 ms to commit), 25 commands, 0 deltas
+slow batch: 30 ms (0 ms to commit), 68 commands, 0 deltas
+slow batch: 21 ms (0 ms to commit), 15 commands, 0 deltas

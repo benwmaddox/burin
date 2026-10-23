@@ -1,0 +1,3 @@
+started in 1943 ms (4 workers)
+slow batch: 27 ms (0 ms to commit), 39 commands, 0 deltas
+slow batch: 26 ms (0 ms to commit), 59 commands, 0 deltas

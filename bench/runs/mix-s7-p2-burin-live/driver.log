@@ -1,0 +1,2 @@
+2026-10-23T18:30:28.269Z ready app=burin run=s7-p2-burin-live conns=64 live=1000 secs=15 rates=0 10 50 server_cpus=8-11 loadgen_cpus=12-19
+2026-10-23T18:31:32.905Z done

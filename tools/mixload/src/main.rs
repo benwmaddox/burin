@@ -25,6 +25,16 @@
 //! Fail closed: a read counts only with status 200 and a page; every `--check-every`th page is
 //! also decoded and must show the room it asked for; every sidebar must be the frame with rooms
 //! in it. A post counts only when the server says it worked (and the page it leads to loads).
+//!
+//! Live clients (`--live N`, burin only so far), apart from the readers: people with a room open,
+//! one person each (N above the number of people: some with more than one tab).
+//! Each, again and again, opens one of their rooms (the page, then its stream, as the page's
+//! `<turbo-stream-source>` does), keeps it open for a while (exponential, `--live-hold` seconds
+//! on average) and closes it: one stream per visit, as a browser's navigation makes. Each post's
+//! number is in its text; a client that gets the post's `append` records how long after the
+//! post was sent it arrived (`delivery`). A post was due to every stream on its room open before
+//! it was sent and still open a second after the server answered it; the delivered share is how
+//! many of those got it.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -163,6 +173,46 @@ fn location(r: &Resp, addr: &str) -> Option<String> {
     l.starts_with('/').then(|| l.to_string())
 }
 
+/// A post, for the live clients: its room, when it was sent, and when the server answered it.
+struct Sent {
+    room: i64,
+    at: Instant,
+    ok: Option<Instant>,
+}
+
+/// One live client's visit: its room, while its stream was open, and the posts it got.
+struct Visit {
+    room: i64,
+    open: Instant,
+    close: Instant,
+    got: HashSet<u64>,
+}
+
+/// A stream's response: status and body, as it comes.
+/// (The sender is kept with it: the connection is closed when both go.)
+async fn open_stream(addr: &str, path: &str, cookie: &str) -> Res<(SendRequest<Full<Bytes>>, hyper::Response<hyper::body::Incoming>)> {
+    let mut s = connect(addr).await?;
+    let req = hyper::Request::builder().method("GET").uri(path).header("host", addr).header("cookie", cookie).header("accept", "text/event-stream").body(Full::new(Bytes::new()))?;
+    s.ready().await?;
+    let r = tokio::time::timeout(Duration::from_secs(30), s.send_request(req)).await.map_err(|_| "stream timed out")??;
+    Ok((s, r))
+}
+
+/// The posts a stream's events carry: each `append`'s "mixed bench post N from" (N).
+fn posts_in(event: &str, out: &mut Vec<u64>) {
+    if !event.contains("action=\"append\"") {
+        return;
+    }
+    let mut rest = event;
+    while let Some(i) = rest.find("mixed bench post ") {
+        rest = &rest[i + "mixed bench post ".len()..];
+        let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(k) = n.parse() {
+            out.push(k);
+        }
+    }
+}
+
 fn arg<'a>(a: &'a HashMap<String, String>, k: &str) -> Option<&'a str> {
     a.get(k).map(String::as_str)
 }
@@ -197,6 +247,12 @@ async fn main() -> Res<()> {
         None if app == "crudspec" => None,
         None => Some("/users/me/sidebar".to_string()),
     };
+
+    let live: usize = arg(&a, "live").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let live_hold: f64 = arg(&a, "live-hold").and_then(|v| v.parse().ok()).unwrap_or(30.0);
+    if live > 0 && app != "burin" {
+        return Err("--live: burin's streams only, so far".into());
+    }
 
     let pj: Value = serde_json::from_str(&std::fs::read_to_string(arg(&a, "people").ok_or("--people")?)?)?;
     let cookies: Value = match arg(&a, "cookies") {
@@ -370,11 +426,114 @@ async fn main() -> Res<()> {
         }));
     }
 
+    // the live clients: a room open, then another
+    let sent = Arc::new(Mutex::new(HashMap::<u64, Sent>::new()));
+    let visits_all = Arc::new(Mutex::new(Vec::<Visit>::new()));
+    let delivery = Arc::new(Mutex::new(hist()));
+    let (lv_pages, lv_streams, lv_events, lv_errors, lv_invalid, lv_ended) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    for w in 0..live {
+        let (addr, people) = (addr.clone(), people.clone());
+        let (sent, visits_all, delivery) = (sent.clone(), visits_all.clone(), delivery.clone());
+        let (lv_pages, lv_streams, lv_events, lv_errors, lv_invalid, lv_ended) = (lv_pages.clone(), lv_streams.clone(), lv_events.clone(), lv_errors.clone(), lv_invalid.clone(), lv_ended.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut rng = Rng(seed.wrapping_mul(0x2545F4914F6CDD1D) ^ (w as u64 + 7).wrapping_mul(0x9E3779B97F4A7C15) | 1);
+            let mut dh = hist();
+            let mut mine = vec![];
+            let mut ks = vec![];
+            while Instant::now() < deadline {
+                // its own person (more clients than people: some have more than one tab open)
+                let p = &people[w % people.len()];
+                let room = p.rooms[pick_cum(&p.cum, rng.next())];
+                let hold = Duration::from_secs_f64(-live_hold * rng.next().max(1e-12).ln());
+                // the page, for its stream's address
+                let page = match connect(&addr).await {
+                    Ok(mut c) => send(&mut c, &addr, "GET", &format!("/rooms/{room}"), &[("cookie", p.cookie.clone()), ("accept-encoding", "gzip".into()), ("accept", ACCEPT_PAGE.into())], Bytes::new()).await,
+                    Err(e) => Err(e),
+                };
+                let src = match page {
+                    Ok(r) if r.status == 200 => {
+                        lv_pages.fetch_add(1, Ordering::Relaxed);
+                        let t = body_text(&r);
+                        t.split("<turbo-stream-source src=\"").nth(1).and_then(|s| s.split('"').next()).map(|s| s.replace("&amp;", "&"))
+                    }
+                    Ok(_) => None,
+                    Err(_) => {
+                        lv_errors.fetch_add(1, Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                };
+                let Some(src) = src else {
+                    lv_invalid.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                let (sender, resp) = match open_stream(&addr, &src, &p.cookie).await {
+                    Ok(x) if x.1.status() == 200 => x,
+                    Ok(_) => {
+                        lv_invalid.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    Err(_) => {
+                        lv_errors.fetch_add(1, Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                };
+                lv_streams.fetch_add(1, Ordering::Relaxed);
+                let open = Instant::now();
+                let until = (open + hold).min(deadline);
+                let mut body = resp.into_body();
+                let (mut buf, mut got) = (String::new(), HashSet::new());
+                loop {
+                    match tokio::time::timeout_at(until.into(), body.frame()).await {
+                        Err(_) => break,
+                        Ok(None) => {
+                            lv_ended.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                        Ok(Some(Err(_))) => {
+                            lv_errors.fetch_add(1, Ordering::Relaxed);
+                            break;
+                        }
+                        Ok(Some(Ok(f))) => {
+                            let Some(d) = f.data_ref() else { continue };
+                            let now = Instant::now();
+                            buf.push_str(&String::from_utf8_lossy(d));
+                            while let Some(i) = buf.find("\n\n") {
+                                let ev: String = buf.drain(..i + 2).collect();
+                                lv_events.fetch_add(1, Ordering::Relaxed);
+                                ks.clear();
+                                posts_in(&ev, &mut ks);
+                                if ks.is_empty() {
+                                    continue;
+                                }
+                                let s = sent.lock().unwrap();
+                                for k in &ks {
+                                    if got.insert(*k) {
+                                        // sent while this stream was open (not replayed from before it)
+                                        if let Some(x) = s.get(k).filter(|x| x.at >= open) {
+                                            dh.record(now.duration_since(x.at).as_micros().max(1) as u64).ok();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                drop(body);
+                drop(sender);
+                mine.push(Visit { room, open, close: Instant::now(), got });
+            }
+            visits_all.lock().unwrap().extend(mine);
+            delivery.lock().unwrap().add(&dh).unwrap();
+        }));
+    }
+
     // the posters: open loop, each post on its own connection
     let post_hist = Arc::new(Mutex::new(hist()));
     let (posted, posts_ok) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let poster = {
-        let (addr, people, pcum, post_hist, posted, posts_ok, app) = (addr.clone(), people.clone(), pcum.clone(), post_hist.clone(), posted.clone(), posts_ok.clone(), app.clone());
+        let (addr, people, pcum, post_hist, posted, posts_ok, app, sent) = (addr.clone(), people.clone(), pcum.clone(), post_hist.clone(), posted.clone(), posts_ok.clone(), app.clone(), sent.clone());
         tokio::spawn(async move {
             if post_rate <= 0.0 {
                 return;
@@ -391,11 +550,14 @@ async fn main() -> Res<()> {
                 let p = &people[pick_cum(&pcum, rng.next())];
                 let room = p.rooms[pick_cum(&p.cum, rng.next())];
                 let (cookie, csrf, app, addr) = (p.cookie.clone(), p.csrf.clone(), app.clone(), addr.clone());
-                let (post_hist, posts_ok) = (post_hist.clone(), posts_ok.clone());
+                let (post_hist, posts_ok, sent) = (post_hist.clone(), posts_ok.clone(), sent.clone());
                 posted.fetch_add(1, Ordering::Relaxed);
                 let text = format!("mixed bench post {k} from {}", p.id);
                 inflight.push(tokio::spawn(async move {
                     let t0 = Instant::now();
+                    if live > 0 {
+                        sent.lock().unwrap().insert(k, Sent { room, at: t0, ok: None });
+                    }
                     let Ok(mut c) = connect(&addr).await else { return };
                     let token_app = app == "burin" || app == "crudspec";
                     let r = if token_app {
@@ -431,6 +593,11 @@ async fn main() -> Res<()> {
                     if good {
                         posts_ok.fetch_add(1, Ordering::Relaxed);
                         post_hist.lock().unwrap().record(t0.elapsed().as_micros().max(1) as u64).ok();
+                        if live > 0 {
+                            if let Some(s) = sent.lock().unwrap().get_mut(&k) {
+                                s.ok = Some(Instant::now());
+                            }
+                        }
                     }
                 }));
             }
@@ -451,6 +618,34 @@ async fn main() -> Res<()> {
     let sn = seen.lock().unwrap();
     let okn = ok.load(Ordering::Relaxed);
     let sbn = sb_ok.load(Ordering::Relaxed);
+    // each post's due streams: on its room, open before it was sent, open a second after its answer
+    let (mut due, mut delivered) = (0u64, 0u64);
+    {
+        let vs = visits_all.lock().unwrap();
+        let mut by_room: HashMap<i64, Vec<&Visit>> = HashMap::new();
+        for v in vs.iter() {
+            by_room.entry(v.room).or_default().push(v);
+        }
+        for (k, s) in sent.lock().unwrap().iter() {
+            let Some(okt) = s.ok else { continue };
+            for v in by_room.get(&s.room).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if v.open <= s.at && v.close >= okt + Duration::from_secs(1) {
+                    due += 1;
+                    delivered += v.got.contains(k) as u64;
+                }
+            }
+        }
+    }
+    let dh = delivery.lock().unwrap();
+    let live_json = if live == 0 {
+        Value::Null
+    } else {
+        json!({ "clients": live, "hold_s": live_hold, "pages": lv_pages.load(Ordering::Relaxed), "streams": lv_streams.load(Ordering::Relaxed),
+                "events": lv_events.load(Ordering::Relaxed), "errors": lv_errors.load(Ordering::Relaxed), "invalid": lv_invalid.load(Ordering::Relaxed),
+                "ended_by_server": lv_ended.load(Ordering::Relaxed),
+                "delivery": { "n": dh.len(), "p50_ms": ms(&dh, 0.5), "p99_ms": ms(&dh, 0.99), "p999_ms": ms(&dh, 0.999), "max_ms": if dh.is_empty() { Value::Null } else { json!((dh.max() as f64 / 10.0).round() / 100.0) } },
+                "due": due, "delivered": delivered, "share": if due > 0 { json!((delivered as f64 / due as f64 * 100000.0).round() / 100000.0) } else { Value::Null } })
+    };
     println!(
         "{}",
         json!({
@@ -465,7 +660,8 @@ async fn main() -> Res<()> {
             "sidebars": { "ok": sbn, "per_s": ((sbn as f64 / elapsed) * 10.0).round() / 10.0, "p50_ms": ms(&sh, 0.5), "p99_ms": ms(&sh, 0.99),
                           "avg_bytes": if sbn > 0 { sb_bytes.load(Ordering::Relaxed) / sbn } else { 0 } },
             "sessions": sessions.load(Ordering::Relaxed), "marked_read": marked.load(Ordering::Relaxed),
-            "posts": { "sent": posted.load(Ordering::Relaxed), "ok": posts_ok.load(Ordering::Relaxed), "p50_ms": ms(&ph, 0.5), "p99_ms": ms(&ph, 0.99) }
+            "posts": { "sent": posted.load(Ordering::Relaxed), "ok": posts_ok.load(Ordering::Relaxed), "p50_ms": ms(&ph, 0.5), "p99_ms": ms(&ph, 0.99) },
+            "live": live_json
         })
     );
     Ok(())
