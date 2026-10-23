@@ -546,15 +546,28 @@ burin as a helper: a `fn` with a body of statements.
   | 26.1 | counted `while` loops spend no steps |
   | 28.5 | Text lengths' range; `smin`/`smax` |
   | 29.9 | any counted part of an `and` counts |
+  | 30.8 | signs known (below); counting down counts too |
 
   - Constant tables made small inputs 3–9× faster.
   - The C version mirrors the burin source, so it builds its tables on every call. A C
     programmer would build them once; burin does that from plain code.
-  - burin is now about as fast as C with checks (that run varies between 28 and 33 MB/s), and
-    0.85× plain C.
-  - Nearly all of the time is one loop without calls: DEFLATE's byte matching. Its gap to C is
-    two bounds checks and two values reloaded from the stack (the function keeps many values
-    live).
+  - burin is now 0.89× plain C (C itself varies between 34 and 36 MB/s across runs), with the
+    step budget costing about 2%.
+  - Nearly all of the time is one loop without calls: DEFLATE's byte matching. One bounds check
+    in it is beyond any compiler: `p + l < n` needs `p < i`, which the code doesn't say (the
+    C version doesn't check it). LLVM keeps `i + l < n` too: its constraint pass can prove it
+    (a ten-line test does), but not in this loop. Values reloaded from the stack (the function
+    keeps many live) are the rest.
+- **Signs known:** a sign analysis finds a helper's names that are never negative. Every value
+  given them must be: a constant, a byte, a length, or a sum, product or `&` of such. It starts
+  from all of them and drops failures until none fail.
+  - Each load of such a name tells LLVM (`llvm.assume`).
+  - One such value less another is a plain `sub nsw`: it can't overflow.
+  - A sum with one such side is checked by one compare against the top, `a > MAX - b`, which
+    LLVM can reason with; it can't with an overflow intrinsic's result.
+  - Of DEFLATE's 8 checks against the text's length, 3 went.
+- **Counted loops** also count down: `while x > y` (or `>=`), x changed only by one top-level
+  `x = x - c`.
   - CRC-32 matches C.
   - For context, other algorithms: libdeflate level 1 runs at 240 MB/s to 41% of the size (this
     algorithm gets 49.6%).

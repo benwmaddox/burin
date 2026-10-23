@@ -120,6 +120,8 @@ struct Gen<'a> {
     /// the helpers it calls
     calls: Vec<String>,
     steps: bool,
+    /// names whose values are never negative (`nonneg`): each load tells LLVM (`llvm.assume`)
+    nonneg: Vec<String>,
 }
 
 impl<'a> Gen<'a> {
@@ -202,6 +204,9 @@ impl<'a> Gen<'a> {
                 Some(Local::Slot(p, t @ (Ty::Int | Ty::Bool), _)) => {
                     let v = self.v();
                     self.line(&format!("{v} = load {}, ptr {p}", if t == Ty::Bool { "i1" } else { "i64" }));
+                    if t == Ty::Int && self.nonneg.contains(n) {
+                        self.assume_nonneg(&v);
+                    }
                     Ok((v, t))
                 }
                 Some(Local::Slot(_, t, _)) => e(*s, format!("`{n}` is {}", t.show())),
@@ -267,6 +272,22 @@ impl<'a> Gen<'a> {
             Expr::Bin(op, a, b, s) => {
                 let (l, r) = (self.int(a)?, self.int(b)?);
                 let v = match op {
+                    // one value never negative less another: it can't overflow (no check)
+                    BinOp::Sub if nonneg_expr(self.m, a, &self.nonneg, &[]) && nonneg_expr(self.m, b, &self.nonneg, &[]) => {
+                        let x = self.v();
+                        self.line(&format!("{x} = sub nsw i64 {l}, {r}"));
+                        x
+                    }
+                    // a value never negative added: it overflows only past the top, a check
+                    // LLVM's constraint pass can reason with (a with.overflow result it can't)
+                    BinOp::Add if nonneg_expr(self.m, a, &self.nonneg, &[]) || nonneg_expr(self.m, b, &self.nonneg, &[]) => {
+                        let (other, pos) = if nonneg_expr(self.m, b, &self.nonneg, &[]) { (&l, &r) } else { (&r, &l) };
+                        let (room, bad, x) = (self.v(), self.v(), self.v());
+                        self.line(&format!("{room} = sub nsw i64 9223372036854775807, {pos}\n  {bad} = icmp sgt i64 {other}, {room}"));
+                        self.fail_if(&bad);
+                        self.line(&format!("{x} = add nsw i64 {l}, {r}"));
+                        x
+                    }
                     BinOp::Add | BinOp::Sub | BinOp::Mul => {
                         let f = match op {
                             BinOp::Add => "sadd",
@@ -353,14 +374,18 @@ impl<'a> Gen<'a> {
                 let at = self.index(&a[1], &len)?;
                 let (q, x) = (self.v(), self.v());
                 self.line(&format!("{q} = getelementptr inbounds {t}, ptr {p}, i64 {at}\n  {x} = load {t}, ptr {q}", t = el.ll()));
-                Ok((self.widen(&x, el), Ty::Int))
+                let w = self.widen(&x, el);
+                if el != Elem::U8 && self.nonneg.contains(n) {
+                    self.assume_nonneg(&w);
+                }
+                Ok((w, Ty::Int))
             }
             "byte_at" => {
                 self.args(f, a, 2, s)?;
                 let (p, l) = self.text(&a[0])?;
                 let i = self.int(&a[1])?;
-                let (bad, q, x, w) = (self.v(), self.v(), self.v(), self.v());
-                self.line(&format!("{bad} = icmp uge i64 {i}, {l}"));
+                let (q, x, w) = (self.v(), self.v(), self.v());
+                let bad = self.outside(&i, &l);
                 self.fail_if(&bad);
                 self.line(&format!("{q} = getelementptr inbounds i8, ptr {p}, i64 {i}\n  {x} = load i8, ptr {q}\n  {w} = zext i8 {x} to i64"));
                 Ok((w, Ty::Int))
@@ -434,10 +459,24 @@ impl<'a> Gen<'a> {
     /// An index into an array of `len`: in it, or none.
     fn index(&mut self, i: &Expr, len: &str) -> Result<String, E> {
         let i = self.int(i)?;
-        let bad = self.v();
-        self.line(&format!("{bad} = icmp uge i64 {i}, {len}"));
+        let bad = self.outside(&i, len);
         self.fail_if(&bad);
         Ok(i)
+    }
+
+    /// Tells LLVM a value is never negative (the sign analysis proved it: `nonneg`).
+    fn assume_nonneg(&mut self, v: &str) {
+        let c = self.v();
+        self.line(&format!("{c} = icmp sge i64 {v}, 0\n  call void @llvm.assume(i1 {c})"));
+    }
+
+    /// Whether `i` is outside 0..len: compared signed, as the helper's own conditions are, so
+    /// LLVM can prove it from them (`l < min(258, n - i)` makes `i + l < n`); an unsigned compare
+    /// is a family its constraint pass keeps apart.
+    fn outside(&mut self, i: &str, len: &str) -> String {
+        let (neg, past, bad) = (self.v(), self.v(), self.v());
+        self.line(&format!("{neg} = icmp slt i64 {i}, 0\n  {past} = icmp sge i64 {i}, {len}\n  {bad} = or i1 {neg}, {past}"));
+        bad
     }
 
     fn widen(&mut self, x: &str, el: Elem) -> String {
@@ -691,16 +730,22 @@ impl Gen<'_> {
         }
         let changed = assigned(body);
         parts.iter().any(|part| {
-            let Expr::Bin(BinOp::Lt | BinOp::Le, x, y, _) = part else { return false };
+            // up to a bound (`x < y`, x = x + c) or down to one (`x > y`, x = x - c)
+            let (up, x, y) = match part {
+                Expr::Bin(BinOp::Lt | BinOp::Le, x, y, _) => (true, x, y),
+                Expr::Bin(BinOp::Gt | BinOp::Ge, x, y, _) => (false, x, y),
+                _ => return false,
+            };
             let Expr::Name(x, _) = &**x else { return false };
             if !matches!(self.lookup(x), Some(Local::Slot(_, Ty::Int, true))) {
                 return false;
             }
-            let steps_up = |s: &HStmt| match s {
-                HStmt::Set(n, Expr::Bin(BinOp::Add, a, b, _), _) if n == x => matches!((&**a, &**b), (Expr::Name(m, _), Expr::Int(k, _)) | (Expr::Int(k, _), Expr::Name(m, _)) if m == x && *k > 0),
+            let steps = |s: &HStmt| match s {
+                HStmt::Set(n, Expr::Bin(BinOp::Add, a, b, _), _) if n == x && up => matches!((&**a, &**b), (Expr::Name(m, _), Expr::Int(k, _)) | (Expr::Int(k, _), Expr::Name(m, _)) if m == x && *k > 0),
+                HStmt::Set(n, Expr::Bin(BinOp::Sub, a, b, _), _) if n == x && !up => matches!((&**a, &**b), (Expr::Name(m, _), Expr::Int(k, _)) if m == x && *k > 0),
                 _ => false,
             };
-            changed.iter().filter(|n| *n == x).count() == 1 && body.iter().any(steps_up) && !reads(y, &changed)
+            changed.iter().filter(|n| *n == x).count() == 1 && body.iter().any(steps) && !reads(y, &changed)
         })
     }
 
@@ -757,6 +802,86 @@ fn continues(body: &[HStmt]) -> bool {
     })
 }
 
+/// Whether an expression's value is never negative, the names in `set` being so (and the arrays
+/// in `bytes`).
+fn nonneg_expr(m: &Model, e: &Expr, set: &[String], bytes: &[String]) -> bool {
+    let r = |x: &Expr| nonneg_expr(m, x, set, bytes);
+    match e {
+        Expr::Int(k, _) | Expr::Dur(k, _) => *k >= 0,
+        Expr::Name(n, _) => {
+            set.contains(n) || matches!(m.consts.get(n), Some(Decl::Const { value: Expr::Int(k, _), .. }) if *k >= 0)
+        }
+        Expr::Call(f, a, _) => match f.as_str() {
+            "byte_at" | "byte_length" | "abs" => true,
+            "__at" => matches!(&a[0], Expr::Name(n, _) if set.contains(n) || bytes.contains(n)),
+            "min" => a.iter().all(r),
+            "max" => a.iter().any(r),
+            _ => false,
+        },
+        Expr::Bin(op, a, b, _) => match op {
+            BinOp::Add | BinOp::Mul | BinOp::Div | BinOp::BitOr | BinOp::BitXor => r(a) && r(b),
+            BinOp::Mod | BinOp::Shr => r(a),
+            BinOp::BitAnd => r(a) || r(b),
+            _ => false,
+        },
+        Expr::If(_, a, b, _) => r(a) && r(b),
+        _ => false,
+    }
+}
+
+/// The names (vars and arrays) whose values are never negative: every value given them is
+/// (an assignment's, a `for`'s start, an element set, a constant start), assuming the same of the
+/// others at first and dropping any that fails, until none does. Sound because what isn't
+/// representable fails instead: a checked `+` or `*` of non-negatives overflows to none, never
+/// to a negative. Parameters and helpers' results aren't known.
+fn nonneg_names(m: &Model, start: &[(String, SV)], body: &[HStmt]) -> Vec<String> {
+    let mut gets: Vec<(String, Expr)> = vec![];
+    let mut bytes: Vec<String> = vec![];
+    fn walk(b: &[HStmt], gets: &mut Vec<(String, Expr)>, bytes: &mut Vec<String>) {
+        for s in b {
+            match s {
+                HStmt::Var(n, Expr::Call(f, _, _), _) if matches!(f.as_str(), "ints" | "int32s" | "bytes") => {
+                    if f == "bytes" {
+                        bytes.push(n.clone());
+                    }
+                }
+                HStmt::Var(n, e, _) | HStmt::Set(n, e, _) | HStmt::SetAt(n, _, e, _) => gets.push((n.clone(), e.clone())),
+                HStmt::For(n, a, _, inner, _) => {
+                    gets.push((n.clone(), a.clone()));
+                    walk(inner, gets, bytes);
+                }
+                HStmt::If(_, a, b, _) => {
+                    walk(a, gets, bytes);
+                    walk(b, gets, bytes);
+                }
+                HStmt::While(_, a, _) => walk(a, gets, bytes),
+                _ => {}
+            }
+        }
+    }
+    walk(body, &mut gets, &mut bytes);
+    let mut set: Vec<String> = gets.iter().map(|(n, _)| n.clone()).chain(start.iter().map(|(n, _)| n.clone())).collect();
+    set.sort();
+    set.dedup();
+    // a constant start that's negative
+    set.retain(|n| match start.iter().find(|(s, _)| s == n) {
+        Some((_, SV::Int(v))) => *v >= 0,
+        Some((_, SV::Arr(_, vs))) => vs.iter().all(|v| *v >= 0),
+        Some((_, SV::Bool(_))) => false,
+        None => true,
+    });
+    loop {
+        let before = set.len();
+        let dropped: Vec<String> = gets.iter().filter(|(n, e)| set.contains(n) && !nonneg_expr(m, e, &set, &bytes)).map(|(n, _)| n.clone()).collect();
+        set.retain(|n| !dropped.contains(n));
+        if set.len() == before {
+            // (an array of bytes holds 0 to 255 whatever is set: a bad one fails)
+            set.extend(bytes);
+            return set;
+        }
+    }
+}
+
 /// Whether statements make an array (`var a = ints(n)`, anywhere in them).
 fn makes_arrays(body: &[HStmt]) -> bool {
     body.iter().any(|s| match s {
@@ -772,7 +897,7 @@ fn helper(m: &Model, d: &Decl, steps: bool) -> Result<(String, Vec<String>), E> 
     let Decl::Helper { name, params, ret, body, span } = d else { unreachable!() };
     let Some(rt) = ty_of(ret) else { return e(*span, format!("a helper answers an Int, a Bool or Text, not {}", ret.show())) };
     let arena = makes_arrays(body);
-    let mut g = Gen { m, name: name.clone(), ret: rt, allocas: String::new(), body: String::new(), n: 0, cur: "body".into(), ended: false, scopes: vec![HashMap::new()], loops: vec![], arena, calls: vec![], steps };
+    let mut g = Gen { m, name: name.clone(), ret: rt, allocas: String::new(), body: String::new(), n: 0, cur: "body".into(), ended: false, scopes: vec![HashMap::new()], loops: vec![], arena, calls: vec![], steps, nonneg: vec![] };
     let mut sig = vec![];
     let mut checks = String::new();
     for p in params {
@@ -808,6 +933,7 @@ fn helper(m: &Model, d: &Decl, steps: bool) -> Result<(String, Vec<String>), E> 
     // what depends on nothing at run time, computed now: its results begin the call (a table no
     // statement left changes is a constant in the binary; one changed later, its own copy)
     let (kept, start) = constants(m, params, body);
+    g.nonneg = nonneg_names(m, &start, &kept);
     let changed_later = assigned(&kept);
     let mut globals = String::new();
     for (n, v) in &start {
@@ -916,7 +1042,7 @@ pub fn emit(m: &Model, steps: bool) -> Result<String, E> {
         walk(&graph, n, &mut vec![])?;
     }
     if !out.is_empty() {
-        out.insert_str(0, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\ndeclare void @burin_vec_truncate(ptr, i64)\ndeclare i64 @burin_out_byte(ptr, i64)\ndeclare i64 @burin_ha_budget()\ndeclare i64 @burin_ha_mark()\ndeclare void @burin_ha_release(i64)\ndeclare noalias ptr @burin_ha_alloc(i64)\ndeclare i64 @llvm.smin.i64(i64, i64)\ndeclare i64 @llvm.smax.i64(i64, i64)\ndeclare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n\n");
+        out.insert_str(0, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\ndeclare void @burin_vec_truncate(ptr, i64)\ndeclare i64 @burin_out_byte(ptr, i64)\ndeclare i64 @burin_ha_budget()\ndeclare i64 @burin_ha_mark()\ndeclare void @burin_ha_release(i64)\ndeclare noalias ptr @burin_ha_alloc(i64)\ndeclare i64 @llvm.smin.i64(i64, i64)\ndeclare i64 @llvm.smax.i64(i64, i64)\ndeclare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\ndeclare void @llvm.assume(i1)\n\n");
     }
     Ok(out)
 }

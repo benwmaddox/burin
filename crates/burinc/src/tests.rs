@@ -362,6 +362,10 @@ fn a_counted_while_spends_no_steps_and_every_other_does() {
             "fn twice(n: Int): Int {\n  var i = 0\n  while i < n {\n    i = i + 1\n    i = i - 1\n  }\n  return i\n}",
             // the bound reads an array the loop sets
             "fn moving(n: Int): Int {\n  var a = ints(4)\n  a[0] = n\n  var i = 0\n  while i < a[0] {\n    a[0] = a[0] + 1\n    i = i + 1\n  }\n  return i\n}",
+            // counting down to a bound: counted
+            "fn down(n: Int): Int {\n  var h = n\n  while h >= 8 {\n    h = h - 8\n  }\n  return h\n}",
+            // counting the wrong way: not
+            "fn wrong(n: Int): Int {\n  var h = n\n  while h >= 8 {\n    h = h + 8\n  }\n  return h\n}",
         ]
         .join("\n")
     );
@@ -374,7 +378,8 @@ fn a_counted_while_spends_no_steps_and_every_other_does() {
         body.matches("load i64, ptr %steps").count()
     };
     assert_eq!(steps("counted"), 0, "a counted loop");
-    for f in ["skips", "chases", "maybe", "twice", "moving"] {
+    assert_eq!(steps("down"), 0, "counted down");
+    for f in ["skips", "chases", "maybe", "twice", "moving", "wrong"] {
         assert_eq!(steps(f), 1, "{f} isn't counted");
     }
 }

@@ -126,6 +126,7 @@ fn deflate_and_crc32_timed() {
     if let Some(o) = std::env::var("BURIN_CRUNCH_OUT").ok().filter(|o| !o.is_empty()) {
         std::fs::write(o, &out).unwrap();
     }
+    let compressed = out.len();
     let mut crc = 0;
     let crc_s = median(runs, || crc = unsafe { burin_fn_crc32(input.as_ptr(), input.len() as i64) });
     // small inputs, burin's usual (a row's text in a cached piece): a call's own cost shows
@@ -149,7 +150,7 @@ fn deflate_and_crc32_timed() {
         "{{\"impl\":\"burin\",\"bytes\":{},\"deflate_mb_s\":{:.1},\"compressed\":{},\"crc32_mb_s\":{:.1},\"crc32\":{crc},\"crc32_64b_ns\":{:.0},\"deflate_1k_ns\":{:.0}}}",
         input.len(),
         mb / deflate,
-        out.len(),
+        compressed,
         mb / crc_s,
         crc64_ns,
         deflate1k_ns

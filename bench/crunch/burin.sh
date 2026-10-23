@@ -6,4 +6,4 @@ set -e
 source ~/.cargo/env 2>/dev/null || true
 BIN=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin
 cd /mnt/d/code/burin
-BURIN_CRUNCH_INPUT=$1 BURIN_CRUNCH_OUT=${2:-} BURIN_CRUNCH_RUNS=${3:-9} BURIN_GEN_DIR=$HOME/burin-gen-crunch RUSTFLAGS="-Clinker-plugin-lto -Clink-arg=-fuse-ld=lld -Clink-arg=-B$BIN/gcc-ld" CARGO_TARGET_DIR=$HOME/burin-target-gen ${PIN:-taskset -c 0-7} cargo test -q --release -p crunch-app --test compute -- --nocapture 2>&1 | grep -E '^\{|panicked|error'
+BURIN_CRUNCH_INPUT=$1 BURIN_CRUNCH_OUT=${2:-} BURIN_CRUNCH_RUNS=${3:-9} BURIN_GEN_DIR=$HOME/burin-gen-crunch RUSTFLAGS="-Clinker-plugin-lto -Clink-arg=-fuse-ld=lld -Clink-arg=-B$BIN/gcc-ld" CARGO_TARGET_DIR=$HOME/burin-target-gen ${PIN:-taskset -c 0-7} cargo test -q --release -p crunch-app --test compute deflate_and_crc32_timed -- --nocapture 2>&1 | grep -oE '\{.*\}|panicked.*|error.*'

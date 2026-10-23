@@ -13,7 +13,7 @@ OUT=bench/runs/crunch-arena-$TAG.jsonl
 export BURIN_GEN_DIR=$HOME/burin-gen-crunch RUSTFLAGS="-Clinker-plugin-lto -Clink-arg=-fuse-ld=lld -Clink-arg=-B$BIN/gcc-ld" CARGO_TARGET_DIR=$HOME/burin-target-gen
 taskset -c 0-7 cargo test -q --release -p crunch-app --test compute --no-run 2>&1 | grep -E '^error' -A5 || true
 exec 9>>/home/ben/linuxbench/bench.lock; flock -x 9
-BURIN_CRUNCH_INPUT=$IN BURIN_CRUNCH_ARENA=1 BURIN_CRUNCH_RUNS=$RUNS taskset -c $CORE cargo test -q --release -p crunch-app --test compute arena_warm_and_cold -- --nocapture 2>&1 | grep '^{' > $OUT
+BURIN_CRUNCH_INPUT=$IN BURIN_CRUNCH_ARENA=1 BURIN_CRUNCH_RUNS=$RUNS taskset -c $CORE cargo test -q --release -p crunch-app --test compute arena_warm_and_cold -- --nocapture 2>&1 | grep -o '{.*}' > $OUT
 flock -u 9
 node -e '
 const rows = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n").map(JSON.parse);

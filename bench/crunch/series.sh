@@ -35,7 +35,7 @@ print("checked: both designs, all 10 texts: burin's bytes equal C's and inflate 
 PY
 # the timings, one core, the lock held
 exec 9>>/home/ben/linuxbench/bench.lock; flock -x 9
-BURIN_CRUNCH_INPUT=$IN BURIN_CRUNCH_ARENA=1 BURIN_CRUNCH_RUNS=$RUNS taskset -c $CORE cargo test -q --release -p crunch-app --test compute arena_warm_and_cold -- --nocapture 2>&1 | grep '^{' > $OUT-burin.jsonl
+BURIN_CRUNCH_INPUT=$IN BURIN_CRUNCH_ARENA=1 BURIN_CRUNCH_RUNS=$RUNS taskset -c $CORE cargo test -q --release -p crunch-app --test compute arena_warm_and_cold -- --nocapture 2>&1 | grep -o '{.*}' > $OUT-burin.jsonl
 taskset -c $CORE $W/c-gcc "$IN" --series "" $RUNS > $OUT-gcc.jsonl
 taskset -c $CORE $W/c-clang "$IN" --series "" $RUNS > $OUT-clang.jsonl
 flock -u 9
