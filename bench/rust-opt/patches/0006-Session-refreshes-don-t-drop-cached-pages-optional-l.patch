@@ -1,0 +1,89 @@
+From f64192a069374bcfffae10c3c506e4a725341feb Mon Sep 17 00:00:00 2001
+From: Ben Maddox <benwmaddox@gmail.com>
+Date: Fri, 23 Oct 2026 10:49:08 -0400
+Subject: [PATCH 6/7] Session refreshes don't drop cached pages; optional log
+ of global writes
+
+A session's refresh (last_active_at, once an hour per person) moved the global version, so the
+first request of everyone's hour dropped every cached page. Authentication runs before every
+lookup, so no cached page depends on a session: made or refreshed is nothing, ended (signed
+out, revoked) stays global. CAMPFIRE_LOG_GLOBAL_WRITES=1 logs each row that moved the global
+version.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/db/src/changes.rs | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/crates/db/src/changes.rs b/crates/db/src/changes.rs
+index 25811bf..fd8d1cf 100644
+--- a/crates/db/src/changes.rs
++++ b/crates/db/src/changes.rs
+@@ -13,6 +13,8 @@
+ //! - a membership's read state or connection (`unread_at`, `connected_at`, `connections`): its
+ //!   user's version (their sidebar);
+ //! - a search's history row: its user's version;
++//! - a session made or refreshed (`last_active_at`): nothing (authentication runs before every
++//!   lookup, so no cached page depends on it); a session ended (signed out, revoked) is global;
+ //! - anything else (a rename, a membership made or ended, a deletion, an unknown table): the
+ //!   global version, which every cache key includes: what `data_version` did for every write.
+ //!
+@@ -47,6 +49,7 @@ enum Table {
+     Rooms,
+     Memberships,
+     Searches,
++    Sessions,
+     Other,
+ }
+ 
+@@ -58,11 +61,16 @@ fn table(name: &str) -> Table {
+         "rooms" => Table::Rooms,
+         "memberships" => Table::Memberships,
+         "searches" => Table::Searches,
++        "sessions" => Table::Sessions,
+         n if n.starts_with("message_search_index") => Table::SearchIndex,
+         _ => Table::Other,
+     }
+ }
+ 
++/// `CAMPFIRE_LOG_GLOBAL_WRITES=1`: log each written row that moved the global version (which
++/// drops every cached page), to find writes that could be scoped.
++static LOG_GLOBAL: LazyLock<bool> = LazyLock::new(|| std::env::var("CAMPFIRE_LOG_GLOBAL_WRITES").is_ok_and(|v| v == "1"));
++
+ thread_local! {
+     static TAG: Cell<Tag> = const { Cell::new(Tag::None) };
+     static ROWS: RefCell<Vec<(Table, Action, i64, Tag)>> = const { RefCell::new(Vec::new()) };
+@@ -93,6 +101,9 @@ impl Drop for TagGuard {
+ pub fn record(conn: &Connection) -> rusqlite::Result<()> {
+     conn.update_hook(Some(|action: Action, _db: &str, name: &str, rowid: i64| {
+         let tag = TAG.get();
++        if *LOG_GLOBAL && table(name) == Table::Other {
++            eprintln!("changes: {action:?} {name} {rowid}: global");
++        }
+         ROWS.with(|rows| rows.borrow_mut().push((table(name), action, rowid, tag)));
+     }))
+ }
+@@ -172,13 +183,19 @@ pub fn publish(conn: &Connection) {
+                 }
+                 None => global = true,
+             },
++            (Table::Sessions, _) if !deleted => {}
+             (Table::Searches, _) if !deleted => match one(r#"SELECT "user_id" FROM "searches" WHERE "id" = ?"#, rowid) {
+                 Some(user) => {
+                     users.insert(user);
+                 }
+                 None => global = true,
+             },
+-            _ => global = true,
++            other => {
++                if *LOG_GLOBAL {
++                    eprintln!("changes: {action:?} {other:?} {rowid}: global");
++                }
++                global = true;
++            }
+         }
+     }
+     let v = &*VERSIONS;
+-- 
+2.56.0.windows.1
+

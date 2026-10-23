@@ -1,0 +1,50 @@
+From 72abcf4dfc7c52c41c278674af079be60cf76c3a Mon Sep 17 00:00:00 2001
+From: Ben Maddox <benwmaddox@gmail.com>
+Date: Fri, 23 Oct 2026 10:56:18 -0400
+Subject: [PATCH 7/7] README: what the optimized branch changes
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ README.md | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/README.md b/README.md
+index a240aef..2676bdc 100644
+--- a/README.md
++++ b/README.md
+@@ -84,6 +84,32 @@ against Rails. See [`parity/SCREENS.md`](parity/SCREENS.md) for coverage and mas
+ [`AGENTS.md`](AGENTS.md) for repository layout and working rules,
+ [`CONTRIBUTING.md`](CONTRIBUTING.md) for contributions, and [`SECURITY.md`](SECURITY.md) for security reports.
+ 
++## The `optimized` branch
++
++This branch is a benchmark variant: the port with ideas from the
++[etch](https://github.com/benwmaddox/etch) experiment applied where they fit idiomatic Rust,
++compared with the published port in etch's mixed benchmark (117 people, 60 rooms, browsers
++using Turbo, people posting). Its own differences:
++
++- **Caches versioned by what each write changes.** The response and fragment caches were keyed
++  by `PRAGMA data_version`, so any commit dropped every cached page and fragment. Now the writer
++  connection's update hook records the rows each write touches, and after commit they become
++  version bumps (`crates/db/src/changes.rs`): a message or boost moves its room's version; a
++  room's touch and the search index the activity version; a membership's read state its user's
++  version; a session made or refreshed nothing; anything else the global version, which every
++  key includes. Room pages key on global + room, the sidebar and search on global + user +
++  activity. Writes from outside this process no longer invalidate the caches.
++  `CAMPFIRE_LOG_GLOBAL_WRITES=1` logs the rows that moved the global version.
++- **Unread as counts.** `rooms.posts_count` and `memberships.seen_posts` (added at boot, with
++  the unread rooms carried over): a post writes the room and its poster, not every member's
++  row. Members connected when a post arrives see it unread too (Rails' 60-second rule is gone).
++- **Shared gzip pieces.** A page's first message is compressed on its own (it followed each
++  viewer's own layout text, so it was a different piece for every viewer), and the layout's
++  import map and stylesheet links are shared fragments.
++- `CAMPFIRE_SPLICE_{FRAGMENTS,TEXT_PIECES,TEXTS}_MB` set the gzip piece stores' budgets.
++
++etch's `bench/mix/rustopt-verify.sh` checks the branch against itself with its caches off.
++
+ ## Known differences
+ 
+ The app keeps the Rails database, storage and current cookie formats compatible. Deliberate
+-- 
+2.56.0.windows.1
+

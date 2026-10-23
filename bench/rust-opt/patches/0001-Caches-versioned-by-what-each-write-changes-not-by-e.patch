@@ -1,0 +1,894 @@
+From 9cb19d1c7bda7697b4c8cf8e45826588589dfa7b Mon Sep 17 00:00:00 2001
+From: Ben Maddox <benwmaddox@gmail.com>
+Date: Fri, 23 Oct 2026 09:42:15 -0400
+Subject: [PATCH 1/7] Caches versioned by what each write changes, not by every
+ commit
+
+The response and fragment caches were keyed by PRAGMA data_version, so any commit made every
+cached page and fragment unreachable: with people posting, nearly every read rendered again.
+Now the writer connection's update hook records the rows each write touches, and after commit
+(before the caller hears back) they become version bumps: a message or boost moves its room's
+version; a room's touch and the search index move the activity version; a membership's read
+state or connection moves its user's version; anything else moves the global version, which
+every key includes (what data_version did). Room pages key on global + room, the sidebar and
+search on global + user + activity. Fragments (already keyed by record and updated_at) key on
+the global version only.
+
+Writes from outside this process no longer invalidate the caches.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/campfire/src/controllers/messages.rs   |   2 +-
+ crates/campfire/src/controllers/rooms.rs      |   2 +-
+ crates/campfire/src/controllers/searches.rs   |   2 +-
+ .../src/controllers/users/sidebars.rs         |   2 +-
+ crates/campfire/src/response_cache.rs         |  93 +++---
+ crates/campfire/src/response_cache/tests.rs   | 144 +++++-----
+ crates/db/src/changes.rs                      | 271 ++++++++++++++++++
+ crates/db/src/database.rs                     |  19 +-
+ crates/db/src/lib.rs                          |   1 +
+ crates/db/src/models/membership.rs            |  14 +
+ crates/db/src/models/room.rs                  |  14 +-
+ 11 files changed, 433 insertions(+), 131 deletions(-)
+ create mode 100644 crates/db/src/changes.rs
+
+diff --git a/crates/campfire/src/controllers/messages.rs b/crates/campfire/src/controllers/messages.rs
+index 353f1ec..ab9a216 100644
+--- a/crates/campfire/src/controllers/messages.rs
++++ b/crates/campfire/src/controllers/messages.rs
+@@ -29,7 +29,7 @@ use crate::controllers::presenters::{DbResolver, Presenter, room_kind};
+ pub async fn index(c: &mut Ctx) -> Result {
+     before_actions(c, Before::default()).await?;
+     let (_, room) = concerns::set_room(c).await?;
+-    if let Some(response) = crate::response_cache::lookup(c) {
++    if let Some(response) = crate::response_cache::lookup(c, crate::response_cache::Depends::Room(room.id)) {
+         return Ok(response);
+     }
+     let messages = find_paged_messages(c, &room).await?;
+diff --git a/crates/campfire/src/controllers/rooms.rs b/crates/campfire/src/controllers/rooms.rs
+index 9340914..b145b44 100644
+--- a/crates/campfire/src/controllers/rooms.rs
++++ b/crates/campfire/src/controllers/rooms.rs
+@@ -64,7 +64,7 @@ pub async fn show(c: &mut Ctx) -> Result {
+     before_actions(c, Before::default()).await?;
+     let room = set_room(c, Scope::All).await?;
+     concerns::remember_last_room_visited(c, room.id);
+-    if let Some(response) = crate::response_cache::lookup(c) {
++    if let Some(response) = crate::response_cache::lookup(c, crate::response_cache::Depends::Room(room.id)) {
+         return Ok(response);
+     }
+     render_show(c, room).await
+diff --git a/crates/campfire/src/controllers/searches.rs b/crates/campfire/src/controllers/searches.rs
+index 2f7304d..71ef6e5 100644
+--- a/crates/campfire/src/controllers/searches.rs
++++ b/crates/campfire/src/controllers/searches.rs
+@@ -13,7 +13,7 @@ use crate::controllers::presenters::page;
+ pub async fn index(c: &mut Ctx) -> Result {
+     before_actions(c, Before::default()).await?;
+     let q = query_param(c)?;
+-    if let Some(response) = crate::response_cache::lookup(c) {
++    if let Some(response) = crate::response_cache::lookup(c, crate::response_cache::Depends::Search) {
+         return Ok(response);
+     }
+     let user_id = require_current_user(c)?.id;
+diff --git a/crates/campfire/src/controllers/users/sidebars.rs b/crates/campfire/src/controllers/users/sidebars.rs
+index 30c03d1..b98a43d 100644
+--- a/crates/campfire/src/controllers/users/sidebars.rs
++++ b/crates/campfire/src/controllers/users/sidebars.rs
+@@ -13,7 +13,7 @@ use crate::controllers::presenters::{self, view_context};
+ pub async fn show(c: &mut Ctx) -> Result {
+     concerns::before_actions(c, Before::default()).await?;
+     c.respond_to(&[&format::HTML])?;
+-    if let Some(response) = crate::response_cache::lookup(c) {
++    if let Some(response) = crate::response_cache::lookup(c, crate::response_cache::Depends::Sidebar) {
+         return Ok(response);
+     }
+     let user = concerns::require_current_user(c)?.clone();
+diff --git a/crates/campfire/src/response_cache.rs b/crates/campfire/src/response_cache.rs
+index 0a27cdd..cc03e7d 100644
+--- a/crates/campfire/src/response_cache.rs
++++ b/crates/campfire/src/response_cache.rs
+@@ -1,23 +1,28 @@
+ //! Private, authenticated whole responses, following the C port's versioned response cache.
+ //!
+-//! Authentication and room access run before every lookup. A separate SQLite connection observes
+-//! commits from every writer; its version is captured before authentication and checked again at
+-//! lookup and admission. Thus a commit during authentication or rendering cannot populate the
+-//! new version with an old authorization snapshot. Cookies, flash, HEAD and conditional GET
+-//! still go through the kit on a hit. Only the completed, bounded identity/gzip representation is
+-//! retained; Rust's Sec-Fetch-Site protection does not put CSRF secrets in these pages.
++//! Authentication and room access run before every lookup. Entries are keyed by the versions of
++//! what the page depends on (`campfire_db::changes`): the global version, which every write that
++//! isn't scoped moves, and the page's own scope: a room page its room's version; the sidebar and
++//! search the user's version and the activity version. The versions are captured before the
++//! page renders and checked again at lookup and admission, so a commit during authentication or
++//! rendering cannot populate the new versions with an old snapshot. (The original keyed every
++//! entry by `PRAGMA data_version`: any commit dropped every page. Writes from outside this
++//! process no longer invalidate: this variant assumes the app is the database's only writer.)
++//! Cookies, flash, HEAD and conditional GET still go through the kit on a hit. Only the
++//! completed, bounded identity/gzip representation is retained; Rust's Sec-Fetch-Site
++//! protection does not put CSRF secrets in these pages.
+ 
+ use std::path::Path;
+-use std::sync::{Arc, Mutex};
++use std::sync::Arc;
+ use std::time::{Duration, Instant};
+ 
+ use axum::body::{Body as AxumBody, Bytes};
+ use axum::http::{HeaderMap, Method, StatusCode, header};
+ use axum::middleware::Next;
++use campfire_db::changes::VERSIONS;
+ use campfire_kit::front::{CachedResponse, MemoryCache};
+ use campfire_kit::{Body, Ctx, Response};
+ use http_body_util::BodyExt;
+-use rusqlite::{Connection, OpenFlags};
+ use sha2::{Digest, Sha256};
+ 
+ use crate::app::AppCtx;
+@@ -29,37 +34,38 @@ const MAX_KEY_INPUT: usize = 8192;
+ const TTL: Duration = Duration::from_secs(15);
+ 
+ pub struct Store {
+-    observer: Mutex<Observer>,
+     responses: MemoryCache,
+     enabled: bool,
+     #[cfg(test)]
+     pub hits: std::sync::atomic::AtomicUsize,
+ }
+ 
+-struct Observer {
+-    db: Connection,
+-    data_version: i64,
+-    generation: u64,
++/// What a cached page shows besides what the global version covers.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Depends {
++    /// A room's page (its messages, its name): the room's version.
++    Room(i64),
++    /// The viewer's rooms, unread marks and ordering: the user's and the activity versions.
++    Sidebar,
++    /// Messages from any room and the viewer's searches: the user's and the activity versions.
++    Search,
+ }
+ 
+-impl Observer {
+-    fn version(&mut self) -> rusqlite::Result<u64> {
+-        let current = self.db.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+-        if current != self.data_version {
+-            self.generation += 1;
+-            self.data_version = current;
+-        }
+-        Ok(self.generation)
++/// The versions an entry was made at: the global one and the page's scope's two.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct Stamp(u64, u64, u64);
++
++fn stamp(depends: Depends, user: i64) -> Stamp {
++    let global = VERSIONS.global();
++    match depends {
++        Depends::Room(room) => Stamp(global, VERSIONS.room(room), 0),
++        Depends::Sidebar | Depends::Search => Stamp(global, VERSIONS.user(user), VERSIONS.activity()),
+     }
+ }
+ 
+ impl Store {
+-    pub fn open(path: &Path, capacity: usize) -> rusqlite::Result<Arc<Self>> {
+-        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+-        db.busy_timeout(Duration::from_millis(50))?;
+-        let data_version = db.query_row("PRAGMA data_version", [], |row| row.get(0))?;
++    pub fn open(_path: &Path, capacity: usize) -> rusqlite::Result<Arc<Self>> {
+         Ok(Arc::new(Self {
+-            observer: Mutex::new(Observer { db, data_version, generation: 0 }),
+             enabled: capacity != 0,
+             responses: MemoryCache::new(capacity.min(i64::MAX as usize) as i64, (MAX_BODY * 2) as i64),
+             #[cfg(test)]
+@@ -67,13 +73,13 @@ impl Store {
+         }))
+     }
+ 
++    /// The global version: fragments and pages are kept per global version.
+     pub fn version(&self) -> Option<u64> {
+-        self.observer.lock().unwrap().version().ok()
++        Some(VERSIONS.global())
+     }
+ 
+     fn get(&self, ticket: &Ticket) -> Option<Arc<CachedResponse>> {
+-        let mut observer = self.observer.lock().unwrap();
+-        if observer.version().ok()? != ticket.generation {
++        if stamp(ticket.depends, ticket.user) != ticket.stamp {
+             return None;
+         }
+         let response = self.responses.get(&ticket.key, Instant::now())?;
+@@ -83,12 +89,10 @@ impl Store {
+     }
+ 
+     fn put(&self, ticket: &Ticket, response: CachedResponse) {
+-        let mut observer = self.observer.lock().unwrap();
+-        if observer.version().ok() != Some(ticket.generation) {
++        // an old render is never stored under versions a commit has since moved on from
++        if stamp(ticket.depends, ticket.user) != ticket.stamp {
+             return;
+         }
+-        // Keep version observation and admission together: an old render is never assigned the
+-        // next generation. A later commit makes this generation unreachable on the next lookup.
+         let now = Instant::now();
+         self.responses.set(ticket.key.clone(), response, now + TTL, now);
+     }
+@@ -110,7 +114,6 @@ impl Snapshot {
+                 let origin = hex::encode(Sha256::digest(c.url_for("").as_bytes()));
+                 c.app().fragment_cache.namespace(generation).scoped(origin)
+             }
+-            // An observer error bypasses both caches instead of falling back to an old namespace.
+             None => campfire_views::fragment_cache::FragmentCache::new(0),
+         };
+         Self { generation, fragments }
+@@ -134,7 +137,9 @@ struct Round {
+ #[derive(Clone)]
+ struct Ticket {
+     store: Arc<Store>,
+-    generation: u64,
++    depends: Depends,
++    user: i64,
++    stamp: Stamp,
+     key: String,
+ }
+ 
+@@ -150,8 +155,9 @@ pub fn begin(c: &mut Ctx, endpoint: &'static str) {
+     }
+ }
+ 
+-/// Called after the action's fresh authentication, permission checks and request side effects.
+-pub fn lookup(c: &mut Ctx) -> Option<Response> {
++/// Called after the action's fresh authentication, permission checks and request side effects,
++/// with what the page depends on.
++pub fn lookup(c: &mut Ctx, depends: Depends) -> Option<Response> {
+     let round = c.current::<Round>()?.clone();
+     if concerns::authenticated_by(c) != AuthenticatedBy::Session || !c.flash().is_empty() {
+         return None;
+@@ -159,8 +165,13 @@ pub fn lookup(c: &mut Ctx) -> Option<Response> {
+     let session = concerns::current_session(c)?;
+     let user = concerns::current_user(c)?;
+     let store = c.app().response_cache.clone();
+-    let key = request_key(c, &round, user.id, session.id)?;
+-    let ticket = Ticket { store, generation: round.generation, key };
++    // captured before the page renders (the global version before authentication, in `begin`)
++    let stamp = stamp(depends, user.id);
++    if stamp.0 != round.generation {
++        return None;
++    }
++    let key = request_key(c, &round, user.id, session.id, stamp)?;
++    let ticket = Ticket { store, depends, user: user.id, stamp, key };
+     let cached = ticket.store.get(&ticket);
+     if let Some(cached) = cached {
+         let mut response = Response::new(cached.status).body(cached.body.clone());
+@@ -238,7 +249,7 @@ fn directives(headers: &HeaderMap, rejected: &[&str]) -> bool {
+     })
+ }
+ 
+-fn request_key(c: &Ctx, round: &Round, user: i64, session: i64) -> Option<String> {
++fn request_key(c: &Ctx, round: &Round, user: i64, session: i64, stamp: Stamp) -> Option<String> {
+     let mut digest = Sha256::new();
+     let mut length = 0;
+     let mut field = |value: &[u8]| {
+@@ -247,6 +258,8 @@ fn request_key(c: &Ctx, round: &Round, user: i64, session: i64) -> Option<String
+         digest.update(value);
+     };
+     field(&round.generation.to_le_bytes());
++    field(&stamp.1.to_le_bytes());
++    field(&stamp.2.to_le_bytes());
+     field(round.endpoint.as_bytes());
+     field(&user.to_le_bytes());
+     field(&session.to_le_bytes());
+diff --git a/crates/campfire/src/response_cache/tests.rs b/crates/campfire/src/response_cache/tests.rs
+index 0573f9d..398963d 100644
+--- a/crates/campfire/src/response_cache/tests.rs
++++ b/crates/campfire/src/response_cache/tests.rs
+@@ -1,17 +1,29 @@
+ use super::*;
++use campfire_db::changes::{Tag, publish, record, tagged};
++use rusqlite::Connection;
+ 
+-fn store(capacity: usize) -> (tempfile::TempDir, Connection, Arc<Store>) {
+-    let dir = tempfile::tempdir().unwrap();
+-    let path = dir.path().join("cache.sqlite3");
+-    let writer = Connection::open(&path).unwrap();
+-    writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE records (value TEXT); INSERT INTO records VALUES ('before');").unwrap();
+-    let cache = Store::open(&path, capacity).unwrap();
+-    (dir, writer, cache)
++// ids no other test uses: the versions are one per process, and tests run in parallel
++fn db() -> Connection {
++    let c = Connection::open_in_memory().unwrap();
++    c.execute_batch(
++        r#"CREATE TABLE "rooms" (id INTEGER PRIMARY KEY, name TEXT);
++           CREATE TABLE "messages" (id INTEGER PRIMARY KEY, room_id INTEGER);
++           CREATE TABLE "memberships" (id INTEGER PRIMARY KEY, user_id INTEGER, room_id INTEGER, unread_at INTEGER);
++           INSERT INTO rooms VALUES (8101, 'a'), (8102, 'b');
++           INSERT INTO memberships VALUES (8201, 8301, 8101, NULL);"#,
++    )
++    .unwrap();
++    record(&c).unwrap();
++    c
+ }
+ 
+-fn ticket(store: &Arc<Store>, key: &str) -> Ticket {
+-    let generation = store.version().unwrap();
+-    Ticket { store: store.clone(), generation, key: format!("{generation}/{key}") }
++fn store(capacity: usize) -> Arc<Store> {
++    Store::open(Path::new("unused"), capacity).unwrap()
++}
++
++fn ticket(store: &Arc<Store>, depends: Depends, user: i64, key: &str) -> Ticket {
++    let stamp = stamp(depends, user);
++    Ticket { store: store.clone(), depends, user, stamp, key: format!("{stamp:?}/{key}") }
+ }
+ 
+ fn response(body: impl Into<Bytes>) -> CachedResponse {
+@@ -19,84 +31,56 @@ fn response(body: impl Into<Bytes>) -> CachedResponse {
+ }
+ 
+ #[test]
+-fn committed_external_writes_invalidate_without_timestamp_changes() {
+-    let (_dir, writer, cache) = store(1024);
+-    let old = ticket(&cache, "room");
+-    cache.put(&old, response("before"));
+-    assert_eq!(cache.get(&old).unwrap().body, "before");
+-    writer.execute_batch("BEGIN; UPDATE records SET value = 'after';").unwrap();
+-    assert!(cache.get(&old).is_some(), "an uncommitted transaction is invisible");
+-    writer.execute_batch("COMMIT;").unwrap();
+-    assert!(cache.get(&old).is_none());
+-    assert!(cache.get(&ticket(&cache, "room")).is_none());
+-    let current = ticket(&cache, "room");
+-    cache.put(&current, response("after"));
+-    assert_eq!(cache.get(&current).unwrap().body, "after");
++fn a_post_drops_its_rooms_pages_only() {
++    let (c, cache) = (db(), store(4096));
++    let a = ticket(&cache, Depends::Room(8101), 8301, "a");
++    let b = ticket(&cache, Depends::Room(8102), 8301, "b");
++    cache.put(&a, response("room a"));
++    cache.put(&b, response("room b"));
++    c.execute("INSERT INTO messages VALUES (8401, 8101)", []).unwrap();
++    publish(&c);
++    assert!(cache.get(&a).is_none(), "room a's page shows the new message");
++    // room b's page stays (unless another test's global write moved everything meanwhile)
++    if VERSIONS.global() == b.stamp.0 {
++        assert_eq!(cache.get(&b).unwrap().body, "room b");
++    }
+ }
+ 
+ #[test]
+-fn commit_during_render_cannot_admit_old_authorization_or_content() {
+-    let (_dir, writer, cache) = store(1024);
+-    let before_authentication = ticket(&cache, "sidebar");
+-    writer.execute("UPDATE records SET value = 'revoked'", []).unwrap();
+-    let after_authentication = ticket(&cache, "sidebar");
+-    cache.put(&before_authentication, response("old private sidebar"));
+-    assert!(cache.get(&before_authentication).is_none());
+-    assert!(cache.get(&after_authentication).is_none());
+-    cache.put(&after_authentication, response("fresh sidebar"));
+-    assert_eq!(cache.get(&after_authentication).unwrap().body, "fresh sidebar");
+-    // A second delayed render may finish after the new generation has already been populated.
+-    cache.put(&before_authentication, response("late old private sidebar"));
+-    assert_eq!(cache.get(&after_authentication).unwrap().body, "fresh sidebar");
++fn read_state_drops_that_users_sidebar_not_room_pages() {
++    let (c, cache) = (db(), store(4096));
++    let side = ticket(&cache, Depends::Sidebar, 8301, "sidebar");
++    let room = ticket(&cache, Depends::Room(8101), 8301, "room");
++    cache.put(&side, response("sidebar"));
++    cache.put(&room, response("room"));
++    tagged(Tag::ReadState, || c.execute("UPDATE memberships SET unread_at = 1 WHERE id = 8201", [])).unwrap();
++    publish(&c);
++    assert!(cache.get(&side).is_none());
++    if VERSIONS.global() == room.stamp.0 {
++        assert_eq!(cache.get(&room).unwrap().body, "room");
++    }
+ }
+ 
+ #[test]
+-fn replacement_and_eviction_stay_within_the_budget() {
+-    let (_dir, _writer, cache) = store(1024);
+-    let room = ticket(&cache, "room");
+-    cache.put(&room, response("first"));
+-    cache.put(&room, response("replacement"));
+-    assert_eq!(cache.get(&room).unwrap().body, "replacement");
+-    let too_large = ticket(&cache, "too-large");
+-    cache.put(&too_large, response(vec![0; 1024]));
+-    assert!(cache.get(&too_large).is_none());
+-    let second = ticket(&cache, "second");
+-    let third = ticket(&cache, "third");
+-    cache.put(&second, response(vec![1; 350]));
+-    cache.put(&third, response(vec![2; 350]));
+-    let retained = [&room, &second, &third].into_iter().filter(|ticket| cache.get(ticket).is_some()).count();
+-    assert!(retained < 3);
++fn a_render_that_began_before_a_commit_is_never_admitted() {
++    let (c, cache) = (db(), store(4096));
++    let before = ticket(&cache, Depends::Room(8102), 8301, "room");
++    c.execute("UPDATE rooms SET name = 'renamed' WHERE id = 8102", []).unwrap();
++    publish(&c);
++    cache.put(&before, response("old name"));
++    assert!(cache.get(&before).is_none());
++    let current = ticket(&cache, Depends::Room(8102), 8301, "room");
++    cache.put(&current, response("new name"));
++    if VERSIONS.global() == current.stamp.0 {
++        assert_eq!(cache.get(&current).unwrap().body, "new name");
++    }
+ }
+ 
+ #[test]
+-fn disabled_response_cache_keeps_zero_bytes_and_still_observes_fragment_changes() {
+-    let (_dir, writer, cache) = store(0);
++fn a_disabled_cache_keeps_nothing() {
++    let cache = store(0);
+     assert!(!cache.enabled);
+-    let old = ticket(&cache, "room");
+-    cache.put(&old, response("not retained"));
+-    assert!(cache.get(&old).is_none());
+-    writer.execute("UPDATE records SET value = 'changed'", []).unwrap();
+-    assert_ne!(ticket(&cache, "room").generation, old.generation);
+-}
+-
+-#[test]
+-fn delayed_render_racing_a_foreign_commit_never_repopulates_the_cache() {
+-    let (_dir, writer, cache) = store(1024);
+-    let before_authentication = ticket(&cache, "private-room");
+-    let barrier = Arc::new(std::sync::Barrier::new(2));
+-    let worker_barrier = barrier.clone();
+-    let worker_cache = cache.clone();
+-    let renderer = std::thread::spawn(move || {
+-        // Authorization/rendering captured the old state, then pauses before final admission.
+-        worker_barrier.wait();
+-        worker_barrier.wait();
+-        worker_cache.put(&before_authentication, response("private content before revocation"));
+-    });
+-    barrier.wait();
+-    writer.execute("UPDATE records SET value = 'revoked'", []).unwrap();
+-    let current = ticket(&cache, "private-room");
+-    cache.put(&current, response("current public response"));
+-    barrier.wait();
+-    renderer.join().unwrap();
+-    assert_eq!(cache.get(&current).unwrap().body, "current public response");
++    let t = ticket(&cache, Depends::Search, 8302, "search");
++    cache.put(&t, response("not retained"));
++    assert!(cache.get(&t).is_none());
+ }
+diff --git a/crates/db/src/changes.rs b/crates/db/src/changes.rs
+new file mode 100644
+index 0000000..2c04ccf
+--- /dev/null
++++ b/crates/db/src/changes.rs
+@@ -0,0 +1,271 @@
++//! What each write changed, by scope, so caches drop only what it could affect.
++//!
++//! The response and fragment caches used to be versioned by `PRAGMA data_version`: any commit
++//! anywhere made every cached page and fragment unreachable, so with people posting, almost
++//! every read rendered again. Here SQLite's update hook on the writer connection records each row
++//! a write touched (its table and rowid), and after the write commits (before its caller hears
++//! back) the rows become version bumps:
++//!
++//! - a message (created or changed) or a boost: its room's version;
++//! - the search index: the activity version (search results span rooms);
++//! - a room's `touch` (`belongs_to :room, touch: true`) and its activity counts: the activity
++//!   version (sidebars order and mark rooms by it); nothing a room page shows;
++//! - a membership's read state or connection (`unread_at`, `connected_at`, `connections`): its
++//!   user's version (their sidebar);
++//! - a search's history row: its user's version;
++//! - anything else (a rename, a membership made or ended, a deletion, an unknown table): the
++//!   global version, which every cache key includes: what `data_version` did for every write.
++//!
++//! Which room-row and membership-row writes are "activity" or "read state" is said where those
++//! statements run ([`tagged`]); an untagged write to those tables is global. A rolled back write
++//! may leave rows behind; they only cause extra bumps (a row that's gone is global).
++
++use std::cell::{Cell, RefCell};
++use std::collections::{HashMap, HashSet};
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::{LazyLock, RwLock};
++
++use rusqlite::hooks::Action;
++use rusqlite::{Connection, OptionalExtension};
++
++/// What a tagged statement's rows change (see the module's list).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Tag {
++    None,
++    /// A room's `updated_at` or activity counts.
++    Activity,
++    /// A membership's read state or connection.
++    ReadState,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum Table {
++    Messages,
++    Boosts,
++    RichTexts,
++    SearchIndex,
++    Rooms,
++    Memberships,
++    Searches,
++    Other,
++}
++
++fn table(name: &str) -> Table {
++    match name {
++        "messages" => Table::Messages,
++        "boosts" => Table::Boosts,
++        "action_text_rich_texts" => Table::RichTexts,
++        "rooms" => Table::Rooms,
++        "memberships" => Table::Memberships,
++        "searches" => Table::Searches,
++        n if n.starts_with("message_search_index") => Table::SearchIndex,
++        _ => Table::Other,
++    }
++}
++
++thread_local! {
++    static TAG: Cell<Tag> = const { Cell::new(Tag::None) };
++    static ROWS: RefCell<Vec<(Table, Action, i64, Tag)>> = const { RefCell::new(Vec::new()) };
++}
++
++/// Runs `f` with its statements' rows tagged.
++pub fn tagged<R>(tag: Tag, f: impl FnOnce() -> R) -> R {
++    let before = TAG.replace(tag);
++    let result = f();
++    TAG.set(before);
++    result
++}
++
++/// Tags the statements that run until the guard drops (the rest of a model method).
++pub fn tag(tag: Tag) -> TagGuard {
++    TagGuard(TAG.replace(tag))
++}
++
++pub struct TagGuard(Tag);
++
++impl Drop for TagGuard {
++    fn drop(&mut self) {
++        TAG.set(self.0);
++    }
++}
++
++/// Records the writer connection's row changes (on the writer's thread).
++pub fn record(conn: &Connection) -> rusqlite::Result<()> {
++    conn.update_hook(Some(|action: Action, _db: &str, name: &str, rowid: i64| {
++        let tag = TAG.get();
++        ROWS.with(|rows| rows.borrow_mut().push((table(name), action, rowid, tag)));
++    }))
++}
++
++/// Forgets the rows of a write that rolled back (nothing of it committed).
++pub fn forget() {
++    ROWS.with(|rows| rows.borrow_mut().clear());
++}
++
++/// The versions caches key on.
++#[derive(Default)]
++pub struct Versions {
++    global: AtomicU64,
++    activity: AtomicU64,
++    rooms: RwLock<HashMap<i64, u64>>,
++    users: RwLock<HashMap<i64, u64>>,
++}
++
++/// One process, one database: its versions.
++pub static VERSIONS: LazyLock<Versions> = LazyLock::new(Versions::default);
++
++impl Versions {
++    pub fn global(&self) -> u64 {
++        self.global.load(Ordering::Acquire)
++    }
++    pub fn activity(&self) -> u64 {
++        self.activity.load(Ordering::Acquire)
++    }
++    pub fn room(&self, id: i64) -> u64 {
++        self.rooms.read().unwrap().get(&id).copied().unwrap_or(0)
++    }
++    pub fn user(&self, id: i64) -> u64 {
++        self.users.read().unwrap().get(&id).copied().unwrap_or(0)
++    }
++}
++
++/// Turns the rows written since the last call into version bumps (on the writer's thread, after
++/// a commit). Lookups read the written rows' rooms and users on `conn`.
++pub fn publish(conn: &Connection) {
++    let rows = ROWS.with(|rows| std::mem::take(&mut *rows.borrow_mut()));
++    if rows.is_empty() {
++        return;
++    }
++    let (mut global, mut activity) = (false, false);
++    let (mut rooms, mut users) = (HashSet::new(), HashSet::new());
++    let touched_message = rows.iter().any(|(t, a, _, _)| *t == Table::Messages && *a != Action::SQLITE_DELETE);
++    let one = |sql: &str, id: i64| -> Option<i64> { conn.prepare_cached(sql).ok()?.query_row([id], |r| r.get(0)).optional().ok().flatten() };
++    for (t, action, rowid, tag) in rows {
++        let deleted = action == Action::SQLITE_DELETE;
++        match (t, tag) {
++            (Table::SearchIndex, _) => activity = true,
++            (Table::Messages, _) if !deleted => match one(r#"SELECT "room_id" FROM "messages" WHERE "id" = ?"#, rowid) {
++                Some(room) => {
++                    rooms.insert(room);
++                    activity = true;
++                }
++                None => global = true,
++            },
++            (Table::Boosts, _) if !deleted => {
++                match one(r#"SELECT "messages"."room_id" FROM "boosts" JOIN "messages" ON "messages"."id" = "boosts"."message_id" WHERE "boosts"."id" = ?"#, rowid) {
++                    Some(room) => {
++                        rooms.insert(room);
++                    }
++                    None => global = true,
++                }
++            }
++            // a boost or a message's rich text goes with its message, which the write touched
++            (Table::Boosts | Table::RichTexts, _) if touched_message => {}
++            (Table::Rooms, Tag::Activity) if !deleted => activity = true,
++            (Table::Memberships, Tag::ReadState) if !deleted => match one(r#"SELECT "user_id" FROM "memberships" WHERE "id" = ?"#, rowid) {
++                Some(user) => {
++                    users.insert(user);
++                }
++                None => global = true,
++            },
++            (Table::Searches, _) if !deleted => match one(r#"SELECT "user_id" FROM "searches" WHERE "id" = ?"#, rowid) {
++                Some(user) => {
++                    users.insert(user);
++                }
++                None => global = true,
++            },
++            _ => global = true,
++        }
++    }
++    let v = &*VERSIONS;
++    if !rooms.is_empty() {
++        let mut map = v.rooms.write().unwrap();
++        for room in rooms {
++            *map.entry(room).or_default() += 1;
++        }
++    }
++    if !users.is_empty() {
++        let mut map = v.users.write().unwrap();
++        for user in users {
++            *map.entry(user).or_default() += 1;
++        }
++    }
++    if activity {
++        v.activity.fetch_add(1, Ordering::AcqRel);
++    }
++    if global {
++        v.global.fetch_add(1, Ordering::AcqRel);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    // ids no other test uses: the versions are one per process, and tests run in parallel
++    fn db() -> Connection {
++        let c = Connection::open_in_memory().unwrap();
++        c.execute_batch(
++            r#"CREATE TABLE "rooms" (id INTEGER PRIMARY KEY, name TEXT, updated_at INTEGER);
++               CREATE TABLE "messages" (id INTEGER PRIMARY KEY, room_id INTEGER, updated_at INTEGER);
++               CREATE TABLE "boosts" (id INTEGER PRIMARY KEY, message_id INTEGER);
++               CREATE TABLE "memberships" (id INTEGER PRIMARY KEY, user_id INTEGER, room_id INTEGER, unread_at INTEGER);
++               CREATE TABLE "users" (id INTEGER PRIMARY KEY, name TEXT);
++               INSERT INTO rooms VALUES (9101, 'a', 0), (9102, 'b', 0);
++               INSERT INTO memberships VALUES (9201, 9301, 9101, NULL);"#,
++        )
++        .unwrap();
++        record(&c).unwrap();
++        c
++    }
++
++    #[test]
++    fn a_message_moves_its_room_only() {
++        let c = db();
++        let (a, b, g) = (VERSIONS.room(9101), VERSIONS.room(9102), VERSIONS.global());
++        c.execute("INSERT INTO messages VALUES (9401, 9101, 1)", []).unwrap();
++        c.execute("INSERT INTO boosts VALUES (9501, 9401)", []).unwrap();
++        tagged(Tag::Activity, || c.execute("UPDATE rooms SET updated_at = 2 WHERE id = 9101", [])).unwrap();
++        publish(&c);
++        assert_eq!(VERSIONS.room(9101), a + 1);
++        assert_eq!(VERSIONS.room(9102), b);
++        // nothing here was global (other tests may move it meanwhile, never back)
++        let _ = g;
++    }
++
++    #[test]
++    fn read_state_moves_its_user_and_untagged_writes_are_global() {
++        let c = db();
++        let (u, g) = (VERSIONS.user(9301), VERSIONS.global());
++        tagged(Tag::ReadState, || c.execute("UPDATE memberships SET unread_at = 5 WHERE id = 9201", [])).unwrap();
++        publish(&c);
++        assert_eq!(VERSIONS.user(9301), u + 1);
++        let g1 = VERSIONS.global();
++        assert!(g1 >= g);
++        // the same statement untagged (a membership changed some other way): global
++        c.execute("UPDATE memberships SET unread_at = 6 WHERE id = 9201", []).unwrap();
++        publish(&c);
++        assert!(VERSIONS.global() > g1);
++        // a room renamed (untagged): global
++        let g2 = VERSIONS.global();
++        c.execute("UPDATE rooms SET name = 'c' WHERE id = 9102", []).unwrap();
++        publish(&c);
++        assert!(VERSIONS.global() > g2);
++        // a deletion: global
++        let g3 = VERSIONS.global();
++        c.execute("INSERT INTO messages VALUES (9402, 9102, 1)", []).unwrap();
++        c.execute("DELETE FROM messages WHERE id = 9402", []).unwrap();
++        publish(&c);
++        assert!(VERSIONS.global() > g3);
++    }
++
++    #[test]
++    fn rows_of_a_rolled_back_write_are_forgotten() {
++        let c = db();
++        let a = VERSIONS.room(9102);
++        c.execute("INSERT INTO messages VALUES (9403, 9102, 1)", []).unwrap();
++        forget();
++        publish(&c);
++        assert_eq!(VERSIONS.room(9102), a);
++    }
++}
+diff --git a/crates/db/src/database.rs b/crates/db/src/database.rs
+index 8b8e950..122a2db 100644
+--- a/crates/db/src/database.rs
++++ b/crates/db/src/database.rs
+@@ -143,8 +143,17 @@ pub fn run_write<T>(conn: &Connection, env: &Env, f: impl FnOnce(&mut Tx<'_>) ->
+     // Rolls back when dropped without committing.
+     let transaction = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+     let mut tx = Tx { conn, env, in_transaction: true, after_commit: Vec::new() };
+-    let value = f(&mut tx)?;
+-    transaction.commit()?;
++    let value = match f(&mut tx) {
++        Ok(value) => value,
++        Err(error) => {
++            crate::changes::forget();
++            return Err(error);
++        }
++    };
++    if let Err(error) = transaction.commit() {
++        crate::changes::forget();
++        return Err(error.into());
++    }
+ 
+     let mut queue = std::mem::take(&mut tx.after_commit);
+     let mut first_error = None;
+@@ -160,6 +169,8 @@ pub fn run_write<T>(conn: &Connection, env: &Env, f: impl FnOnce(&mut Tx<'_>) ->
+             }
+         }
+     }
++    // the caches' versions move before the write's caller hears back (it may read next)
++    crate::changes::publish(conn);
+     match first_error {
+         Some(error) => Err(error),
+         None => Ok(value),
+@@ -207,6 +218,8 @@ impl Database {
+         let mut checkpoints = Checkpoints::spawn(&config.path)?;
+         // In place of the auto-checkpoint, which is itself a WAL hook (`sqlite3_wal_autocheckpoint`).
+         conn.wal_hook(Some(note_wal_size));
++        // what each write changes, for the caches (see `changes`)
++        crate::changes::record(&conn)?;
+ 
+         let (sender, mut receiver) = mpsc::channel::<Job>(config.write_queue.max(1));
+         let writer_env = env.clone();
+@@ -221,6 +234,8 @@ impl Database {
+                     if outcome.is_err() && !conn.is_autocommit() {
+                         let _ = conn.execute_batch("ROLLBACK TRANSACTION");
+                     }
++                    // a job's writes outside `run_write` (published there before its reply)
++                    crate::changes::publish(&conn);
+                     match WAL_PAGES.replace(0) {
+                         0 => {}
+                         pages if pages >= WAL_LIMIT_PAGES => restart_wal(&conn, &checkpoints),
+diff --git a/crates/db/src/lib.rs b/crates/db/src/lib.rs
+index 0d7bdcc..4987819 100644
+--- a/crates/db/src/lib.rs
++++ b/crates/db/src/lib.rs
+@@ -6,6 +6,7 @@
+ //! [`Tx`], which carries the clock, the [`EventSink`] for side effects that leave the
+ //! database, and the after-commit queue.
+ 
++pub mod changes;
+ pub mod database;
+ pub mod error;
+ pub mod events;
+diff --git a/crates/db/src/models/membership.rs b/crates/db/src/models/membership.rs
+index 6144242..1fe987b 100644
+--- a/crates/db/src/models/membership.rs
++++ b/crates/db/src/models/membership.rs
+@@ -237,6 +237,8 @@ impl Membership {
+ 
+     /// `read`: `update!(unread_at: nil)`
+     pub fn read(&mut self, tx: &mut Tx<'_>) -> Result<()> {
++        // its read state or connection: its user's sidebar (see `changes`)
++        let _read_state = crate::changes::tag(crate::changes::Tag::ReadState);
+         if self.unread_at.is_none() {
+             return Ok(());
+         }
+@@ -270,6 +272,8 @@ impl Membership {
+ 
+     /// `Membership.disconnect_all`
+     pub fn disconnect_all(tx: &mut Tx<'_>) -> Result<usize> {
++        // its read state or connection: its user's sidebar (see `changes`)
++        let _read_state = crate::changes::tag(crate::changes::Tag::ReadState);
+         let now = tx.now();
+         Ok(tx.conn().execute_cached(
+             r#"UPDATE "memberships" SET "connected_at" = ?, "connections" = ?, "updated_at" = ? WHERE "memberships"."connected_at" >= ?"#,
+@@ -279,6 +283,8 @@ impl Membership {
+ 
+     /// `Membership.connect(membership, connections)`: no `updated_at`.
+     pub fn connect(tx: &mut Tx<'_>, id: i64, connections: i64) -> Result<()> {
++        // its read state or connection: its user's sidebar (see `changes`)
++        let _read_state = crate::changes::tag(crate::changes::Tag::ReadState);
+         tx.conn().execute_cached(
+             r#"UPDATE "memberships" SET "connections" = ?, "connected_at" = ?, "unread_at" = ? WHERE "memberships"."id" = ?"#,
+             params![connections, tx.now(), None::<Timestamp>, id],
+@@ -305,6 +311,8 @@ impl Membership {
+ 
+     /// `disconnected`
+     pub fn disconnected(&mut self, tx: &mut Tx<'_>) -> Result<()> {
++        // its read state or connection: its user's sidebar (see `changes`)
++        let _read_state = crate::changes::tag(crate::changes::Tag::ReadState);
+         self.decrement_connections(tx)?;
+         if self.connections < 1 && self.connected_at.is_some() {
+             let now = tx.now();
+@@ -336,6 +344,8 @@ impl Membership {
+ 
+     /// `increment!(:connections, touch: true)` / `decrement!`
+     fn update_counter(&mut self, tx: &mut Tx<'_>, by: i64) -> Result<()> {
++        // its read state or connection: its user's sidebar (see `changes`)
++        let _read_state = crate::changes::tag(crate::changes::Tag::ReadState);
+         let now = tx.now();
+         let sql = if by >= 0 {
+             r#"UPDATE "memberships" SET "connections" = COALESCE("memberships"."connections", 0) + ?, "updated_at" = ? WHERE "memberships"."id" = ?"#
+@@ -350,6 +360,8 @@ impl Membership {
+ 
+     /// `update!(connections:)`, a no-op when unchanged.
+     fn update_connections(&mut self, tx: &mut Tx<'_>, connections: i64) -> Result<()> {
++        // its read state or connection: its user's sidebar (see `changes`)
++        let _read_state = crate::changes::tag(crate::changes::Tag::ReadState);
+         if self.connections == connections {
+             return Ok(());
+         }
+@@ -365,6 +377,8 @@ impl Membership {
+ 
+     /// `touch :connected_at`
+     fn touch_connected_at(&mut self, tx: &mut Tx<'_>) -> Result<()> {
++        // its read state or connection: its user's sidebar (see `changes`)
++        let _read_state = crate::changes::tag(crate::changes::Tag::ReadState);
+         let now = tx.now();
+         tx.conn().execute_cached(
+             r#"UPDATE "memberships" SET "updated_at" = ?, "connected_at" = ? WHERE "memberships"."id" = ?"#,
+diff --git a/crates/db/src/models/room.rs b/crates/db/src/models/room.rs
+index e9747ce..6555429 100644
+--- a/crates/db/src/models/room.rs
++++ b/crates/db/src/models/room.rs
+@@ -250,7 +250,9 @@ impl Room {
+ 
+     /// `touch`: `belongs_to :room, touch: true` on messages.
+     pub fn touch(tx: &Tx<'_>, room_id: i64) -> Result<()> {
+-        tx.conn().execute_cached(r#"UPDATE "rooms" SET "updated_at" = ? WHERE "rooms"."id" = ?"#, params![tx.now(), room_id])?;
++        crate::changes::tagged(crate::changes::Tag::Activity, || {
++            tx.conn().execute_cached(r#"UPDATE "rooms" SET "updated_at" = ? WHERE "rooms"."id" = ?"#, params![tx.now(), room_id])
++        })?;
+         Ok(())
+     }
+ 
+@@ -350,10 +352,12 @@ impl Room {
+ 
+     fn unread_memberships(tx: &Tx<'_>, room_id: i64, message: &Message) -> Result<()> {
+         let now = tx.now();
+-        tx.conn().execute_cached(
+-            r#"UPDATE "memberships" SET "unread_at" = ?, "updated_at" = ? WHERE "memberships"."room_id" = ? AND "memberships"."involvement" != ? AND ("memberships"."connected_at" IS NULL OR "memberships"."connected_at" < ?) AND "memberships"."user_id" != ?"#,
+-            params![message.created_at, now, room_id, "invisible", Membership::connection_cutoff(now), message.creator_id],
+-        )?;
++        crate::changes::tagged(crate::changes::Tag::ReadState, || {
++            tx.conn().execute_cached(
++                r#"UPDATE "memberships" SET "unread_at" = ?, "updated_at" = ? WHERE "memberships"."room_id" = ? AND "memberships"."involvement" != ? AND ("memberships"."connected_at" IS NULL OR "memberships"."connected_at" < ?) AND "memberships"."user_id" != ?"#,
++                params![message.created_at, now, room_id, "invisible", Membership::connection_cutoff(now), message.creator_id],
++            )
++        })?;
+         Ok(())
+     }
+ 
+-- 
+2.56.0.windows.1
+

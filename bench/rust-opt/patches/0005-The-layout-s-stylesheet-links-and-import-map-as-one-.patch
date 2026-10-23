@@ -1,0 +1,78 @@
+From eb8e21c99ff58daac43df64dae28ef7edf0e3e7e Mon Sep 17 00:00:00 2001
+From: Ben Maddox <benwmaddox@gmail.com>
+Date: Fri, 23 Oct 2026 10:33:51 -0400
+Subject: [PATCH 5/7] The layout's stylesheet links and import map as one
+ shared fragment each
+
+A room page's head is ~19 KB, ~17 KB of it the same for everyone (the import map and the
+stylesheet links) and ~1 KB the viewer's (the current-user meta tags). As text, the whole head
+was a different gzip piece for every viewer and room, compressed again whenever evicted. Now
+the two long shared texts go into the page as cached fragments (found by their address,
+checked against their bytes): their pieces are made once for everyone, and each viewer's own
+layout text is small.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/views/src/helpers/html.rs              | 28 +++++++++++++++++++
+ .../views/templates/layouts/application.html  |  4 +--
+ 2 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/crates/views/src/helpers/html.rs b/crates/views/src/helpers/html.rs
+index 40ffe94..5671534 100644
+--- a/crates/views/src/helpers/html.rs
++++ b/crates/views/src/helpers/html.rs
+@@ -14,6 +14,34 @@ pub use ruby_compat::erb::{html_escape as escape, push_html_escaped as push_esca
+ /// An html_safe string.
+ pub type Html = Safe<String>;
+ 
++/// `raw` for a long text every page writes the same (the layout's stylesheet links and import
++/// map): written as one shared cached fragment, which a recorded page keeps as a part of its own,
++/// so its gzip piece is made once for everyone instead of once in every viewer's layout text
++/// (whose other bytes differ: the current user's meta tags). Found again by the text's address,
++/// checked against its bytes.
++pub fn raw_shared(text: &str) -> Safe<crate::fragment_cache::Fragment> {
++    use std::collections::HashMap;
++    use std::sync::{Arc, LazyLock, Mutex};
++    static SHARED: LazyLock<Mutex<HashMap<(usize, usize), crate::fragment_cache::Fragment>>> = LazyLock::new(Default::default);
++    let key = (text.as_ptr() as usize, text.len());
++    let fragment = {
++        let mut shared = SHARED.lock().unwrap();
++        match shared.get(&key) {
++            Some(fragment) if fragment.as_str() == text => fragment.clone(),
++            _ => {
++                if shared.len() > 64 {
++                    shared.clear();
++                }
++                let fragment: crate::fragment_cache::Fragment = Arc::new(text.to_string());
++                shared.insert(key, fragment.clone());
++                fragment
++            }
++        }
++    };
++    crate::recorded::hand(&fragment);
++    Safe(fragment)
++}
++
+ /// `raw` / `String#html_safe`, without copying `html`.
+ pub fn raw<T: fmt::Display>(html: T) -> Safe<T> {
+     Safe(html)
+diff --git a/crates/views/templates/layouts/application.html b/crates/views/templates/layouts/application.html
+index 4de48bb..673637d 100644
+--- a/crates/views/templates/layouts/application.html
++++ b/crates/views/templates/layouts/application.html
+@@ -22,10 +22,10 @@
+     {{ h::builder_tag("link", h::attrs().attr("rel", "icon").attr("href", ctx.account.logo_url.as_str()).type_("image/png")) }}
+     {{ h::builder_tag("link", h::attrs().attr("rel", "apple-touch-icon").attr("href", ctx.account.logo_url.as_str())) }}
+ 
+-    {{ h::raw(ctx.stylesheet_tags) }}
++    {{ h::raw_shared(ctx.stylesheet_tags) }}
+     {{ h::custom_styles_tag(ctx) }}
+ 
+-    {{ h::raw(ctx.importmap_tags) }}
++    {{ h::raw_shared(ctx.importmap_tags) }}
+ 
+ {% block head %}{% endblock %}  </head>
+ 
+-- 
+2.56.0.windows.1
+

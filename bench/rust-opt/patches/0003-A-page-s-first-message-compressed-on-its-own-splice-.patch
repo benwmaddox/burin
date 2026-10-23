@@ -1,0 +1,82 @@
+From b2ebbf556fc00641e724f3ab0316c87938fdd89b Mon Sep 17 00:00:00 2001
+From: Ben Maddox <benwmaddox@gmail.com>
+Date: Fri, 23 Oct 2026 10:24:24 -0400
+Subject: [PATCH 3/7] A page's first message compressed on its own; splice
+ budgets configurable
+
+A fragment's stored pieces are keyed by the part before it. A room's first message follows the
+page's layout, which differs per viewer (its current-user meta tags), so its piece was another
+one for every viewer, more than the four kept per fragment: it was compressed again (~10 KB
+against a 32 KB dictionary) on most page loads. A fragment after a text is now compressed on
+its own; fragments after fragments still chain. Mixed load, 117 people: +18% reads at 50
+posts/s, +5% with none; pages ~1 KB larger.
+
+CAMPFIRE_SPLICE_{FRAGMENTS,TEXT_PIECES,TEXTS}_MB set the stores' budgets (defaults unchanged:
+raising them didn't help this load).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/kit/src/deflater/splice.rs | 32 +++++++++++++++++++++++++------
+ 1 file changed, 26 insertions(+), 6 deletions(-)
+
+diff --git a/crates/kit/src/deflater/splice.rs b/crates/kit/src/deflater/splice.rs
+index 51b5d7f..1323692 100644
+--- a/crates/kit/src/deflater/splice.rs
++++ b/crates/kit/src/deflater/splice.rs
+@@ -60,6 +60,13 @@ const MAX_STORED_TEXT_PIECE: usize = MAX_TEXT_PIECE_BYTES / 64;
+ const MAX_TEXT_BYTES: usize = 16 << 20;
+ /// Larger texts are hashed every time, for the same reason larger pieces aren't stored.
+ const MAX_STORED_TEXT: usize = MAX_TEXT_BYTES / 64;
++/// A store's budget: `CAMPFIRE_SPLICE_<NAME>_MB` when set (an install with more people and rooms
++/// than the defaults hold keeps compressing the same pieces again as they're evicted), else
++/// `default` bytes.
++fn budget(name: &str, default: usize) -> usize {
++    std::env::var(format!("CAMPFIRE_SPLICE_{name}_MB")).ok().and_then(|v| v.parse::<usize>().ok()).map(|mb| mb << 20).unwrap_or(default)
++}
++
+ /// What each stored entry costs beyond its bytes: the map's slot, its key and the allocation.
+ pub(super) const ENTRY_OVERHEAD: usize = 128;
+ 
+@@ -237,8 +244,20 @@ impl PageParts {
+ 
+     /// Each part's piece: stored ones where they fit, the rest compressed and stored.
+     fn pieces(&self) -> Vec<Piece> {
+-        let befores: Vec<(Before, &[u8])> =
+-            std::iter::once((Before::Nothing, &b""[..])).chain(self.parts.iter().map(Part::as_before)).collect();
++        // A fragment right after a text (a room's first message, after the page's layout) is
++        // compressed on its own, not against that text: the layout differs from viewer to viewer
++        // (who is reading, in its meta tags), so chained, the first message's piece was another
++        // one for every viewer, more than the few kept per fragment, and was compressed again on
++        // most page loads. Fragments after fragments still chain (consecutive messages share most
++        // of their bytes).
++        let befores: Vec<(Before, &[u8])> = std::iter::once((Before::Nothing, &b""[..]))
++            .chain(self.parts.iter().map(Part::as_before))
++            .zip(&self.parts)
++            .map(|(before, part)| match (part, before.0) {
++                (Part::Fragment { .. }, Before::Text(_)) => (Before::Nothing, &b""[..]),
++                _ => before,
++            })
++            .collect();
+         // Only look up under the locks; compressing happens outside them.
+         let stored: Vec<Option<Piece>> = {
+             let mut fragments = lock(&FRAGMENTS);
+@@ -595,11 +614,12 @@ impl<K: Hash + Eq, V, S: BuildHasher + Default> Generations<K, V, S> {
+ }
+ 
+ static FRAGMENTS: LazyLock<Mutex<KnownFragments>> =
+-    LazyLock::new(|| Mutex::new(Generations::with_budget(MAX_FRAGMENT_BYTES, |_, known| known.cost())));
+-static TEXT_PIECES: LazyLock<Mutex<Generations<(Sha, Before), Piece>>> =
+-    LazyLock::new(|| Mutex::new(Generations::with_budget(MAX_TEXT_PIECE_BYTES, |_, piece| piece.deflated.len() + ENTRY_OVERHEAD)));
++    LazyLock::new(|| Mutex::new(Generations::with_budget(budget("FRAGMENTS", MAX_FRAGMENT_BYTES), |_, known| known.cost())));
++static TEXT_PIECES: LazyLock<Mutex<Generations<(Sha, Before), Piece>>> = LazyLock::new(|| {
++    Mutex::new(Generations::with_budget(budget("TEXT_PIECES", MAX_TEXT_PIECE_BYTES), |_, piece| piece.deflated.len() + ENTRY_OVERHEAD))
++});
+ static TEXT_SHAS: LazyLock<Mutex<Generations<Box<[u8]>, Sha>>> =
+-    LazyLock::new(|| Mutex::new(Generations::with_budget(MAX_TEXT_BYTES, |text, _| text.len() + ENTRY_OVERHEAD)));
++    LazyLock::new(|| Mutex::new(Generations::with_budget(budget("TEXTS", MAX_TEXT_BYTES), |text, _| text.len() + ENTRY_OVERHEAD)));
+ 
+ pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+-- 
+2.56.0.windows.1
+

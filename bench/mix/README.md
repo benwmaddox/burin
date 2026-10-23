@@ -1,7 +1,8 @@
 # The mixed benchmark
 
 Many people (117) reading and posting in many rooms (60), at different rates, against etch,
-crudspec and the Rust port of Campfire (Rails and Flow are stage 2). Read-heavy, with writes
+crudspec, the Rust port of Campfire as published (`rust`) and its optimized variant (`rustopt`,
+`bench/rust-opt`: etch's caching ideas applied in idiomatic Rust). Rails and Flow are stage 2. Read-heavy, with writes
 from various people. Each run is two passes (the second in reverse order) under the shared
 bench lock, in its own network namespace and cgroup, the server on cores 8-11 and the load on
 12-19.
@@ -35,9 +36,9 @@ Every app gets the same load, shaped like browsers using Rails Campfire with Tur
 
 ## Not the same work (read every table with this)
 
-- **Unread.** etch counts posts per room and members' last-seen counts: a post writes the room
-  and the poster's membership. Rails, the Rust port and crudspec mark each disconnected
-  member's row on every post (a write per member).
+- **Unread.** etch and `rustopt` count posts per room and members' last-seen counts: a post
+  writes the room and the poster's membership. Rails, the published Rust port and crudspec
+  mark each disconnected member's row on every post (a write per member).
 - **Presence.** Until stage B, nothing here holds a live connection: Rails' per-visit presence
   writes and its live pushes aren't exercised, and etch has no live updates yet.
 

@@ -1,0 +1,3 @@
+2026-10-23T14:58:44.607Z ready app=rust run=s6-p1-rust conns=64 secs=15 rates=0 10 50 server_cpus=8-11 loadgen_cpus=12-19
+2026-10-23T14:58:50.458Z signed in: 117 people
+2026-10-23T14:59:56.839Z done

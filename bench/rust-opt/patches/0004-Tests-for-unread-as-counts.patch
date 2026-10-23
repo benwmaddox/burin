@@ -1,0 +1,86 @@
+From dcba6b4fd0d45b0afa75330f10d1d204dd862807 Mon Sep 17 00:00:00 2001
+From: Ben Maddox <benwmaddox@gmail.com>
+Date: Fri, 23 Oct 2026 10:33:51 -0400
+Subject: [PATCH 4/7] Tests for unread as counts
+
+The column-order tests know the two new columns; the post and presence tests assert counts
+(and that connected members now see a post unread too: no write per member).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/db/src/tests/callbacks_test.rs  | 15 +++++++++------
+ crates/db/src/tests/columns_test.rs    |  5 +++--
+ crates/db/src/tests/membership_test.rs |  9 +++++++--
+ 3 files changed, 19 insertions(+), 10 deletions(-)
+
+diff --git a/crates/db/src/tests/callbacks_test.rs b/crates/db/src/tests/callbacks_test.rs
+index da22081..9d2b3cb 100644
+--- a/crates/db/src/tests/callbacks_test.rs
++++ b/crates/db/src/tests/callbacks_test.rs
+@@ -30,12 +30,15 @@ fn creating_a_message_touches_the_room_marks_disconnected_members_unread_and_ind
+     assert!(message.updated_at >= message.created_at);
+     assert!(t.read(|c| Room::find(c, id("designers"))).updated_at > room_before.updated_at);
+ 
+-    // Unread: visible, disconnected, not the creator; unread_at is the message's created_at.
+-    let unread = |label: &str| t.read(|c| Membership::find(c, id(label))).unread_at;
+-    assert_eq!(unread("jason_designers"), Some(message.created_at));
+-    assert_eq!(unread("kevin_designers"), Some(message.created_at));
+-    assert_eq!(unread("jz_designers"), None, "connected");
+-    assert_eq!(unread("david_designers"), None, "creator");
++    // Unread: the room counted the post; every member but its creator hasn't seen it. (The
++    // optimized branch dropped Rails' rule that connected members aren't marked: no write per
++    // member.)
++    let room = t.read(|c| Room::find(c, id("designers")));
++    let unread = |label: &str| t.read(|c| Membership::find(c, id(label))).unread_in(&room);
++    assert!(unread("jason_designers"));
++    assert!(unread("kevin_designers"));
++    assert!(unread("jz_designers"), "connected members too");
++    assert!(!unread("david_designers"), "creator");
+ 
+     assert_eq!(fts_body(&t, message.id).as_deref(), Some("Hello there"));
+     assert_eq!(t.events(), vec![Event::PushMessage { room_id: id("designers"), message_id: message.id }]);
+diff --git a/crates/db/src/tests/columns_test.rs b/crates/db/src/tests/columns_test.rs
+index 35f3a8b..522a132 100644
+--- a/crates/db/src/tests/columns_test.rs
++++ b/crates/db/src/tests/columns_test.rs
+@@ -27,8 +27,9 @@ const LAYOUTS: [Layout; 2] = [Layout::Schema, Layout::Migrated];
+ #[rustfmt::skip]
+ const MIGRATED_COLUMNS: &[(&str, &[&str])] = &[
+     ("messages", &["id", "room_id", "creator_id", "created_at", "updated_at", "client_message_id"]),
+-    ("rooms", &["id", "name", "created_at", "updated_at", "type", "creator_id"]),
+-    ("memberships", &["id", "room_id", "user_id", "created_at", "updated_at", "unread_at", "involvement", "connections", "connected_at"]),
++    // `posts_count` and `seen_posts`: the optimized branch's unread counts, added at boot.
++    ("rooms", &["id", "name", "created_at", "updated_at", "type", "creator_id", "posts_count"]),
++    ("memberships", &["id", "room_id", "user_id", "created_at", "updated_at", "unread_at", "involvement", "connections", "connected_at", "seen_posts"]),
+     // `bio`, `bot_token` and `status` were added after the initial schema, and `active` removed.
+     ("users", &["id", "name", "created_at", "updated_at", "role", "email_address", "password_digest", "bio", "bot_token", "status"]),
+     ("sessions", &["id", "user_id", "token", "ip_address", "user_agent", "last_active_at", "created_at", "updated_at"]),
+diff --git a/crates/db/src/tests/membership_test.rs b/crates/db/src/tests/membership_test.rs
+index bb89102..3e444e2 100644
+--- a/crates/db/src/tests/membership_test.rs
++++ b/crates/db/src/tests/membership_test.rs
+@@ -135,14 +135,19 @@ fn refreshing_the_connection() {
+ fn present_marks_read_and_counts_connections() {
+     let t = TestDb::new();
+     let m = t.write(|tx| {
+-        tx.conn().execute("UPDATE memberships SET unread_at = '2026-01-01 00:00:00' WHERE id = ?", [id("david_watercooler")])?;
++        // a post they haven't seen
++        tx.conn().execute(
++            "UPDATE rooms SET posts_count = posts_count + 1 WHERE id = (SELECT room_id FROM memberships WHERE id = ?)",
++            [id("david_watercooler")],
++        )?;
+         let mut m = Membership::find(tx.conn(), id("david_watercooler"))?;
+         m.present(tx)?;
+         Ok(m)
+     });
+     let reloaded = t.read(|c| Membership::find(c, m.id));
+     assert_eq!(reloaded.connections, 1);
+-    assert_eq!(reloaded.unread_at, None);
++    let room = t.read(|c| crate::Room::find(c, reloaded.room_id));
++    assert!(!reloaded.unread_in(&room));
+     assert_eq!(reloaded.updated_at, m.updated_at, "Membership.connect doesn't touch updated_at");
+ }
+ 
+-- 
+2.56.0.windows.1
+

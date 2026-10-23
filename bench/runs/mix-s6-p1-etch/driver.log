@@ -1,0 +1,2 @@
+2026-10-23T14:56:22.432Z ready app=etch run=s6-p1-etch conns=64 secs=15 rates=0 10 50 server_cpus=8-11 loadgen_cpus=12-19
+2026-10-23T14:57:28.683Z done

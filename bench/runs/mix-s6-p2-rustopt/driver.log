@@ -1,0 +1,3 @@
+2026-10-23T15:03:39.919Z ready app=rustopt run=s6-p2-rustopt conns=64 secs=15 rates=0 10 50 server_cpus=8-11 loadgen_cpus=12-19
+2026-10-23T15:03:49.540Z signed in: 117 people
+2026-10-23T15:04:52.882Z done

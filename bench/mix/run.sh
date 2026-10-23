@@ -6,7 +6,9 @@
 # rate. Reports reads/s, CPU per read, read and post latency, memory, and etch's or crudspec's
 # cache figures. Holds the shared bench lock.
 # Run as root:
-#   wsl -d Ubuntu -u root -- bash /mnt/d/code/etch/bench/mix/run.sh <etch|crudspec|rust> <run> [secs] [rates…]
+#   wsl -d Ubuntu -u root -- bash /mnt/d/code/etch/bench/mix/run.sh <etch|crudspec|rust|rustopt> <run> [secs] [rates…]
+# rust is the Rust port as published (~/linuxbench/rust); rustopt its optimized variant
+# (D:/code/campfire-rust-opt, built by build-rust-opt.sh; RUSTOPT_ENV adds settings).
 set -euo pipefail
 [ -n "${BENCH_LOCKED:-}" ] || { exec 9>>/home/ben/linuxbench/bench.lock; flock -x 9; }
 APP=$1; RUN=$2; SECS=${3:-15}; shift 2; [ $# -gt 0 ] && shift; RATES=("$@"); [ ${#RATES[@]} -eq 0 ] && RATES=(0 10 50)
@@ -18,7 +20,7 @@ NS=etchmix; CG=/sys/fs/cgroup/etchmix-srv
 SRV_CPUS=${SRV_CPUS:-8-11}; LG_CPUS=${LG_CPUS:-12-19}
 MIX=$UH/etch-target-mixload/release/mixload
 LGBIN=$UH/cm258/loadgen-linux/release/loadgen
-case "$APP" in etch|crudspec|rust) ;; *) echo "app: etch, crudspec or rust"; exit 64;; esac
+case "$APP" in etch|crudspec|rust|rustopt) ;; *) echo "app: etch, crudspec, rust or rustopt"; exit 64;; esac
 test ! -e "$OUT" || { echo "run $OUT exists"; exit 2; }
 test ! -e "$CG" || { echo "cgroup $CG exists"; exit 2; }
 mkdir -p "$OUT"
@@ -33,13 +35,13 @@ ENVV=(HOME=$UH TZ=America/New_York)
 case "$APP" in
   etch) asu cp -a "$M/etch" "$W/data"; CMD=(${ETCH:-$UH/hw/etch-gen-release} --data "$W/data" --assets /mnt/d/code/etch/apps/campfire/assets --port 13774) ;;
   crudspec) asu cp -a "$M/crudspec" "$W/data"; CMD=(${CRUDSPEC:-$UH/hw/campfire-pk} --data "$W/data" --assets /mnt/d/code/etch/apps/campfire/assets --port 13774) ;;
-  rust)
+  rust|rustopt)
     asu mkdir -p "$W/storage/db" "$W/storage/logs"; asu cp "$M/rails.sqlite3" "$W/storage/db/production.sqlite3"; asu cp -r "$FIX/storage" "$W/storage/files"
     ENVV+=(LANG=C.UTF-8 USER=$U RAILS_ENV=production PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
     # the fixture's environment (its secrets stay in the process: never printed)
     while IFS= read -r line || [ -n "$line" ]; do case "$line" in ''|'#'*) continue;; esac; ENVV+=("$line"); done < "$FIX/reference.env"
     ENVV+=(HTTP_PORT=13774 TARGET_PORT=13775)
-    CMD=($L/rust/bin/campfire server) ;;
+    if [ "$APP" = rustopt ]; then ENVV+=(${RUSTOPT_ENV:-}); CMD=(${RUSTOPT_BIN:-$L/rust-opt/bin/campfire} server); cp $L/rust-opt/REVISION "$OUT/rustopt-revision" 2>/dev/null || true; else CMD=($L/rust/bin/campfire server); fi ;;
 esac
 
 cleanup() {
@@ -65,7 +67,7 @@ note "ready app=$APP run=$RUN conns=$CONNS secs=$SECS rates=${RATES[*]} server_c
 
 # Rails-style apps: everyone signs in (a cookie each) and gets a CSRF token for posting
 COOKIES=()
-if [ "$APP" = rust ]; then
+if [ "$APP" = rust ] || [ "$APP" = rustopt ]; then
   asu node -e '
     const p = require(process.argv[1]);
     for (const x of p.people) console.log([x.id, x.email, x.password, x.rooms[0]].join("\t"));

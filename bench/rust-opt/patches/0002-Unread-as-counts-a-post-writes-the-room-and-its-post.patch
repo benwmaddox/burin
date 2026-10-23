@@ -1,0 +1,535 @@
+From 3f5af2810a3fd1f86316ff05588bdf030f808eeb Mon Sep 17 00:00:00 2001
+From: Ben Maddox <benwmaddox@gmail.com>
+Date: Fri, 23 Oct 2026 09:54:18 -0400
+Subject: [PATCH 2/7] Unread as counts: a post writes the room and its poster,
+ not every member
+
+As in etch: rooms.posts_count counts the room's posts, memberships.seen_posts is the count a
+member last saw, and a room is unread while the room's count is ahead. A post adds one to the
+room (activity) and catches its poster up (their read state); presence and read catch a
+member up. Rails set unread_at on every member's row that wasn't connected (the 60-second
+connected rule is gone, as in etch). The columns are added at boot to a database without them,
+carrying today's unread rooms over. The sidebar's direct-room fragment is also keyed by the
+room's updated_at and its unread state, which a post now changes without touching the
+membership.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/channels/tests/channels_test.rs       | 11 +++---
+ crates/campfire/src/controllers/presenters.rs |  3 +-
+ .../src/controllers/presenters/accounts.rs    | 20 +++++++---
+ crates/db/src/changes.rs                      |  8 +++-
+ crates/db/src/models/membership.rs            | 32 ++++++++++------
+ crates/db/src/models/room.rs                  | 30 +++++++++------
+ crates/db/src/schema.rs                       | 27 ++++++++++++++
+ crates/db/src/tests/columns_test.rs           | 34 ++++++++++++++---
+ crates/db/src/tests/membership_test.rs        |  7 +++-
+ crates/views/src/users.rs                     | 37 ++++++++++++++++---
+ crates/views/tests/parity_a.rs                |  1 +
+ 11 files changed, 161 insertions(+), 49 deletions(-)
+
+diff --git a/crates/campfire/src/channels/tests/channels_test.rs b/crates/campfire/src/channels/tests/channels_test.rs
+index 3a2aabc..1ee9957 100644
+--- a/crates/campfire/src/channels/tests/channels_test.rs
++++ b/crates/campfire/src/channels/tests/channels_test.rs
+@@ -91,13 +91,14 @@ async fn presence_subscribes_and_marks_the_membership_connected() {
+ 
+     let membership = app.membership("designers", "david").await.unwrap();
+     assert!(!membership.is_connected(app.now()));
+-    // A member's unread room gets cleared by `present`.
++    // A member's unread room (a post they haven't seen) gets caught up by `present`.
++    let room_id = membership.room_id;
+     app.db
+-        .write(move |tx| {
+-            tx.conn().execute("UPDATE memberships SET unread_at = '2024-01-01 00:00:00' WHERE id = ?", [membership.id]).map_err(Into::into)
+-        })
++        .write(move |tx| tx.conn().execute("UPDATE rooms SET posts_count = posts_count + 1 WHERE id = ?", [room_id]).map_err(Into::into))
+         .await
+         .unwrap();
++    let room = app.db.read(move |c| campfire_db::Room::find(c, room_id)).await.unwrap();
++    assert!(app.membership("designers", "david").await.unwrap().unread_in(&room));
+ 
+     let presence = room_identifier("PresenceChannel", id("designers"));
+     client.confirm(&presence).await;
+@@ -106,7 +107,7 @@ async fn presence_subscribes_and_marks_the_membership_connected() {
+     let membership = app.membership("designers", "david").await.unwrap();
+     assert!(membership.is_connected(app.now()));
+     assert_eq!(membership.connections, 1);
+-    assert_eq!(membership.unread_at, None);
++    assert!(!membership.unread_in(&room));
+ 
+     client.unsubscribe(&presence).await;
+     eventually(|| async { !app.membership("designers", "david").await.unwrap().is_connected(app.now()) }).await;
+diff --git a/crates/campfire/src/controllers/presenters.rs b/crates/campfire/src/controllers/presenters.rs
+index 8436f57..be812eb 100644
+--- a/crates/campfire/src/controllers/presenters.rs
++++ b/crates/campfire/src/controllers/presenters.rs
+@@ -417,8 +417,9 @@ impl<'a> Presenter<'a> {
+         }
+         Ok(campfire_views::users::SidebarDirect {
+             room_id: room.id,
+-            unread: membership.unread(),
++            unread: membership.unread_in(&room),
+             updated_at_epoch: epoch_string(room.updated_at.jiff()),
++            room_updated_at: room.updated_at.jiff(),
+             members: members.iter().map(|user| self.user_summary(user)).collect(),
+             membership_id: membership.id,
+             membership_updated_at: membership.updated_at.jiff(),
+diff --git a/crates/campfire/src/controllers/presenters/accounts.rs b/crates/campfire/src/controllers/presenters/accounts.rs
+index 975c7c3..3356e3b 100644
+--- a/crates/campfire/src/controllers/presenters/accounts.rs
++++ b/crates/campfire/src/controllers/presenters/accounts.rs
+@@ -148,10 +148,17 @@ pub fn sidebar(conn: &Connection, secrets: &Secrets, user: &User) -> campfire_db
+         .iter()
+         .map(|(membership, room)| {
+             // `cache membership` wraps the whole partial: on a hit Rails loads none of its members.
+-            Ok(match campfire_views::users::cached_direct_room_fragment(membership.id, membership.updated_at.jiff()) {
+-                Some(html) => SidebarDirectItem::Fragment(html),
+-                None => SidebarDirectItem::View(sidebar_direct(conn, secrets, membership, room)?),
+-            })
++            Ok(
++                match campfire_views::users::cached_direct_room_fragment(
++                    membership.id,
++                    membership.updated_at.jiff(),
++                    room.updated_at.jiff(),
++                    membership.unread_in(room),
++                ) {
++                    Some(html) => SidebarDirectItem::Fragment(html),
++                    None => SidebarDirectItem::View(sidebar_direct(conn, secrets, membership, room)?),
++                },
++            )
+         })
+         .collect::<campfire_db::Result<_>>()?;
+     let other_memberships = all_memberships
+@@ -161,7 +168,7 @@ pub fn sidebar(conn: &Connection, secrets: &Secrets, user: &User) -> campfire_db
+             id: room.id,
+             param_key: room_param_key(room.room_type).to_string(),
+             name: room.name.clone().unwrap_or_default(),
+-            unread: membership.unread(),
++            unread: membership.unread_in(room),
+         })
+         .collect();
+ 
+@@ -179,8 +186,9 @@ pub fn sidebar_direct(conn: &Connection, secrets: &Secrets, membership: &Members
+     }
+     Ok(SidebarDirect {
+         room_id: room.id,
+-        unread: membership.unread(),
++        unread: membership.unread_in(room),
+         updated_at_epoch: epoch_string(room.updated_at.jiff()),
++        room_updated_at: room.updated_at.jiff(),
+         members: members.into_iter().map(|user| user_summary(secrets, user)).collect(),
+         membership_id: membership.id,
+         membership_updated_at: membership.updated_at.jiff(),
+diff --git a/crates/db/src/changes.rs b/crates/db/src/changes.rs
+index 2c04ccf..25811bf 100644
+--- a/crates/db/src/changes.rs
++++ b/crates/db/src/changes.rs
+@@ -139,7 +139,8 @@ pub fn publish(conn: &Connection) {
+     let (mut global, mut activity) = (false, false);
+     let (mut rooms, mut users) = (HashSet::new(), HashSet::new());
+     let touched_message = rows.iter().any(|(t, a, _, _)| *t == Table::Messages && *a != Action::SQLITE_DELETE);
+-    let one = |sql: &str, id: i64| -> Option<i64> { conn.prepare_cached(sql).ok()?.query_row([id], |r| r.get(0)).optional().ok().flatten() };
++    let one =
++        |sql: &str, id: i64| -> Option<i64> { conn.prepare_cached(sql).ok()?.query_row([id], |r| r.get(0)).optional().ok().flatten() };
+     for (t, action, rowid, tag) in rows {
+         let deleted = action == Action::SQLITE_DELETE;
+         match (t, tag) {
+@@ -152,7 +153,10 @@ pub fn publish(conn: &Connection) {
+                 None => global = true,
+             },
+             (Table::Boosts, _) if !deleted => {
+-                match one(r#"SELECT "messages"."room_id" FROM "boosts" JOIN "messages" ON "messages"."id" = "boosts"."message_id" WHERE "boosts"."id" = ?"#, rowid) {
++                match one(
++                    r#"SELECT "messages"."room_id" FROM "boosts" JOIN "messages" ON "messages"."id" = "boosts"."message_id" WHERE "boosts"."id" = ?"#,
++                    rowid,
++                ) {
+                     Some(room) => {
+                         rooms.insert(room);
+                     }
+diff --git a/crates/db/src/models/membership.rs b/crates/db/src/models/membership.rs
+index 1fe987b..a12e922 100644
+--- a/crates/db/src/models/membership.rs
++++ b/crates/db/src/models/membership.rs
+@@ -69,6 +69,8 @@ pub struct Membership {
+     pub connections: i64,
+     pub created_at: Timestamp,
+     pub updated_at: Timestamp,
++    /// The room's `posts_count` when the member last read it.
++    pub seen_posts: i64,
+ }
+ 
+ columns! {
+@@ -82,9 +84,13 @@ columns! {
+         connections: "connections",
+         created_at: "created_at",
+         updated_at: "updated_at",
++        seen_posts: "seen_posts",
+     }
+ }
+ 
++/// A membership caught up with its room's posts.
++const SEEN_ALL: &str = r#""seen_posts" = (SELECT "posts_count" FROM "rooms" WHERE "rooms"."id" = "memberships"."room_id")"#;
++
+ impl Membership {
+     pub fn find(conn: &Connection, id: i64) -> Result<Self> {
+         query_one(
+@@ -177,7 +183,7 @@ impl Membership {
+     pub fn unread_count(conn: &Connection, user_id: i64) -> Result<i64> {
+         sql::count(
+             conn,
+-            r#"SELECT COUNT(*) FROM "memberships" WHERE "memberships"."user_id" = ? AND "memberships"."unread_at" IS NOT NULL"#,
++            r#"SELECT COUNT(*) FROM "memberships" INNER JOIN "rooms" ON "rooms"."id" = "memberships"."room_id" WHERE "memberships"."user_id" = ? AND "rooms"."posts_count" > "memberships"."seen_posts""#,
+             [user_id],
+         )
+     }
+@@ -235,25 +241,27 @@ impl Membership {
+         Ok(())
+     }
+ 
+-    /// `read`: `update!(unread_at: nil)`
+-    pub fn read(&mut self, tx: &mut Tx<'_>) -> Result<()> {
+-        // its read state or connection: its user's sidebar (see `changes`)
++    /// `read`: caught up with the room's posts (Rails: `update!(unread_at: nil)`). `room` is
++    /// the membership's room as loaded.
++    pub fn read(&mut self, tx: &mut Tx<'_>, room: &Room) -> Result<()> {
++        // its read state: its user's sidebar (see `changes`)
+         let _read_state = crate::changes::tag(crate::changes::Tag::ReadState);
+-        if self.unread_at.is_none() {
++        if !self.unread_in(room) {
+             return Ok(());
+         }
+         let now = tx.now();
+         tx.conn().execute_cached(
+-            r#"UPDATE "memberships" SET "unread_at" = ?, "updated_at" = ? WHERE "memberships"."id" = ?"#,
+-            params![None::<Timestamp>, now, self.id],
++            &format!(r#"UPDATE "memberships" SET {SEEN_ALL}, "updated_at" = ? WHERE "memberships"."id" = ?"#),
++            params![now, self.id],
+         )?;
+-        self.unread_at = None;
++        self.seen_posts = room.posts_count;
+         self.updated_at = now;
+         Ok(())
+     }
+ 
+-    pub fn unread(&self) -> bool {
+-        self.unread_at.is_some()
++    /// Whether the room has posts this member hasn't seen.
++    pub fn unread_in(&self, room: &Room) -> bool {
++        room.posts_count > self.seen_posts
+     }
+ 
+     /// `destroy`: the user's sockets reconnect after commit, so their subscriptions to this
+@@ -286,8 +294,8 @@ impl Membership {
+         // its read state or connection: its user's sidebar (see `changes`)
+         let _read_state = crate::changes::tag(crate::changes::Tag::ReadState);
+         tx.conn().execute_cached(
+-            r#"UPDATE "memberships" SET "connections" = ?, "connected_at" = ?, "unread_at" = ? WHERE "memberships"."id" = ?"#,
+-            params![connections, tx.now(), None::<Timestamp>, id],
++            &format!(r#"UPDATE "memberships" SET "connections" = ?, "connected_at" = ?, {SEEN_ALL} WHERE "memberships"."id" = ?"#),
++            params![connections, tx.now(), id],
+         )?;
+         Ok(())
+     }
+diff --git a/crates/db/src/models/room.rs b/crates/db/src/models/room.rs
+index 6555429..60830ab 100644
+--- a/crates/db/src/models/room.rs
++++ b/crates/db/src/models/room.rs
+@@ -68,6 +68,9 @@ pub struct Room {
+     pub creator_id: i64,
+     pub created_at: Timestamp,
+     pub updated_at: Timestamp,
++    /// How many messages the room has received: a member has unread messages while it's more
++    /// than their `seen_posts` (one write per post, where Rails marks every member's row).
++    pub posts_count: i64,
+ }
+ 
+ columns! {
+@@ -78,6 +81,7 @@ columns! {
+         creator_id: "creator_id",
+         created_at: "created_at",
+         updated_at: "updated_at",
++        posts_count: "posts_count",
+     }
+ }
+ 
+@@ -342,22 +346,26 @@ impl Room {
+         )
+     }
+ 
+-    /// `room.receive(message)`, from the message's `after_create_commit`: marks members
+-    /// unread, then enqueues the push.
++    /// `room.receive(message)`, from the message's `after_create_commit`: counts the post (its
++    /// members see it unread), then enqueues the push.
+     pub(crate) fn receive(tx: &mut Tx<'_>, room_id: i64, message: &Message) -> Result<()> {
+-        Self::unread_memberships(tx, room_id, message)?;
++        Self::count_post(tx, room_id, message)?;
+         tx.emit_after_commit(Event::PushMessage { room_id, message_id: message.id });
+         Ok(())
+     }
+ 
+-    fn unread_memberships(tx: &Tx<'_>, room_id: i64, message: &Message) -> Result<()> {
+-        let now = tx.now();
+-        crate::changes::tagged(crate::changes::Tag::ReadState, || {
+-            tx.conn().execute_cached(
+-                r#"UPDATE "memberships" SET "unread_at" = ?, "updated_at" = ? WHERE "memberships"."room_id" = ? AND "memberships"."involvement" != ? AND ("memberships"."connected_at" IS NULL OR "memberships"."connected_at" < ?) AND "memberships"."user_id" != ?"#,
+-                params![message.created_at, now, room_id, "invisible", Membership::connection_cutoff(now), message.creator_id],
+-            )
+-        })?;
++    /// One more post in the room, and its poster has seen it: two rows, however many members.
++    /// (Rails sets `unread_at` on every member's row that isn't connected.)
++    fn count_post(tx: &Tx<'_>, room_id: i64, message: &Message) -> Result<()> {
++        {
++            let _activity = crate::changes::tag(crate::changes::Tag::Activity);
++            tx.conn().execute_cached(r#"UPDATE "rooms" SET "posts_count" = "posts_count" + 1 WHERE "rooms"."id" = ?"#, [room_id])?;
++        }
++        let _read_state = crate::changes::tag(crate::changes::Tag::ReadState);
++        tx.conn().execute_cached(
++            r#"UPDATE "memberships" SET "seen_posts" = (SELECT "posts_count" FROM "rooms" WHERE "rooms"."id" = "memberships"."room_id") WHERE "memberships"."room_id" = ? AND "memberships"."user_id" = ?"#,
++            params![room_id, message.creator_id],
++        )?;
+         Ok(())
+     }
+ 
+diff --git a/crates/db/src/schema.rs b/crates/db/src/schema.rs
+index 1fd542e..89e4081 100644
+--- a/crates/db/src/schema.rs
++++ b/crates/db/src/schema.rs
+@@ -94,9 +94,36 @@ pub fn prepare(conn: &mut Connection, environment: &str, clock: &dyn Clock) -> R
+     for addition in ADDITIONS {
+         conn.execute_batch(addition)?;
+     }
++    add_unread_counts(conn)?;
+     Ok(prepared)
+ }
+ 
++/// Unread as counts (`rooms.posts_count`, `memberships.seen_posts`), added to a database that
++/// doesn't have them: every room counts one post, and a member has seen it unless Rails' marked
++/// them unread (`unread_at`), so the same rooms stay unread.
++fn add_unread_counts(conn: &mut Connection) -> Result<()> {
++    let has = |conn: &Connection, table: &str, column: &str| -> Result<bool> {
++        Ok(conn.prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?"))?.exists([column])?)
++    };
++    if has(conn, "rooms", "posts_count")? && has(conn, "memberships", "seen_posts")? {
++        return Ok(());
++    }
++    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
++    if !has(&tx, "rooms", "posts_count")? {
++        tx.execute_batch(
++            r#"ALTER TABLE "rooms" ADD COLUMN "posts_count" integer DEFAULT 0 NOT NULL; UPDATE "rooms" SET "posts_count" = 1;"#,
++        )?;
++    }
++    if !has(&tx, "memberships", "seen_posts")? {
++        tx.execute_batch(
++            r#"ALTER TABLE "memberships" ADD COLUMN "seen_posts" integer DEFAULT 0 NOT NULL;
++               UPDATE "memberships" SET "seen_posts" = CASE WHEN "unread_at" IS NULL THEN 1 ELSE 0 END;"#,
++        )?;
++    }
++    tx.commit()?;
++    Ok(())
++}
++
+ pub fn pending_migrations(conn: &Connection) -> Result<Vec<&'static str>> {
+     let mut stmt = conn.prepare("SELECT 1 FROM schema_migrations WHERE version = ?")?;
+     let mut pending = Vec::new();
+diff --git a/crates/db/src/tests/columns_test.rs b/crates/db/src/tests/columns_test.rs
+index e8e1af5..35f3a8b 100644
+--- a/crates/db/src/tests/columns_test.rs
++++ b/crates/db/src/tests/columns_test.rs
+@@ -136,12 +136,13 @@ fn distinct_room() -> Room {
+         creator_id: 2003,
+         created_at: at(2004),
+         updated_at: at(2005),
++        posts_count: 0,
+     }
+ }
+ 
+ /// A room with every nullable column null.
+ fn unnamed_room() -> Room {
+-    Room { id: 2011, name: None, room_type: RoomType::Direct, creator_id: 2013, created_at: at(2014), updated_at: at(2015) }
++    Room { id: 2011, name: None, room_type: RoomType::Direct, creator_id: 2013, created_at: at(2014), updated_at: at(2015), posts_count: 0 }
+ }
+ 
+ fn user_ids(conn: &Connection) -> Vec<i64> {
+@@ -210,6 +211,7 @@ fn room_by_name(row: &Row<'_>) -> rusqlite::Result<Room> {
+         creator_id: row.get("creator_id")?,
+         created_at: row.get("created_at")?,
+         updated_at: row.get("updated_at")?,
++        posts_count: row.get("posts_count")?,
+     })
+ }
+ 
+@@ -266,12 +268,13 @@ fn membership_by_name(row: &Row<'_>) -> rusqlite::Result<Membership> {
+         connections: row.get("connections")?,
+         created_at: row.get("created_at")?,
+         updated_at: row.get("updated_at")?,
++        seen_posts: row.get("seen_posts")?,
+     })
+ }
+ 
+ /// How `with_ordered_room` selected a membership with its room before, the room's columns aliased
+ /// so that they could be read by name.
+-const WITH_ROOM_BY_NAME: &str = r#"SELECT "memberships".*, "rooms"."id" AS r_id, "rooms"."created_at" AS r_created_at, "rooms"."creator_id" AS r_creator_id, "rooms"."name" AS r_name, "rooms"."type" AS r_type, "rooms"."updated_at" AS r_updated_at FROM "memberships" INNER JOIN "rooms" ON "rooms"."id" = "memberships"."room_id" WHERE "memberships"."user_id" = ?"#;
++const WITH_ROOM_BY_NAME: &str = r#"SELECT "memberships".*, "rooms"."id" AS r_id, "rooms"."created_at" AS r_created_at, "rooms"."creator_id" AS r_creator_id, "rooms"."name" AS r_name, "rooms"."type" AS r_type, "rooms"."updated_at" AS r_updated_at, "rooms"."posts_count" AS r_posts_count FROM "memberships" INNER JOIN "rooms" ON "rooms"."id" = "memberships"."room_id" WHERE "memberships"."user_id" = ?"#;
+ 
+ fn membership_with_room_by_name(row: &Row<'_>) -> rusqlite::Result<(Membership, Room)> {
+     let room = Room {
+@@ -281,6 +284,7 @@ fn membership_with_room_by_name(row: &Row<'_>) -> rusqlite::Result<(Membership,
+         creator_id: row.get("r_creator_id")?,
+         created_at: row.get("r_created_at")?,
+         updated_at: row.get("r_updated_at")?,
++        posts_count: row.get("r_posts_count")?,
+     };
+     Ok((membership_by_name(row)?, room))
+ }
+@@ -305,6 +309,7 @@ fn a_membership_and_its_room_read_each_column_into_their_own_fields() {
+             connections: 3006,
+             created_at: at(3007),
+             updated_at: at(3008),
++            seen_posts: 0,
+         };
+         let unset = Membership {
+             id: 3011,
+@@ -316,6 +321,7 @@ fn a_membership_and_its_room_read_each_column_into_their_own_fields() {
+             connections: 3016,
+             created_at: at(3017),
+             updated_at: at(3018),
++            seen_posts: 0,
+         };
+         for (membership, room) in [(&membership, &room), (&unset, &unnamed)] {
+             insert_room(&conn, room);
+@@ -468,12 +474,30 @@ fn timing_database() -> Connection {
+         let (created_at, updated_at) = (at(id), at(id + 1));
+         insert_room(
+             &conn,
+-            &Room { id, name: Some(format!("Room {id}")), room_type: RoomType::Open, creator_id: 1, created_at, updated_at },
++            &Room {
++                id,
++                name: Some(format!("Room {id}")),
++                room_type: RoomType::Open,
++                creator_id: 1,
++                created_at,
++                updated_at,
++                posts_count: 0,
++            },
+         );
+         let unread_at = (id % 2 == 0).then_some(created_at);
+         let involvement = Some(Involvement::Mentions);
+-        let membership =
+-            Membership { id, room_id: id, user_id: 1, involvement, unread_at, connected_at: None, connections: 0, created_at, updated_at };
++        let membership = Membership {
++            id,
++            room_id: id,
++            user_id: 1,
++            involvement,
++            unread_at,
++            connected_at: None,
++            connections: 0,
++            created_at,
++            updated_at,
++            seen_posts: 0,
++        };
+         insert_membership(&conn, &membership);
+     }
+     for id in 1..=200 {
+diff --git a/crates/db/src/tests/membership_test.rs b/crates/db/src/tests/membership_test.rs
+index 5665632..bb89102 100644
+--- a/crates/db/src/tests/membership_test.rs
++++ b/crates/db/src/tests/membership_test.rs
+@@ -168,6 +168,11 @@ fn reading_is_a_noop_when_already_read() {
+     let t = TestDb::new();
+     let m = membership(&t);
+     let before = m.updated_at;
+-    let m = run(&t, m, |m, tx| m.read(tx));
++    let room = t.read(|c| crate::Room::find(c, m.room_id));
++    let m = t.write(move |tx| {
++        let mut m = m;
++        m.read(tx, &room)?;
++        Ok(m)
++    });
+     assert_eq!(t.read(|c| Membership::find(c, m.id)).updated_at, before);
+ }
+diff --git a/crates/views/src/users.rs b/crates/views/src/users.rs
+index d5fe571..eda3e93 100644
+--- a/crates/views/src/users.rs
++++ b/crates/views/src/users.rs
+@@ -179,6 +179,8 @@ pub struct SidebarDirect {
+     /// The membership's id and `updated_at`: the partial is `cache membership`.
+     pub membership_id: i64,
+     pub membership_updated_at: jiff::Timestamp,
++    /// The room's `updated_at`, which the row shows: a post touches the room, not the membership.
++    pub room_updated_at: jiff::Timestamp,
+ }
+ 
+ /// A direct room on its way into the sidebar: the `users/sidebars/rooms/_direct` fragment when
+@@ -201,7 +203,15 @@ impl From<SidebarDirect> for SidebarDirectItem {
+ /// version is what later renders reuse.
+ pub fn direct_room(ctx: &ViewContext, membership: &SidebarDirect) -> crate::fragment_cache::Fragment {
+     crate::fragment_cache::fetch(
+-        |key| direct_room_fragment_key(key, membership.membership_id, membership.membership_updated_at),
++        |key| {
++            direct_room_fragment_key(
++                key,
++                membership.membership_id,
++                membership.membership_updated_at,
++                membership.room_updated_at,
++                membership.unread,
++            )
++        },
+         || SidebarDirectPartial { ctx, membership: membership.clone() }.render().expect("users/sidebars/rooms/_direct renders"),
+     )
+ }
+@@ -216,11 +226,24 @@ pub fn cached_direct_room(ctx: &ViewContext, item: &SidebarDirectItem) -> askama
+ 
+ /// The `users/sidebars/rooms/_direct` fragment for this membership version, if the current store
+ /// holds it.
+-pub fn cached_direct_room_fragment(membership_id: i64, updated_at: jiff::Timestamp) -> Option<crate::fragment_cache::Fragment> {
+-    crate::fragment_cache::read(|key| direct_room_fragment_key(key, membership_id, updated_at))
+-}
+-
+-fn direct_room_fragment_key(key: &mut String, membership_id: i64, updated_at: jiff::Timestamp) {
++pub fn cached_direct_room_fragment(
++    membership_id: i64,
++    updated_at: jiff::Timestamp,
++    room_updated_at: jiff::Timestamp,
++    unread: bool,
++) -> Option<crate::fragment_cache::Fragment> {
++    crate::fragment_cache::read(|key| direct_room_fragment_key(key, membership_id, updated_at, room_updated_at, unread))
++}
++
++/// `cache membership`, and what the row shows that changes without the membership: the room's
++/// `updated_at` and whether it's unread (counted on the room).
++fn direct_room_fragment_key(
++    key: &mut String,
++    membership_id: i64,
++    updated_at: jiff::Timestamp,
++    room_updated_at: jiff::Timestamp,
++    unread: bool,
++) {
+     crate::fragment_cache::push_record_fragment_key(
+         key,
+         "users/sidebars/rooms/_direct",
+@@ -229,6 +252,8 @@ fn direct_room_fragment_key(key: &mut String, membership_id: i64, updated_at: ji
+         membership_id,
+         updated_at,
+     );
++    use std::fmt::Write;
++    let _ = write!(key, "/{}/{}", room_updated_at.as_microsecond(), if unread { "unread" } else { "read" });
+ }
+ 
+ fn direct_room_digest() -> &'static str {
+diff --git a/crates/views/tests/parity_a.rs b/crates/views/tests/parity_a.rs
+index 4c42c21..cc73ec1 100644
+--- a/crates/views/tests/parity_a.rs
++++ b/crates/views/tests/parity_a.rs
+@@ -352,6 +352,7 @@ fn sidebar<'a>(name: &str, ctx: &'a campfire_views::ViewContext<'a>) -> users::S
+                 members: d["member_names"].as_array().unwrap().iter().map(|n| named(name, n.as_str().unwrap())).collect(),
+                 membership_id: d["room_id"].as_i64().unwrap(),
+                 membership_updated_at: jiff::Timestamp::UNIX_EPOCH,
++                room_updated_at: jiff::Timestamp::UNIX_EPOCH,
+             })
+             .map(users::SidebarDirectItem::from)
+             .collect(),
+-- 
+2.56.0.windows.1
+
