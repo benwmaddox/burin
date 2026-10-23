@@ -403,9 +403,12 @@ impl Parser {
                 }
                 let mut requires = vec![];
                 let mut cookies = vec![];
+                let mut watch = None;
                 loop {
                     if self.eat_kw("require") {
                         requires.push(self.require()?);
+                    } else if self.eat_kw("watch") {
+                        watch = Some(self.ident()?);
                     } else if self.eat_kw("cookie") {
                         let n = self.ident()?;
                         self.expect("=")?;
@@ -414,7 +417,7 @@ impl Parser {
                         break;
                     }
                 }
-                Ok(Decl::Screen { name, params, route, cold, public, ctype, max_age, requires, cookies, body: self.template()?, span })
+                Ok(Decl::Screen { name, params, route, cold, public, ctype, max_age, requires, cookies, watch, body: self.template()?, span })
             }
             "action" => {
                 let name = self.ident()?;
@@ -844,7 +847,7 @@ fn parse_template(raw: &str, span: Span) -> R<Vec<TNode>> {
     enum Frame {
         Root(Vec<TNode>),
         If(Expr, Vec<TNode>, Option<Vec<TNode>>),
-        For(String, Expr, Vec<TNode>),
+        For(String, Expr, Vec<TNode>, bool),
     }
     let mut stack = vec![Frame::Root(vec![])];
     // `{{let x = e}}`: names for the rest of the block they're in (and blocks inside it), put in
@@ -853,7 +856,7 @@ fn parse_template(raw: &str, span: Span) -> R<Vec<TNode>> {
     let mut lets: Vec<Vec<(String, Option<Expr>)>> = vec![vec![]];
     fn push(stack: &mut [Frame], n: TNode) {
         match stack.last_mut().unwrap() {
-            Frame::Root(v) | Frame::For(_, _, v) => v.push(n),
+            Frame::Root(v) | Frame::For(_, _, v, _) => v.push(n),
             Frame::If(_, a, None) => a.push(n),
             Frame::If(_, _, Some(b)) => b.push(n),
         }
@@ -897,7 +900,7 @@ fn parse_template(raw: &str, span: Span) -> R<Vec<TNode>> {
                     let f = stack.pop().unwrap();
                     let n = match f {
                         Frame::If(c, a, b) => TNode::If(c, a, b.unwrap_or_default()),
-                        Frame::For(v, e, body) => TNode::For(v, e, None, body),
+                        Frame::For(v, e, body, live) => TNode::For(v, e, None, body, live),
                         Frame::Root(_) => return Err(herr("{{end}} with nothing open".into())),
                     };
                     if stack.is_empty() {
@@ -909,11 +912,35 @@ fn parse_template(raw: &str, span: Span) -> R<Vec<TNode>> {
                     let v = p.ident()?;
                     p.expect_kw("in")?;
                     let e = with_lets(&p.expr()?, &lets);
+                    let live = p.eat_kw("live");
                     if p.peek() != &Tok::Eof {
                         return p.err("unexpected text after the list in {{for}}");
                     }
+                    if live {
+                        // the element the list is in gets its live id (what the list's changes
+                        // target): `live_<view>` (a page has one of each list; its stream says
+                        // which instance)
+                        let view = match &e {
+                            Expr::Call(f, a, _) if a.len() == 1 => f.clone(),
+                            _ => return Err(herr("a live list is a view of one row: `{{for x in view(row) live}}`".into())),
+                        };
+                        let last = match stack.last_mut().unwrap() {
+                            Frame::Root(v) | Frame::For(_, _, v, _) => v,
+                            Frame::If(_, a, None) => a,
+                            Frame::If(_, _, Some(b)) => b,
+                        };
+                        let Some(TNode::Text(t)) = last.last_mut() else {
+                            return Err(herr("a live list goes right inside an element: `<div …>{{for x in view(row) live}}`".into()));
+                        };
+                        let open = t.rfind('<').filter(|&i| t.ends_with('>') && !t[i..].starts_with("</") && !t[i..].contains("id="));
+                        let Some(_) = open else {
+                            return Err(herr("a live list goes right inside an element (with no id of its own): `<div …>{{for x in view(row) live}}`".into()));
+                        };
+                        t.pop();
+                        t.push_str(&format!(" id=\"live_{view}\">"));
+                    }
                     lets.push(vec![(v.clone(), None)]);
-                    stack.push(Frame::For(v, e, vec![]));
+                    stack.push(Frame::For(v, e, vec![], live));
                 } else {
                     let mut p = parse_code(&code, sp)?;
                     let e = with_lets(&p.expr()?, &lets);

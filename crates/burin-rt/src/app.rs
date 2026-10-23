@@ -55,6 +55,10 @@ pub unsafe trait Glue: Send + Sync + 'static {
     fn list_screen(list: usize) -> usize;
     /// A screen list's bound (its window or limit).
     fn list_bound(list: usize) -> usize;
+    /// A live list's view (its page element is `live_<view>`), None for one that isn't live.
+    fn list_live(list: usize) -> Option<&'static str>;
+    /// The action a screen's live stream runs as its viewer when it opens and closes.
+    fn watch(screen: usize) -> Option<(&'static str, &'static str)>;
     /// A request's screen and its key, from its path.
     fn route(path: &[u8]) -> Option<(usize, i64)>;
     /// Every session: its row's id, its token, its viewer.
@@ -165,6 +169,7 @@ fn build_raw<G: Glue>(ctx: &Ctx, kind: usize, rec: *const u8) -> Vec<u8> {
 
 /// A cached register's value from its record: one piece, compressed once.
 pub fn build<G: Glue>(ctx: &Ctx, kind: usize, rec: *const u8) -> Reg {
+    // (a list item keeps its element's id: Reg::plain)
     let raw = build_raw::<G>(ctx, kind, rec);
     // a list's item is sent inside its list's block: not compressed on its own
     if (0..G::LISTS).any(|l| G::list_item(l) == kind) { Reg::plain(raw) } else { Reg::one(raw) }
@@ -312,6 +317,15 @@ impl Scratch {
     }
 }
 
+/// `<turbo-stream-source src="/_burin/live?s=…&k=…&since=…">`, written into `b` (no allocation):
+/// its length.
+fn live_tag(b: &mut [u8; 160], s: usize, key: i64, since: u64) -> usize {
+    use std::io::Write;
+    let mut w = &mut b[..];
+    let _ = write!(w, "<turbo-stream-source src=\"/_burin/live?s={s}&amp;k={key}&amp;since={since}\"></turbo-stream-source>");
+    160 - w.len()
+}
+
 /// A page's parts, in order, to `sink`: cached pieces from `snap`; fragments rendered for the
 /// viewer now, each merged with the cached pieces it calls (a piece the snapshot doesn't keep is
 /// built now, as it is, and noted in `keep` for the writer to keep). False when a part can't be
@@ -327,6 +341,11 @@ pub fn emit_page<'a, G: Glue>(snap: &'a Snap, c: &Connection, ctx: &Ctx, s: usiz
             }
             match part {
                 Part::Seg(seg) => sink.seg(seg),
+                Part::Live => {
+                    let mut b = [0u8; 160];
+                    let n = live_tag(&mut b, s, key, snap.live_seq);
+                    sink.bytes(&b[..n]);
+                }
                 Part::Render(kind, k) => {
                     if !viewer_loaded {
                         sc.load_viewer::<G>(c, ctx, viewer);
@@ -411,6 +430,8 @@ pub struct Stats {
     pub block_us: AtomicU64,
     /// batches that changed nothing kept (no new snapshot)
     pub quiet: AtomicU64,
+    /// live events published (each to the open pages on its topic)
+    pub live: AtomicU64,
     /// kept pages the scrubber compared with a fresh build, and the ones it found different (and
     /// rebuilt): a missed edge
     pub scrubbed: AtomicU64,
@@ -644,8 +665,8 @@ impl<G: Glue> App<G> {
             let st = &self.stats;
             let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
             let s = format!(
-                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"rendered":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"blocks":{},"block_us":{},"quiet":{},"kept":{},"version":{}}}"#,
-                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.rendered), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced), g(&st.blocks), g(&st.block_us), g(&st.quiet),
+                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"rendered":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"blocks":{},"block_us":{},"quiet":{},"live":{},"kept":{},"version":{}}}"#,
+                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.rendered), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced), g(&st.blocks), g(&st.block_us), g(&st.quiet), g(&st.live),
                 self.snap.load().regs.iter().map(|r| r.len()).sum::<usize>(), self.snap.load().version
             );
             return respond(out, 200, "application/json", &[], s.as_bytes());
@@ -763,6 +784,9 @@ impl<G: Glue> App<G> {
 /// isn't in its audience or its guards don't hold.
 fn fresh<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, uid: i64) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
+    // the live events it includes: read before the database is, so one that commits meanwhile is
+    // sent again (harmless: Turbo replaces an element of the same id) rather than missed
+    snap.live_seq = crate::live::HUB.last();
     if !build_screen::<G>(c, ctx, &mut snap, s, key) {
         return None;
     }
@@ -775,6 +799,7 @@ fn fresh<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, uid: i64) -> Op
 /// A page built per request (a cold screen, a public one): its cached pieces built now too.
 fn per_request<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, viewer: i64) -> Result<(Vec<u8>, Vec<u8>), Option<String>> {
     let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
+    snap.live_seq = crate::live::HUB.last();
     for (kind, k) in G::screen_regs(s, key) {
         let rec = load::<G>(c, ctx, kind, k, 0).ok_or(None)?;
         snap.regs[kind].insert(k, Arc::new(build::<G>(ctx, kind, rec.ptr())));
@@ -798,6 +823,14 @@ fn per_request<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, viewer: i
 }
 
 impl<G: Glue> App<G> {
+    /// A watched screen's action, as `viewer` (a stream opened or closed): not waited for.
+    fn watch(&self, s: usize, key: i64, viewer: i64) {
+        if let Some((name, param)) = G::watch(s) {
+            let (reply, _) = std::sync::mpsc::sync_channel(1);
+            self.send(Cmd::Act { name: name.to_string(), viewer, form: vec![(param.to_string(), key.to_string())], reply });
+        }
+    }
+
     /// A static file: gzip when the browser takes it, kept for a year (its link names its hash).
     fn file(&self, req: &Req, out: &mut Out) {
         let Some(f) = self.files.get().and_then(|fs| fs.get(req.path)) else {
@@ -828,6 +861,44 @@ impl<G: Glue> App<G> {
 }
 
 impl<G: Glue> crate::Handler for App<G> {
+    /// `/_burin/live?s=&k=&since=`: the screen instance's live lists, for a viewer in its
+    /// audience; first what they missed since the page (or the browser's last event).
+    fn live(&self, req: &Req) -> Option<crate::http::Live> {
+        let q = |name: &str| parse_form(req.query).into_iter().find(|(k, _)| k == name).and_then(|(_, v)| v.parse::<i64>().ok());
+        let (s, key, since) = (q("s")? as usize, q("k")?, q("since").unwrap_or(0).max(0) as u64);
+        if s >= G::SCREENS {
+            return None;
+        }
+        let viewer = self.viewer_of(req)?;
+        let snap = self.snap.load();
+        let inst = snap.screens[s].get(&key)?;
+        inst.audience.binary_search(&viewer).ok()?;
+        let topics: Vec<u64> = (0..G::LISTS).filter(|&l| G::list_screen(l) == s && G::list_live(l).is_some()).map(|l| crate::live::list_topic(l, key)).collect();
+        let since = since.max(req.last_event_id);
+        let mut head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Accel-Buffering: no\r\n\r\nretry: 2000\n\n".to_vec();
+        let last = match crate::live::HUB.replay(&topics, since) {
+            crate::live::Replay::Events(es) => {
+                let mut last = since;
+                for e in es {
+                    head.extend_from_slice(&e.bytes);
+                    last = last.max(e.id);
+                }
+                last
+            }
+            crate::live::Replay::Refresh => {
+                let last = crate::live::HUB.last();
+                head.extend_from_slice(&crate::live::event_bytes(last, &crate::live::turbo_stream("refresh", "", None)));
+                last
+            }
+        };
+        self.watch(s, key, viewer);
+        Some(crate::http::Live { topics, viewer, head, last, tag: (s, key) })
+    }
+
+    fn live_closed(&self, live: &crate::http::Live) {
+        self.watch(live.tag.0, live.tag.1, live.viewer);
+    }
+
     fn handle(&self, req: &Req, out: &mut Out) {
         if req.method == b"GET" && req.path.starts_with(b"/assets/") {
             return self.file(req, out);
@@ -942,6 +1013,9 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             continue;
         }
         let mut next = cur.next();
+        // what open pages are sent (topic, Turbo Stream), and audiences that changed
+        let mut live: Vec<(u64, Vec<u8>)> = vec![];
+        let mut revokes: Vec<(u64, Arc<Vec<i64>>)> = vec![];
         let mut forwarded: HashMap<i64, i64> = HashMap::new();
         let mut recheck: HashSet<(usize, i64)> = HashSet::new();
         let (mut shared, mut relist, mut dropped, mut audiences): (HashSet<(usize, i64)>, HashSet<(usize, i64)>, HashSet<(usize, i64)>, HashSet<(usize, i64)>) = Default::default();
@@ -972,20 +1046,33 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                             }
                         }
                     };
+                    let view = G::list_live(a);
+                    if let Some(v) = view {
+                        let target = format!("live_{v}");
+                        live.push((crate::live::list_topic(a, key), crate::live::turbo_stream(if op == 2 { "append" } else { "prepend" }, &target, Some(&reg.seg.raw))));
+                    }
                     next.regs[kind].insert(item, Arc::new(reg));
                     let mut items: Vec<i64> = next.lists[a].get(&key).map(|l| (**l).clone()).unwrap_or_default();
                     // oldest first (op 2): appended, the oldest drops; newest first (op 7): first, the last drops
+                    let mut gone = vec![];
                     if op == 2 {
                         items.push(item);
                         while items.len() > G::list_bound(a).max(1) {
                             let old = items.remove(0);
-                            next.regs[kind].remove(&old);
+                            gone.extend(next.regs[kind].remove(&old));
                         }
                     } else {
                         items.insert(0, item);
                         while items.len() > G::list_bound(a).max(1) {
                             let old = items.pop().unwrap();
-                            next.regs[kind].remove(&old);
+                            gone.extend(next.regs[kind].remove(&old));
+                        }
+                    }
+                    if view.is_some() {
+                        for r in gone {
+                            if let Some(id) = &r.dom_id {
+                                live.push((crate::live::list_topic(a, key), crate::live::turbo_stream("remove", id, None)));
+                            }
                         }
                     }
                     next.lists[a].insert(key, Arc::new(items));
@@ -1053,6 +1140,12 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     for s in &mut next.screens {
                         s.clear();
                     }
+                    // open pages can't be told what changed: they reload
+                    for l in (0..G::LISTS).filter(|&l| G::list_live(l).is_some()) {
+                        for k in next.lists[l].keys() {
+                            live.push((crate::live::list_topic(l, *k), crate::live::turbo_stream("refresh", "", None)));
+                        }
+                    }
                 }
             }
         }
@@ -1068,6 +1161,18 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             }
             let kind = G::list_item(list);
             let Some((_, items)) = G::screen_lists(&c, s, key).into_iter().find(|(l, _)| *l == list) else { continue };
+            // open pages: what left the list is removed; anything new (somewhere in it) reloads
+            if G::list_live(list).is_some() {
+                let before: Vec<i64> = next.lists[list].get(&key).map(|l| (**l).clone()).unwrap_or_default();
+                for id in before.iter().filter(|id| !items.contains(id)) {
+                    if let Some(dom) = cur.regs[kind].get(id).and_then(|r| r.dom_id.clone()) {
+                        live.push((crate::live::list_topic(list, key), crate::live::turbo_stream("remove", &dom, None)));
+                    }
+                }
+                if items.iter().any(|id| !before.contains(id)) {
+                    live.push((crate::live::list_topic(list, key), crate::live::turbo_stream("refresh", "", None)));
+                }
+            }
             for id in &items {
                 if !next.regs[kind].contains_key(id) {
                     if let Some(rec) = load::<G>(&c, &ctx, kind, *id, 0) {
@@ -1079,8 +1184,18 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             next.lists[list].insert(key, Arc::new(items));
             recheck.insert((s, key));
         }
+        // the live lists that show a kind of item, and where an item is in them
+        let live_lists = |kind: usize| (0..G::LISTS).filter(move |&l| G::list_item(l) == kind && G::list_live(l).is_some());
         for (kind, key) in dropped {
-            next.regs[kind].remove(&key);
+            if let Some(dom) = next.regs[kind].remove(&key).and_then(|r| r.dom_id.clone()) {
+                for l in live_lists(kind) {
+                    for (lk, items) in &next.lists[l] {
+                        if items.contains(&key) {
+                            live.push((crate::live::list_topic(l, *lk), crate::live::turbo_stream("remove", &dom, None)));
+                        }
+                    }
+                }
+            }
             shared.remove(&(kind, key));
         }
         for (kind, key) in shared {
@@ -1090,7 +1205,18 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             stats.write_reads.fetch_add(1, Ordering::Relaxed);
             match load::<G>(&c, &ctx, kind, key, 0) {
                 Some(rec) => {
-                    next.regs[kind].insert(key, Arc::new(build::<G>(&ctx, kind, rec.ptr())));
+                    let reg = build::<G>(&ctx, kind, rec.ptr());
+                    // open pages showing it: replaced
+                    if let Some(dom) = &reg.dom_id {
+                        for l in live_lists(kind) {
+                            for (lk, items) in &next.lists[l] {
+                                if items.contains(&key) {
+                                    live.push((crate::live::list_topic(l, *lk), crate::live::turbo_stream("replace", dom, Some(&reg.seg.raw))));
+                                }
+                            }
+                        }
+                    }
+                    next.regs[kind].insert(key, Arc::new(reg));
                 }
                 None => {
                     next.regs[kind].remove(&key);
@@ -1107,9 +1233,14 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     Some((aud, _)) if aud == inst.audience => {}
                     Some((audience, headers)) => {
                         stats.audiences.fetch_add(1, Ordering::Relaxed);
+                        // open streams of anyone it no longer has are closed
+                        let aud = Arc::new(audience.clone());
+                        revokes.extend((0..G::LISTS).filter(|&l| G::list_screen(l) == s && G::list_live(l).is_some()).map(|l| (crate::live::list_topic(l, key), aud.clone())));
                         next.screens[s].insert(key, Arc::new(crate::store::Screen { audience, headers }));
                     }
                     None => {
+                        let none = Arc::new(vec![]);
+                        revokes.extend((0..G::LISTS).filter(|&l| G::list_screen(l) == s && G::list_live(l).is_some()).map(|l| (crate::live::list_topic(l, key), none.clone())));
                         next.screens[s].remove(&key);
                     }
                 }
@@ -1140,7 +1271,24 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
             stats.blocks.fetch_add(made as u64, Ordering::Relaxed);
             stats.block_us.fetch_add(tb.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
+        // the live events, numbered: the snapshot includes up to the last (its pages' streams get
+        // what comes after)
+        let events: Vec<crate::live::Event> = if live.is_empty() {
+            vec![]
+        } else {
+            let first = crate::live::HUB.reserve(live.len());
+            live.into_iter()
+                .enumerate()
+                .map(|(i, (topic, stream))| {
+                    let id = first + i as u64;
+                    crate::live::Event { id, topic, bytes: crate::live::event_bytes(id, &stream) }
+                })
+                .collect()
+        };
+        next.live_seq = crate::live::HUB.last();
+        stats.live.fetch_add(events.len() as u64, Ordering::Relaxed);
         snap.store(Arc::new(next));
+        crate::live::HUB.publish(events, revokes);
         stats.published.store(stats.commits.load(Ordering::SeqCst), Ordering::SeqCst);
         // a slow batch, logged with where its time went (the bench keeps the server's log)
         let took = t0.elapsed();

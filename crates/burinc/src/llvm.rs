@@ -1124,7 +1124,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     self.line(&format!("br label %{le}"));
                     self.block(&le);
                 }
-                TNode::For(v, list, _, body) => {
+                TNode::For(v, list, _, body, _) => {
                     if let Expr::Name(n, _) = list {
                         if let Some(Decl::Const { value: Expr::List(items, _), .. }) = self.m.consts.get(n) {
                             // a constant list: unrolled at compile time

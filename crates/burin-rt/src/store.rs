@@ -39,14 +39,18 @@ pub struct Block {
 /// the viewer).
 pub struct Reg {
     pub seg: Seg,
+    /// a list item's element id (its first element's `id`): what a live change replaces or removes
+    pub dom_id: Option<Box<str>>,
 }
 
 impl Reg {
     pub fn one(raw: Vec<u8>) -> Reg {
-        Reg { seg: Seg::new(raw) }
+        Reg { seg: Seg::new(raw), dom_id: None }
     }
+    /// A list's item: sent inside its list's block, and found on a page by its element's id.
     pub fn plain(raw: Vec<u8>) -> Reg {
-        Reg { seg: Seg::plain(raw) }
+        let dom_id = first_id(&raw);
+        Reg { seg: Seg::plain(raw), dom_id }
     }
 }
 
@@ -55,6 +59,9 @@ impl Reg {
 pub enum Part<'a> {
     Seg(&'a Seg),
     Render(usize, i64),
+    /// where the page's live stream connects (`{{live()}}`): its screen, key and the snapshot's
+    /// last event
+    Live,
 }
 
 /// A screen instance's sorted audience (who may see it), and whether its write-time guards hold.
@@ -67,6 +74,9 @@ pub struct Screen {
 #[derive(Clone, Default)]
 pub struct Snap {
     pub version: u64,
+    /// the last live event this snapshot includes (a page from it carries it: its stream gets the
+    /// ones after)
+    pub live_seq: u64,
     pub sessions: HashMap<Box<[u8]>, i64>,
     /// by register kind (the generated index), by key
     pub regs: Vec<HashMap<i64, Arc<Reg>>>,
@@ -80,7 +90,7 @@ pub struct Snap {
 
 impl Snap {
     pub fn new(regs: usize, lists: usize, screens: usize) -> Snap {
-        Snap { version: 0, sessions: HashMap::new(), regs: vec![HashMap::new(); regs], lists: vec![HashMap::new(); lists], screens: vec![HashMap::new(); screens], blocks: vec![HashMap::new(); lists] }
+        Snap { version: 0, live_seq: 0, sessions: HashMap::new(), regs: vec![HashMap::new(); regs], lists: vec![HashMap::new(); lists], screens: vec![HashMap::new(); screens], blocks: vec![HashMap::new(); lists] }
     }
     /// The next snapshot: everything shared, the version moved on.
     pub fn next(&self) -> Snap {
@@ -131,5 +141,28 @@ impl Snap {
     #[inline]
     pub fn reg(&self, kind: usize, key: i64) -> Option<&Reg> {
         self.regs[kind].get(&key).map(|r| &**r)
+    }
+}
+
+/// The `id` of a piece's first element (`<div id="message_7" …>`), if it has one.
+pub fn first_id(raw: &[u8]) -> Option<Box<str>> {
+    let tag_end = raw.iter().position(|&c| c == b'>')?;
+    let tag = &raw[..tag_end];
+    let at = tag.windows(4).position(|w| w == b"id=\"")?;
+    if at > 0 && !tag[at - 1].is_ascii_whitespace() {
+        return None;
+    }
+    let rest = &tag[at + 4..];
+    let end = rest.iter().position(|&c| c == b'"')?;
+    std::str::from_utf8(&rest[..end]).ok().map(Into::into)
+}
+
+#[cfg(test)]
+mod id_tests {
+    #[test]
+    fn a_pieces_first_elements_id() {
+        assert_eq!(super::first_id(b"<div id=\"message_7\" class=\"m\"><b id=\"x\">").as_deref(), Some("message_7"));
+        assert_eq!(super::first_id(b"<div data-id=\"7\">").as_deref(), None);
+        assert_eq!(super::first_id(b"<li class=\"a\" id=\"n-2\">").as_deref(), Some("n-2"));
     }
 }

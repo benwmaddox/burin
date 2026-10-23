@@ -5,7 +5,7 @@
 #   python3 scripts/golden-viewer-js.py <room page> <sidebar frame> <old page>
 #
 # Declared differences (removed before comparing): Turbo's script and the meta tags in the head
-# (what the script reads), the frame's wrapper, and the hidden __h fields the old sidebar's
+# (what the script reads), the live stream's tag and the live list's id, the frame's wrapper, and the hidden __h fields the old sidebar's
 # "start a ping" forms carried (burin never read them).
 import re, sys
 new, side, old = (open(p, encoding='utf-8').read() for p in sys.argv[1:4])
@@ -16,6 +16,9 @@ assert uid and room, 'no current-user-id or current-room-id meta'
 page = new.replace(open('/mnt/d/code/burin/apps/campfire/scripts/viewer.js.html', encoding='utf-8').read(), '')
 page = re.sub(r'<script type="module" src="/assets/turbo\.min\.js\?v=[0-9a-f]+"></script>', '', page)
 page = re.sub(r'<meta name="(current-room-id|current-user-id|current-user-name|current-user-role|current-room-unread)" content="[^"]*">', '', page)
+# live updates: the page's stream and the live list's id
+page = re.sub(r'<turbo-stream-source src="/_burin/live\?[^"]*"></turbo-stream-source>', '', page)
+page = page.replace(' id="live_room_messages"', '')
 
 # the frame filled with what /users/me/sidebar answered
 m = re.fullmatch(r'<turbo-frame id="user_sidebar">(.*)</turbo-frame>\n', side, re.S)

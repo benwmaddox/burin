@@ -422,7 +422,7 @@ impl<'a, 'b> Walk<'a, 'b> {
                     self.nodes(a, scope, params);
                     self.nodes(b, scope, params);
                 }
-                TNode::For(v, list, _, body) => {
+                TNode::For(v, list, _, body, _) => {
                     let d = self.c.deps(list, scope, params);
                     self.reads.extend(d.reads.iter().cloned());
                     if let Err(out) = self.covered(&d) {

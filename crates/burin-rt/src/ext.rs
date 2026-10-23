@@ -1,14 +1,18 @@
 //! For external functions written in Rust (`apps/<app>/ext/ext.rs`): their arguments as `&str`,
 //! their text results written out. A spec's
 //!
-//!     extern fn shout(t: Text): Text
+//! ```text
+//! extern fn shout(t: Text): Text
+//! ```
 //!
 //! is, in Rust:
 //!
-//!     #[no_mangle]
-//!     pub unsafe extern "C" fn shout(p: *const u8, n: i64, out: *mut burin_rt::ext::Out) {
-//!         burin_rt::ext::write(out, &burin_rt::ext::text(p, n).to_uppercase());
-//!     }
+//! ```
+//! #[no_mangle]
+//! pub unsafe extern "C" fn shout(p: *const u8, n: i64, out: *mut burin_rt::ext::Out) {
+//!     burin_rt::ext::write(out, &burin_rt::ext::text(p, n).to_uppercase());
+//! }
+//! ```
 //!
 //! (C functions use include/burin.h.) Numbers, flags, times and durations are `i64`.
 

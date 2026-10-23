@@ -25,7 +25,9 @@ fn original_room(): Room = first(Room order by .created, .seq)
 screen room(room: Room) at "/rooms/{room}"
   require member(viewer, room) else go "/"
   cookie last_room = text(room.id)
-<<<{{head_top()}}{{room_title(room)}}{{head_mid(room)}}{{viewer_meta(room)}}{{head_body()}}{{room_title(room)}}{{head_end(room)}}{{invitation(room)}}<div class="messages" data-live-list>{{for m in room_messages(room)}}{{message(m)}}{{end}}{{room_tail(room)}}{{sidebar_frame()}}{{page_end()}}>>>
+  // a viewer with the room open has read it (Rails' presence): read_room as they open and leave
+  watch read_room
+<<<{{head_top()}}{{room_title(room)}}{{head_mid(room)}}{{viewer_meta(room)}}{{head_body()}}{{room_title(room)}}{{head_end(room)}}{{invitation(room)}}<div class="messages" data-live-list>{{for m in room_messages(room) live}}{{message(m)}}{{end}}{{room_tail(room)}}{{sidebar_frame()}}{{live()}}{{page_end()}}>>>
 
 fragment icon(name: Text) <<<<img src="{{asset(name)}}" width="20" height="20" aria-hidden="true" class="colorize--black">>>>
 

@@ -30,6 +30,8 @@ pub struct Req<'a> {
     pub body: &'a [u8],
     /// Accept-Encoding names gzip
     pub gzip: bool,
+    /// a reconnecting live stream's last event (Last-Event-ID; 0 when there is none)
+    pub last_event_id: u64,
     /// the worker's index, for per-worker state the handler keeps
     pub worker: usize,
 }
@@ -56,9 +58,34 @@ impl<'a> Req<'a> {
 pub trait Handler: Send + Sync + 'static {
     /// Answers one request into `out` (status line, headers and body).
     fn handle(&self, req: &Req, out: &mut Out);
+    /// A live stream (`GET /_burin/live`), if the request is one the viewer may have: its topics
+    /// and first bytes. None answers it with `handle` (a refusal).
+    fn live(&self, _req: &Req) -> Option<Live> {
+        None
+    }
+    /// A live stream ended (the browser left the page, or it was closed).
+    fn live_closed(&self, _live: &Live) {}
+}
+
+/// A live stream's subscription.
+pub struct Live {
+    pub topics: Vec<u64>,
+    /// who is watching (closed if a topic's audience drops them)
+    pub viewer: i64,
+    /// the status line, headers and the events it missed, sent first
+    pub head: Vec<u8>,
+    /// the last event `head` holds (or the page's): later ones are sent once each
+    pub last: u64,
+    /// what the app keeps about the stream (a screen and key it watches)
+    pub tag: (usize, i64),
 }
 
 const LISTENER: Token = Token(usize::MAX);
+const WAKE: Token = Token(usize::MAX - 1);
+/// A live stream's heartbeat (a comment line): idle proxies don't close it, and a dead peer shows.
+const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(15);
+/// The most a live stream may have waiting to be sent: a reader that far behind is closed.
+const MAX_BEHIND: usize = 1 << 20;
 
 struct Conn {
     tok: Token,
@@ -67,6 +94,15 @@ struct Conn {
     len: usize,
     out: Out,
     writing: bool,
+    /// a live stream: its subscription and what waits to be sent
+    live: Option<Box<(Live, Vec<u8>)>>,
+}
+
+enum Next {
+    Keep,
+    Close,
+    /// the request became a live stream
+    Live(Live),
 }
 
 /// The read workers' nice value. The writer stays at 0: when both want a CPU, the writer gets
@@ -109,16 +145,21 @@ fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
 fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::Result<()> {
     let mut poll = Poll::new()?;
     poll.registry().register(&mut listener, LISTENER, Interest::READABLE)?;
+    let inbox = crate::live::HUB.register(Arc::new(mio::Waker::new(poll.registry(), WAKE)?));
     let mut events = Events::with_capacity(256);
     let mut conns: Vec<Option<Conn>> = vec![];
     let mut free: Vec<usize> = vec![];
+    // live streams by topic
+    let mut subs: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+    let mut beat = std::time::Instant::now();
     loop {
-        if let Err(e) = poll.poll(&mut events, None) {
+        if let Err(e) = poll.poll(&mut events, Some(HEARTBEAT)) {
             if e.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
             return Err(e);
         }
+        let mut closing: Vec<usize> = vec![];
         for ev in events.iter() {
             if ev.token() == LISTENER {
                 loop {
@@ -130,7 +171,7 @@ fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::R
                                 conns.len() - 1
                             });
                             poll.registry().register(&mut stream, Token(i), Interest::READABLE)?;
-                            conns[i] = Some(Conn { tok: Token(i), stream, buf: vec![0u8; MAX_REQUEST].into_boxed_slice(), len: 0, out: Out::default(), writing: false });
+                            conns[i] = Some(Conn { tok: Token(i), stream, buf: vec![0u8; MAX_REQUEST].into_boxed_slice(), len: 0, out: Out::default(), writing: false, live: None });
                         }
                         Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                         Err(_) => break,
@@ -138,14 +179,111 @@ fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::R
                 }
                 continue;
             }
+            if ev.token() == WAKE {
+                // what the writer published: to this worker's streams on each topic
+                let pushes = std::mem::take(&mut *inbox.lock().unwrap());
+                for p in pushes {
+                    match p {
+                        crate::live::Push::Event(e) => {
+                            for &i in subs.get(&e.topic).map(|v| v.as_slice()).unwrap_or(&[]) {
+                                if let Some(Some(c)) = conns.get_mut(i) {
+                                    if let Some(l) = c.live.as_mut() {
+                                        if e.id > l.0.last {
+                                            l.0.last = e.id;
+                                            l.1.extend_from_slice(&e.bytes);
+                                        }
+                                    }
+                                }
+                            }
+                            for &i in subs.get(&e.topic).map(|v| v.as_slice()).unwrap_or(&[]) {
+                                if let Some(Some(c)) = conns.get_mut(i) {
+                                    if !flush_live(c, &poll) {
+                                        closing.push(i);
+                                    }
+                                }
+                            }
+                        }
+                        crate::live::Push::Revoke { topic, audience } => {
+                            for &i in subs.get(&topic).map(|v| v.as_slice()).unwrap_or(&[]) {
+                                if let Some(Some(Conn { live: Some(l), .. })) = conns.get(i) {
+                                    if audience.binary_search(&l.0.viewer).is_err() {
+                                        closing.push(i);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             let i = ev.token().0;
-            let keep = match conns.get_mut(i).and_then(|c| c.as_mut()) {
+            let next = match conns.get_mut(i).and_then(|c| c.as_mut()) {
+                Some(c) if c.live.is_some() => {
+                    // a live stream: what's waiting goes out; anything the browser sends is dropped
+                    let mut open = flush_live(c, &poll);
+                    loop {
+                        match c.stream.read(&mut c.buf[..]) {
+                            Ok(0) => {
+                                open = false;
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                            Err(_) => {
+                                open = false;
+                                break;
+                            }
+                        }
+                    }
+                    if open { Next::Keep } else { Next::Close }
+                }
                 Some(c) => drive(worker, c, &*h, &poll),
                 None => continue,
             };
-            if !keep {
-                if let Some(mut c) = conns[i].take() {
-                    let _ = poll.registry().deregister(&mut c.stream);
+            match next {
+                Next::Keep => {}
+                Next::Close => closing.push(i),
+                Next::Live(mut live) => {
+                    let c = conns[i].as_mut().unwrap();
+                    for t in &live.topics {
+                        subs.entry(*t).or_default().push(i);
+                    }
+                    let head = std::mem::take(&mut live.head);
+                    c.live = Some(Box::new((live, head)));
+                    if !flush_live(c, &poll) {
+                        closing.push(i);
+                    }
+                }
+            }
+        }
+        // heartbeats
+        if beat.elapsed() >= HEARTBEAT {
+            beat = std::time::Instant::now();
+            for (i, c) in conns.iter_mut().enumerate() {
+                if let Some(c) = c.as_mut().filter(|c| c.live.is_some()) {
+                    c.live.as_mut().unwrap().1.extend_from_slice(b":\n\n");
+                    if !flush_live(c, &poll) {
+                        closing.push(i);
+                    }
+                }
+            }
+        }
+        closing.sort_unstable();
+        closing.dedup();
+        for i in closing {
+            if let Some(mut c) = conns[i].take() {
+                let _ = poll.registry().deregister(&mut c.stream);
+                if let Some(l) = c.live.take() {
+                    for t in &l.0.topics {
+                        if let Some(v) = subs.get_mut(t) {
+                            v.retain(|&k| k != i);
+                            if v.is_empty() {
+                                subs.remove(t);
+                            }
+                        }
+                    }
+                    h.live_closed(&l.0);
                 }
                 free.push(i);
             }
@@ -153,8 +291,42 @@ fn run<H: Handler>(worker: usize, mut listener: TcpListener, h: Arc<H>) -> io::R
     }
 }
 
+/// Sends what a live stream has waiting, as far as the socket takes it now; false when it's
+/// done (the peer went away, or it's too far behind).
+fn flush_live(c: &mut Conn, poll: &Poll) -> bool {
+    use std::io::Write;
+    let Some(l) = c.live.as_mut() else { return false };
+    let pending = &mut l.1;
+    let mut sent = 0;
+    while sent < pending.len() {
+        match c.stream.write(&pending[sent..]) {
+            Ok(0) => return false,
+            Ok(n) => sent += n,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    pending.drain(..sent);
+    if pending.len() > MAX_BEHIND {
+        return false;
+    }
+    let interest = if pending.is_empty() { Interest::READABLE } else { Interest::READABLE | Interest::WRITABLE };
+    let _ = poll.registry().reregister(&mut c.stream, c.tok, interest);
+    true
+}
+
 /// Reads, answers and writes until the connection would block; false when it's done.
-fn drive<H: Handler>(worker: usize, c: &mut Conn, h: &H, poll: &Poll) -> bool {
+fn drive<H: Handler>(worker: usize, c: &mut Conn, h: &H, poll: &Poll) -> Next {
+    match drive_requests(worker, c, h, poll) {
+        Ok(true) => Next::Keep,
+        Ok(false) => Next::Close,
+        Err(live) => Next::Live(live),
+    }
+}
+
+/// `drive`'s requests; Err: the request became a live stream.
+fn drive_requests<H: Handler>(worker: usize, c: &mut Conn, h: &H, poll: &Poll) -> Result<bool, Live> {
     loop {
         if c.writing {
             match c.out.send(&mut c.stream) {
@@ -163,18 +335,24 @@ fn drive<H: Handler>(worker: usize, c: &mut Conn, h: &H, poll: &Poll) -> bool {
                     let close = c.out.close;
                     c.out.reset();
                     if close {
-                        return false;
+                        return Ok(false);
                     }
                     let _ = poll.registry().reregister(&mut c.stream, c.tok, Interest::READABLE);
                 }
-                Ok(false) => return true, // waits for WRITABLE
-                Err(_) => return false,
+                Ok(false) => return Ok(true), // waits for WRITABLE
+                Err(_) => return Ok(false),
             }
         }
         // a whole request in the buffer?
         match parse(&c.buf[..c.len]) {
             Parsed::Done(used, req) => {
                 let req = Req { worker, ..req };
+                if req.method == b"GET" && req.path == b"/_burin/live" {
+                    if let Some(live) = h.live(&req) {
+                        c.len = 0;
+                        return Err(live);
+                    }
+                }
                 c.out.reset();
                 h.handle(&req, &mut c.out);
                 // the request's bytes are used; what follows (a pipelined request) moves up
@@ -185,15 +363,15 @@ fn drive<H: Handler>(worker: usize, c: &mut Conn, h: &H, poll: &Poll) -> bool {
                     Ok(true) => {
                         c.writing = false;
                         if c.out.close {
-                            return false;
+                            return Ok(false);
                         }
                         c.out.reset();
                     }
                     Ok(false) => {
                         let _ = poll.registry().reregister(&mut c.stream, c.tok, Interest::WRITABLE);
-                        return true;
+                        return Ok(true);
                     }
-                    Err(_) => return false,
+                    Err(_) => return Ok(false),
                 }
             }
             Parsed::Bad => {
@@ -212,11 +390,11 @@ fn drive<H: Handler>(worker: usize, c: &mut Conn, h: &H, poll: &Poll) -> bool {
                     continue;
                 }
                 match c.stream.read(&mut c.buf[c.len..]) {
-                    Ok(0) => return false,
+                    Ok(0) => return Ok(false),
                     Ok(n) => c.len += n,
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return true,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(true),
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => return false,
+                    Err(_) => return Ok(false),
                 }
             }
         }
@@ -243,6 +421,7 @@ fn parse(buf: &[u8]) -> Parsed<'_> {
     };
     let (mut host, mut cookie, mut ctype, mut referer, mut clen): (&[u8], &[u8], &[u8], &[u8], usize) = (b"", b"", b"", b"", 0);
     let mut gzip = false;
+    let mut last_event_id = 0u64;
     for hd in r.headers.iter() {
         let n = hd.name.as_bytes();
         if n.eq_ignore_ascii_case(b"host") {
@@ -258,6 +437,8 @@ fn parse(buf: &[u8]) -> Parsed<'_> {
                 Some(v) => clen = v,
                 None => return Parsed::Bad,
             }
+        } else if n.eq_ignore_ascii_case(b"last-event-id") {
+            last_event_id = std::str::from_utf8(hd.value).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
         } else if n.eq_ignore_ascii_case(b"accept-encoding") {
             gzip = hd.value.windows(4).any(|w| w.eq_ignore_ascii_case(b"gzip"));
         } else if n.eq_ignore_ascii_case(b"transfer-encoding") {
@@ -274,7 +455,7 @@ fn parse(buf: &[u8]) -> Parsed<'_> {
         Some(q) => (&target[..q], &target[q + 1..]),
         None => (target, &target[target.len()..]),
     };
-    Parsed::Done(head + clen, Req { method, path, query, host, cookie, content_type: ctype, referer, body: &buf[head..head + clen], gzip, worker: 0 })
+    Parsed::Done(head + clen, Req { method, path, query, host, cookie, content_type: ctype, referer, body: &buf[head..head + clen], gzip, last_event_id, worker: 0 })
 }
 
 #[cfg(test)]

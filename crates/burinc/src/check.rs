@@ -481,6 +481,11 @@ impl<'a> Model<'a> {
                 arg(0, Type::Int)?;
                 Ok(Type::Text)
             }
+            // where a screen's live stream connects (screens only: glue.rs)
+            "live" => {
+                arity(0)?;
+                Ok(Type::Html)
+            }
             "include" => {
                 arity(1)?;
                 match &args[0] {
@@ -675,7 +680,10 @@ impl<'a> Model<'a> {
                     }
                     at = x;
                 }
-                TNode::For(v, list, _, body) => {
+                TNode::For(v, list, _, body, live) => {
+                    if *live {
+                        self.check_live_item(list, body)?;
+                    }
                     let t = match self.type_of(list, scope)? {
                         Type::List(t) => *t,
                         t => return err(list.span(), format!("{{{{for}}}} takes a list, not {}", t.show())),
@@ -691,6 +699,27 @@ impl<'a> Model<'a> {
             }
         }
         Ok(at)
+    }
+
+    /// A live list's items are each one fragment whose first element has an id: what a change
+    /// replaces or removes on the page.
+    fn check_live_item(&self, list: &Expr, body: &[TNode]) -> R<()> {
+        let frag = match body {
+            [TNode::Hole(Expr::Call(f, _, _))] => self.fragments.get(f),
+            _ => None,
+        };
+        let Some(Decl::Fragment { body: t, .. }) = frag else {
+            return err(list.span(), "a live list shows one fragment per item: `{{for x in view(row) live}}{{item(x)}}{{end}}`");
+        };
+        let first = match t.nodes.first() {
+            Some(TNode::Text(s)) => s.trim_start(),
+            _ => "",
+        };
+        let tag = first.split('>').next().unwrap_or("");
+        if !(first.starts_with('<') && !first.starts_with("</") && (tag.contains(" id=") || matches!(t.nodes.get(1), Some(TNode::Hole(_)) if tag.ends_with(" id=\"")))) {
+            return err(list.span(), "a live list's item fragment starts with an element that has an id (what a change replaces or removes on the page)");
+        }
+        Ok(())
     }
 
     /// A list's most items, if the spec bounds it.
@@ -788,7 +817,14 @@ pub fn check(m: &Model) -> R<()> {
                     return err(body.span, "a fragment must end in text, outside any tag");
                 }
             }
-            Decl::Screen { params, requires, cookies, body, route, span, public, .. } => {
+            Decl::Screen { params, requires, cookies, body, route, span, public, watch, .. } => {
+                // a watched screen's action takes its row: it runs as the viewer while they watch
+                if let Some(a) = watch {
+                    let ok = m.actions.iter().any(|d| matches!(d, Decl::Action { name, params: ap, .. } if name == a && ap.len() == 1 && params.len() == 1 && ap[0].ty == params[0].ty));
+                    if !ok {
+                        return err(*span, format!("watch {a}: an action taking the screen's one parameter ({})", params.first().map(|p| p.ty.show()).unwrap_or_default()));
+                    }
+                }
                 if *public && (!params.is_empty() || !requires.is_empty() || !cookies.is_empty() || nodes_mention_viewer(m, &body.nodes)) {
                     return err(*span, "a public screen has no parameters, guards or cookies, and doesn't read the viewer");
                 }
@@ -1029,7 +1065,7 @@ fn nodes_mention_viewer(m: &Model, nodes: &[TNode]) -> bool {
                     || matches!(e, Expr::Call(f, _, _) if matches!(m.fragments.get(f), Some(Decl::Fragment { body, per_viewer, .. }) if *per_viewer || walk(m, &crate::inline::nodes(m, &body.nodes, &HashMap::new()))))
             }
             TNode::If(c, a, b) => expr_mentions_viewer(c) || walk(m, a) || walk(m, b),
-            TNode::For(_, l, _, b) => expr_mentions_viewer(l) || walk(m, b),
+            TNode::For(_, l, _, b, _) => expr_mentions_viewer(l) || walk(m, b),
         })
     }
     walk(m, &inlined)

@@ -24,7 +24,7 @@ pub fn registers_of(m: &Model) -> Vec<String> {
             for n in &body.nodes {
                 match n {
                     TNode::Hole(Expr::Call(f, _, _)) if m.fragments.contains_key(f) => add(f),
-                    TNode::For(_, _, _, b) => {
+                    TNode::For(_, _, _, b, _) => {
                         for x in b {
                             if let TNode::Hole(Expr::Call(f, _, _)) = x {
                                 if m.fragments.contains_key(f) {
@@ -61,7 +61,7 @@ pub fn registers_of(m: &Model) -> Vec<String> {
                     walk(m, a, out, seen);
                     walk(m, b, out, seen);
                 }
-                TNode::For(_, _, _, b) => walk(m, b, out, seen),
+                TNode::For(_, _, _, b, _) => walk(m, b, out, seen),
                 TNode::Text(_) | TNode::Hole(_) => {}
             }
         }
@@ -116,16 +116,23 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     let mut li = String::new();
     let mut ls = String::new();
     let mut lb = String::new();
+    // live lists: their view (the page's element `live_<view>` holds them)
+    let mut lv = String::new();
     for (i, l) in screens.iter().enumerate() {
         // the screen and the item fragment of the loop showing it
         let mut found = None;
         for (si, d) in screen_decls.iter().enumerate() {
             if let Decl::Screen { body, .. } = d {
                 for n in &body.nodes {
-                    if let TNode::For(_, list, _, b) = n {
+                    if let TNode::For(_, list, _, b, live) = n {
                         if show(list) == l.name {
                             if let Some(TNode::Hole(Expr::Call(f, _, _))) = b.iter().find(|x| matches!(x, TNode::Hole(Expr::Call(..)))) {
                                 found = Some((si, f.clone()));
+                            }
+                            if *live {
+                                if let Expr::Call(view, _, _) = list {
+                                    let _ = write!(lv, "{i} => Some({view:?}), ");
+                                }
                             }
                         }
                     }
@@ -141,6 +148,22 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
     let _ = writeln!(s, "    fn list_item(list: usize) -> usize {{ match list {{ {li}_ => 0 }} }}");
     let _ = writeln!(s, "    fn list_screen(list: usize) -> usize {{ match list {{ {ls}_ => 0 }} }}");
     let _ = writeln!(s, "    fn list_bound(list: usize) -> usize {{ match list {{ {lb}_ => 0 }} }}");
+    let _ = writeln!(s, "    fn list_live(list: usize) -> Option<&'static str> {{ match list {{ {lv}_ => None }} }}");
+    let watches: Vec<String> = screen_decls
+        .iter()
+        .enumerate()
+        .filter_map(|(si, d)| match d {
+            Decl::Screen { watch: Some(a), .. } => {
+                let param = m.actions.iter().find_map(|d| match d {
+                    Decl::Action { name, params, .. } if name == a => params.first().map(|p| p.name.clone()),
+                    _ => None,
+                })?;
+                Some(format!("{si} => Some(({a:?}, {param:?})), "))
+            }
+            _ => None,
+        })
+        .collect();
+    let _ = writeln!(s, "    fn watch(screen: usize) -> Option<(&'static str, &'static str)> {{ match screen {{ {}_ => None }} }}", watches.concat());
 
     // routes: a literal prefix, the key's digits, a literal suffix
     let _ = writeln!(s, "    fn public_screen(path: &[u8]) -> Option<usize> {{");
@@ -350,7 +373,11 @@ pub fn glue(m: &Model, md: &Module, screens: &[ScreenList], acts: &[ActInfo]) ->
                         let _ = writeln!(asm, "                let Some(r) = snap.reg({k}, {at}) else {{ return false }};\n                emit(burin_rt::store::Part::Seg(&r.seg));");
                     }
                 }
-                TNode::For(var, list, _, b) => {
+                // where the page's live stream connects (its screen, key and the snapshot's last event)
+                TNode::Hole(Expr::Call(f, args, _)) if f == "live" && args.is_empty() => {
+                    let _ = writeln!(asm, "                emit(burin_rt::store::Part::Live);");
+                }
+                TNode::For(var, list, _, b, _) => {
                     let li = screens.iter().position(|l| l.name == show(list)).ok_or("an unknown screen list")?;
                     let k = match b.iter().find_map(|x| if let TNode::Hole(Expr::Call(f, _, _)) = x { Some(f.clone()) } else { None }) {
                         Some(f) => kind_of(md, &f)?,

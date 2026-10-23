@@ -154,7 +154,8 @@ pub enum TNode {
     Text(String),
     Hole(Expr),
     If(Expr, Vec<TNode>, Vec<TNode>),
-    For(String, Expr, Option<Expr>, Vec<TNode>),
+    /// `{{for x in list live}}`: the last field (the writer sends the list's changes to open pages)
+    For(String, Expr, Option<Expr>, Vec<TNode>, bool),
 }
 
 #[derive(Clone, Debug)]
@@ -221,7 +222,9 @@ pub enum Decl {
     /// parameters: rendered per request)
     /// `type "…"`: the response's content type (HTML when absent); `max_age N`: how long a browser
     /// may keep it (seconds; private)
-    Screen { name: String, params: Vec<Param>, route: String, cold: bool, public: bool, ctype: Option<String>, max_age: Option<i64>, requires: Vec<Require>, cookies: Vec<(String, Expr)>, body: Template, span: Span },
+    /// `watch a`: action `a` (taking the screen's parameter) runs as the viewer when a live
+    /// stream on the screen opens and when it closes (Rails' presence: reading a room)
+    Screen { name: String, params: Vec<Param>, route: String, cold: bool, public: bool, ctype: Option<String>, max_age: Option<i64>, requires: Vec<Require>, cookies: Vec<(String, Expr)>, watch: Option<String>, body: Template, span: Span },
     /// `public`: run without a viewer (signing in)
     Action { name: String, params: Vec<Param>, public: bool, body: Vec<Stmt>, span: Span },
     /// `home <screen>(<row>)`: where "/" goes for a viewer

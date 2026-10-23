@@ -193,7 +193,7 @@ pub fn screen_lists(m: &Model) -> Result<Vec<ScreenList>, String> {
     for d in &m.screens {
         if let Decl::Screen { params, body, .. } = d {
             for n in &body.nodes {
-                if let TNode::For(_, list, _, _) = n {
+                if let TNode::For(_, list, _, _, _) = n {
                     let (mut q, ent) = sql::resolve(m, list, &Scope::of(params))?;
                     q.filter = q.filter.map(|x| inline::expr(m, &x, &inline::Env::new(), 0, 0));
                     let mut eqs = vec![];

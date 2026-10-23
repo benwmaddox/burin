@@ -102,10 +102,10 @@ fn nodes_env(m: &Model, ns: &[TNode], env: &Env) -> Vec<TNode> {
             TNode::Text(t) => TNode::Text(t.clone()),
             TNode::Hole(e) => TNode::Hole(expr(m, e, env, 0, 0)),
             TNode::If(c, a, b) => TNode::If(expr(m, c, env, 0, 0), nodes_env(m, a, env), nodes_env(m, b, env)),
-            TNode::For(v, l, lim, body) => {
+            TNode::For(v, l, lim, body, live) => {
                 let mut inner = env.clone();
                 inner.remove(v);
-                TNode::For(v.clone(), expr(m, l, env, 0, 0), lim.clone(), nodes_env(m, body, &inner))
+                TNode::For(v.clone(), expr(m, l, env, 0, 0), lim.clone(), nodes_env(m, body, &inner), *live)
             }
         })
         .collect()
