@@ -350,8 +350,8 @@ fn a_counted_while_spends_no_steps_and_every_other_does() {
     let src = format!(
         "{BASE}\n{}",
         [
-            // counted: its own step, a bound it doesn't change
-            "fn counted(n: Int): Int {\n  var i = 0\n  while i < n and i >= 0 {\n    i = i + 1\n  }\n  return i\n}",
+            // counted: its own step, a bound it doesn't change (any part of an `and`)
+            "fn counted(n: Int): Int {\n  var i = 0\n  while n > 3 and i < n and i >= 0 {\n    i = i + 1\n  }\n  return i\n}",
             // a `continue` skips the step: it may never end
             "fn skips(n: Int): Int {\n  var i = 0\n  while i < n {\n    if i == 3 {\n      continue\n    }\n    i = i + 1\n  }\n  return i\n}",
             // the bound moves with it

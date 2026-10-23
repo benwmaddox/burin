@@ -373,8 +373,9 @@ impl<'a> Gen<'a> {
             "min" | "max" => {
                 self.args(f, a, 2, s)?;
                 let (x, y) = (self.int(&a[0])?, self.int(&a[1])?);
-                let (c, v) = (self.v(), self.v());
-                self.line(&format!("{c} = icmp {} i64 {x}, {y}\n  {v} = select i1 {c}, i64 {x}, i64 {y}", if f == "max" { "sgt" } else { "slt" }));
+                // (LLVM's own: its range and constraint passes reason through it)
+                let v = self.v();
+                self.line(&format!("{v} = call i64 @llvm.{}.i64(i64 {x}, i64 {y})", if f == "max" { "smax" } else { "smin" }));
                 Ok((v, Ty::Int))
             }
             "abs" => {
@@ -667,27 +668,40 @@ impl<'a> Gen<'a> {
 }
 
 impl Gen<'_> {
-    /// Whether a `while` ends by itself, as a `for` does: its condition is `x < y` or `x <= y`
-    /// (or that `and` more); `x` is a `var` the body changes in one place only, a statement of its
-    /// own (not inside an `if` or a loop) `x = x + c` with c a number above 0; `y` reads nothing
-    /// the loop changes; and nothing `continue`s it (every turn that goes on reaches the step). An
-    /// overflow of x ends the call (none), so x reaches y.
+    /// Whether a `while` ends by itself, as a `for` does: a part of its condition (alone, or one
+    /// of an `and`'s) is `x < y` or `x <= y`, where `x` is a `var` the body changes in one place
+    /// only, a statement of its own (not inside an `if` or a loop) `x = x + c` with c a number
+    /// above 0; `y` reads nothing the loop changes; and nothing `continue`s it (every turn that
+    /// goes on reaches the step). An overflow of x ends the call (none), so x reaches y.
     fn counted(&self, c: &Expr, body: &[HStmt]) -> bool {
-        let mut first = c;
-        while let Expr::Bin(BinOp::And, l, _, _) = first {
-            first = l;
+        // the loop goes on only while every part of an `and` holds: one counted part ends it
+        let mut parts = vec![];
+        fn split<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+            match e {
+                Expr::Bin(BinOp::And, l, r, _) => {
+                    split(l, out);
+                    split(r, out);
+                }
+                other => out.push(other),
+            }
         }
-        let Expr::Bin(BinOp::Lt | BinOp::Le, x, y, _) = first else { return false };
-        let Expr::Name(x, _) = &**x else { return false };
-        if !matches!(self.lookup(x), Some(Local::Slot(_, Ty::Int, true))) {
+        split(c, &mut parts);
+        if continues(body) {
             return false;
         }
         let changed = assigned(body);
-        let steps_up = |s: &HStmt| match s {
-            HStmt::Set(n, Expr::Bin(BinOp::Add, a, b, _), _) if n == x => matches!((&**a, &**b), (Expr::Name(m, _), Expr::Int(k, _)) | (Expr::Int(k, _), Expr::Name(m, _)) if m == x && *k > 0),
-            _ => false,
-        };
-        changed.iter().filter(|n| *n == x).count() == 1 && body.iter().any(steps_up) && !reads(y, &changed) && !continues(body)
+        parts.iter().any(|part| {
+            let Expr::Bin(BinOp::Lt | BinOp::Le, x, y, _) = part else { return false };
+            let Expr::Name(x, _) = &**x else { return false };
+            if !matches!(self.lookup(x), Some(Local::Slot(_, Ty::Int, true))) {
+                return false;
+            }
+            let steps_up = |s: &HStmt| match s {
+                HStmt::Set(n, Expr::Bin(BinOp::Add, a, b, _), _) if n == x => matches!((&**a, &**b), (Expr::Name(m, _), Expr::Int(k, _)) | (Expr::Int(k, _), Expr::Name(m, _)) if m == x && *k > 0),
+                _ => false,
+            };
+            changed.iter().filter(|n| *n == x).count() == 1 && body.iter().any(steps_up) && !reads(y, &changed)
+        })
     }
 
     /// Before a way out: the arena back to where the helper found it.
@@ -766,7 +780,9 @@ fn helper(m: &Model, d: &Decl, steps: bool) -> Result<(String, Vec<String>), E> 
             Some(Ty::Text) => {
                 let (pp, pl) = (format!("%p_{}_ptr", p.name), format!("%p_{}_len", p.name));
                 sig.push(format!("ptr {pp}"));
-                sig.push(format!("i64 {pl}"));
+                // a text's length is far from 64 bits' end (under 2^47 bytes): LLVM may then
+                // prove arithmetic on positions in it can't overflow
+                sig.push(format!("i64 range(i64 0, 140737488355328) {pl}"));
                 g.declare(*span, &p.name, Local::Text(pp, pl))?;
             }
             Some(Ty::Bool) => {
@@ -868,7 +884,7 @@ pub fn emit(m: &Model, steps: bool) -> Result<String, E> {
         walk(&graph, n, &mut vec![])?;
     }
     if !out.is_empty() {
-        out.insert_str(0, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\ndeclare void @burin_vec_truncate(ptr, i64)\ndeclare i64 @burin_out_byte(ptr, i64)\ndeclare i64 @burin_ha_budget()\ndeclare i64 @burin_ha_mark()\ndeclare void @burin_ha_release(i64)\ndeclare noalias ptr @burin_ha_alloc(i64)\n\n");
+        out.insert_str(0, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\ndeclare void @burin_vec_truncate(ptr, i64)\ndeclare i64 @burin_out_byte(ptr, i64)\ndeclare i64 @burin_ha_budget()\ndeclare i64 @burin_ha_mark()\ndeclare void @burin_ha_release(i64)\ndeclare noalias ptr @burin_ha_alloc(i64)\ndeclare i64 @llvm.smin.i64(i64, i64)\ndeclare i64 @llvm.smax.i64(i64, i64)\n\n");
     }
     Ok(out)
 }

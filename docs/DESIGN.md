@@ -460,10 +460,10 @@ burin as a helper: a `fn` with a body of statements.
   - No recursion: the compiler checks the calls, including through expression `fn`s.
   - Each `while` turn spends a step of the thread's budget, unless the loop is counted: its
     condition is `x < y` (first in an `and`), x changes only by one top-level `x = x + c`, y reads
-    nothing the loop changes, and nothing `continue`s it. That ends by itself, as a `for` does.
-    The writer's budget is about 50 ms of
-    turns, since every write waits for the pieces it builds; a request worker's is about half a
-    second. A `for` ends by itself and spends none.
+    nothing the loop changes, and nothing `continue`s it. That ends by itself, as a `for` does,
+    and spends none.
+  - The writer's budget is about 50 ms of turns, since every write waits for the pieces it
+    builds; a request worker's is about half a second.
   - Heavy computing belongs in background work (the outbox and jobs, not built yet), not in a
     cached piece.
 - **Failing:** an overflow, a divisor of 0, an index outside its array, a shift outside 0 to 63,
