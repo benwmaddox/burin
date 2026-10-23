@@ -23,6 +23,8 @@ pub struct Model<'a> {
     pub entities: HashMap<String, &'a Entity>,
     pub viewer: Option<&'a Decl>,
     pub fns: HashMap<String, &'a Decl>,
+    /// `extern fn`s, by name
+    pub externs: HashMap<String, &'a Decl>,
     pub views: HashMap<String, &'a Decl>,
     pub consts: HashMap<String, &'a Decl>,
     pub fragments: HashMap<String, &'a Decl>,
@@ -42,6 +44,7 @@ impl<'a> Model<'a> {
             entities: HashMap::new(),
             viewer: None,
             fns: HashMap::new(),
+            externs: HashMap::new(),
             views: HashMap::new(),
             consts: HashMap::new(),
             fragments: HashMap::new(),
@@ -69,6 +72,11 @@ impl<'a> Model<'a> {
                 }
                 Decl::Fn { name, span, .. } => {
                     if m.fns.insert(name.clone(), d).is_some() {
+                        dup(*span, name)?
+                    }
+                }
+                Decl::Extern { name, span, .. } => {
+                    if m.fns.contains_key(name) || m.externs.insert(name.clone(), d).is_some() {
                         dup(*span, name)?
                     }
                 }
@@ -113,6 +121,9 @@ impl<'a> Model<'a> {
         self.entities.get(entity)?.fields.iter().find(|f| f.name == field).map(|f| f.ty.clone())
     }
 }
+
+/// The name an action's scope holds (no spec can write it): where `extern effect fn` may be called.
+const IN_ACTION: &str = " action";
 
 /// Names in scope, innermost last.
 #[derive(Clone, Default)]
@@ -514,6 +525,11 @@ impl<'a> Model<'a> {
             _ => {
                 let (params, ret) = if let Some(Decl::Fn { params, ret, .. }) = self.fns.get(f) {
                     (params, ret.clone())
+                } else if let Some(Decl::Extern { params, ret, effect, .. }) = self.externs.get(f) {
+                    if *effect && scope.get(IN_ACTION).is_none() {
+                        return err(s, format!("`{f}` is an `extern effect fn`: only actions call it (a page's pieces are kept and reused, so what a page calls must be pure)"));
+                    }
+                    (params, ret.clone())
                 } else if let Some(Decl::View { params, query, .. }) = self.views.get(f) {
                     let ent = self.query_entity(query, &Scope::of(params))?;
                     (params, Type::List(Box::new(Type::Ref(ent))))
@@ -744,6 +760,17 @@ pub fn check(m: &Model) -> R<()> {
             Decl::View { params, query, .. } => {
                 m.check_query(query, &Scope::of(params))?;
             }
+            // what crosses the C ABI: numbers (i64), flags (0 or 1), times and durations (ms), text
+            // (UTF-8 bytes and their length)
+            Decl::Extern { name, params, ret, span, .. } => {
+                let ok = |t: &Type| matches!(t, Type::Int | Type::Bool | Type::Time | Type::Duration | Type::Text);
+                if let Some(p) = params.iter().find(|p| !ok(&p.ty)) {
+                    return err(*span, format!("extern fn {name}: `{}` is {}; an external function takes Int, Bool, Time, Duration or Text", p.name, p.ty.show()));
+                }
+                if !ok(ret) {
+                    return err(*span, format!("extern fn {name} returns {}; an external function returns Int, Bool, Time, Duration or Text", ret.show()));
+                }
+            }
             Decl::Const { value, .. } => {
                 m.type_of(value, &Scope::default())?;
             }
@@ -779,7 +806,8 @@ pub fn check(m: &Model) -> R<()> {
                 if *public && body.iter().any(stmt_mentions_viewer) {
                     return err(*span, "a public action runs without a viewer: it can't read `viewer`");
                 }
-                check_stmts(m, body, &Scope::of(params), &mut vec![])?
+                // (an action's scope says so: only actions call an `extern effect fn`)
+                check_stmts(m, body, &Scope::of(params).with(IN_ACTION, Type::Bool), &mut vec![])?
             }
             Decl::Home { screen, arg, span } => {
                 let want = m.screens.iter().find_map(|d| match d {

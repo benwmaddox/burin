@@ -303,6 +303,15 @@ impl<'a> Tx<'a> {
                 self.rows.pop();
                 format!("(SELECT count(DISTINCT {col}) {from}{w})")
             }
+            // an external function of values from outside the query (an action's arguments): the
+            // caller computes it and binds the result; one of the rows' fields can't reach it
+            Expr::Call(f, args, _) if self.m.externs.contains_key(f) => {
+                if args.iter().any(reads_row) {
+                    return Err(format!("`{f}` is an external function: it can't run inside a query on the query's rows (SQLite runs those); use it in a template or an action, or keep its result in a field"));
+                }
+                self.binds.push(Bind::Path(e.clone()));
+                "?".to_string()
+            }
             _ => return Err(format!("this can't be part of a query's SQL yet: {e:?}").chars().take(200).collect()),
         })
     }
@@ -649,5 +658,18 @@ fn merge(inner: Query, outer: Query) -> Query {
         limit: outer.limit.or(inner.limit),
         window_last: outer.window_last.or(inner.window_last),
         span: outer.span,
+    }
+}
+
+/// Whether an expression reads a query's row (`.f`, `it`).
+fn reads_row(e: &Expr) -> bool {
+    match e {
+        Expr::Dot(..) => true,
+        Expr::Name(n, _) => n == "it",
+        Expr::Field(o, _, _) | Expr::Not(o, _) => reads_row(o),
+        Expr::Bin(_, a, b, _) => reads_row(a) || reads_row(b),
+        Expr::If(c, a, b, _) => reads_row(c) || reads_row(a) || reads_row(b),
+        Expr::Call(_, a, _) => a.iter().any(reads_row),
+        _ => false,
     }
 }

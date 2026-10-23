@@ -328,6 +328,42 @@ impl<'a, 'b> Gen<'a, 'b> {
     fn untmp(&mut self) {
         self.depth -= 1;
     }
+
+    /// An `extern fn` call's arguments as the C ABI takes them: numbers, flags, times and
+    /// durations as i64; text as its bytes' pointer and length, each written into a temporary
+    /// buffer the caller releases (`untmp`, as many as the count returned) after the call.
+    fn extern_args(&mut self, roots: &HashMap<String, Root>, f: &str, args: &[Expr]) -> Result<(String, usize), String> {
+        let Some(Decl::Extern { params, effect, .. }) = self.m.externs.get(f) else { return Err(format!("no extern fn `{f}`")) };
+        if *effect {
+            return Err(format!("`{f}` is an `extern effect fn`: only actions call it (a page's pieces are kept and reused, so what a page calls must be pure)"));
+        }
+        let mut list = vec![];
+        let mut tmps = 0;
+        for (p, a) in params.iter().zip(args) {
+            match p.ty {
+                Type::Text => {
+                    let t = self.tmp();
+                    tmps += 1;
+                    self.text(roots, a, &t, false)?;
+                    self.flush(&t);
+                    let (ptr, len) = (self.v(), self.v());
+                    self.line(&format!("{ptr} = call ptr @etch_vec_ptr(ptr {t})\n  {len} = call i64 @etch_vec_len(ptr {t})"));
+                    list.push(format!("ptr {ptr}, i64 {len}"));
+                }
+                Type::Bool => {
+                    let c = self.cond(roots, a)?;
+                    let z = self.v();
+                    self.line(&format!("{z} = zext i1 {c} to i64"));
+                    list.push(format!("i64 {z}"));
+                }
+                _ => {
+                    let (v, _) = self.value(roots, a)?;
+                    list.push(format!("i64 {v}"));
+                }
+            }
+        }
+        Ok((list.join(", "), tmps))
+    }
     fn gep_load(&mut self, ptr: &str, ty: &str, i: usize, shape: Shape) -> String {
         let (p, v) = (self.v(), self.v());
         self.line(&format!("{p} = getelementptr inbounds {ty}, ptr {ptr}, i32 0, i32 {i}"));
@@ -513,6 +549,18 @@ impl<'a, 'b> Gen<'a, 'b> {
 
     fn value(&mut self, roots: &HashMap<String, Root>, e: &Expr) -> Result<(String, Shape), String> {
         match e {
+            Expr::Call(f, a, _) if self.m.externs.contains_key(f) => {
+                if matches!(self.m.externs.get(f), Some(Decl::Extern { ret: Type::Text, .. })) {
+                    return Err(format!("`{f}` returns text: write it into the page, or compare it in a condition"));
+                }
+                let (list, n) = self.extern_args(roots, f, a)?;
+                let v = self.v();
+                self.line(&format!("{v} = call i64 @{f}({list})"));
+                for _ in 0..n {
+                    self.untmp();
+                }
+                Ok((v, Shape::I64))
+            }
             Expr::Int(n, _) | Expr::Dur(n, _) => Ok((n.to_string(), Shape::I64)),
             Expr::Bin(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod), l, r, _) if self.numeric(e) => {
                 let (a, _) = self.value(roots, l)?;
@@ -629,6 +677,28 @@ impl<'a, 'b> Gen<'a, 'b> {
             Ok(())
         };
         match e {
+            Expr::Call(f, args, _) if self.m.externs.contains_key(f) => match self.m.externs.get(f) {
+                Some(Decl::Extern { ret: Type::Text, .. }) => {
+                    let (list, n) = self.extern_args(roots, f, args)?;
+                    let r = self.tmp();
+                    if !self.bits {
+                        let sep = if list.is_empty() { "" } else { ", " };
+                        self.line(&format!("call void @{f}({list}{sep}ptr {r})"));
+                        self.line(&format!("call void @etch_emit(ptr {out}, ptr {r}, i64 {e1})"));
+                    }
+                    self.untmp();
+                    for _ in 0..n {
+                        self.untmp();
+                    }
+                }
+                Some(Decl::Extern { ret: Type::Bool, .. }) => return Err(format!("`{f}` returns Bool: use it in {{{{if}}}}")),
+                _ => {
+                    let (v, _) = self.value(roots, e)?;
+                    if !self.bits {
+                        self.line(&format!("call void @etch_int(ptr {out}, i64 {v})"));
+                    }
+                }
+            },
             Expr::Call(f, args, _) => match f.as_str() {
                 "text" | "grouped" => {
                     let dur = matches!(self.m.type_of(&args[0], &self.scope).map_err(|x| x.msg)?.strip_opt(), Type::Duration);
@@ -773,6 +843,12 @@ impl<'a, 'b> Gen<'a, 'b> {
     /// An i1 condition.
     fn cond(&mut self, roots: &HashMap<String, Root>, e: &Expr) -> Result<String, String> {
         match e {
+            Expr::Call(f, _, _) if matches!(self.m.externs.get(f), Some(Decl::Extern { ret: Type::Bool, .. })) => {
+                let (v, _) = self.value(roots, e)?;
+                let c = self.v();
+                self.line(&format!("{c} = icmp ne i64 {v}, 0"));
+                Ok(c)
+            }
             Expr::Bool(b, _) => Ok(b.to_string()),
             Expr::Not(x, _) => {
                 let c = self.cond(roots, x)?;
@@ -1349,6 +1425,11 @@ declare void @etch_w_sign_in(ptr, ptr)
 declare void @etch_w_sign_out(ptr)
 declare i64 @etch_crc_mod(ptr, i64)
 declare void @etch_upper(ptr, ptr, i64)
+declare ptr @etch_vec_ptr(ptr)
+declare i64 @etch_vec_len(ptr)
+declare void @etch_emit(ptr, ptr, i64)
+declare ptr @etch_w_ext_out(ptr)
+declare void @etch_w_ext_take(ptr, ptr)
 declare %List @etch_w_ids(ptr, ptr)
 declare void @etch_w_go(ptr, ptr, i64, i64, ptr, i64)
 "#;
@@ -1417,6 +1498,7 @@ pub fn module(m: &Model, registers: &[&str], datalayout: &str, triple: &str) -> 
     let mut ll = String::new();
     let _ = writeln!(ll, "; generated by etchc from the app's spec: do not edit\n{datalayout}\n{triple}\n");
     ll.push_str(DECLS);
+    ll.push_str(&extern_decls(m));
     let mut vt = String::new();
     types("", &md.viewer, &mut vec![], &mut vt);
     ll.push_str(&vt.replace("%In_", "%Viewer"));
@@ -1497,4 +1579,25 @@ fn rust_header(md: &Module) -> String {
         rec(&mut s, &r.name, &r.schema, &mut vec![]);
     }
     s
+}
+
+/// The `extern fn`s' declarations, as the C ABI has them: a number, flag, time or duration is an
+/// i64; a text argument its bytes' pointer and length; a text result is written into a buffer
+/// passed last (with `etch_ext_write`, include/etch.h).
+pub fn extern_decls(m: &Model) -> String {
+    let mut names: Vec<&String> = m.externs.keys().collect();
+    names.sort();
+    let mut out = String::new();
+    for name in names {
+        let Some(Decl::Extern { params, ret, .. }) = m.externs.get(name) else { continue };
+        let mut args: Vec<&str> = params.iter().flat_map(|p| if matches!(p.ty, Type::Text) { vec!["ptr", "i64"] } else { vec!["i64"] }).collect();
+        let r = if matches!(ret, Type::Text) {
+            args.push("ptr");
+            "void"
+        } else {
+            "i64"
+        };
+        let _ = writeln!(out, "declare {r} @{name}({})", args.join(", "));
+    }
+    out
 }

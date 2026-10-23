@@ -1,0 +1,56 @@
+// Notes: external functions end to end (`extern fn`, from apps/notes/ext/): C (ext.c) and Rust
+// (ext.rs), in a page's cached and per-viewer parts and in an action. scripts/notes-check.sh
+// checks every value against Python's.
+
+entity User {
+  name: Text max 60
+}
+
+entity Session {
+  user: User
+  token: Text max 64
+}
+
+entity Note {
+  owner: User
+  title: Text max 100
+  body: Text max 2000
+  slug: Text        // made by slug() (C) when the note is added
+  words: Int        // counted by word_count() (C) when it's added
+  serial: Int       // from next_serial() (Rust, an effect: only an action calls it)
+}
+
+viewer User from cookie sid = Session.token -> .user
+
+// C (ext.c): pure
+extern fn slug(title: Text, max: Int): Text
+extern fn word_count(text: Text): Int
+extern fn is_long(text: Text, words: Int): Bool
+// Rust (ext.rs): pure, and one with an effect (a counter in the process)
+extern fn shout(text: Text): Text
+extern effect fn next_serial(): Int
+
+view notes(u: User) = Note where .owner == u order by .created, .seq limit 50
+
+screen notes_page(u: User) at "/users/{u}/notes"
+  require exists(Session where .user == viewer and .user == u) else go "/"
+<<<{{top()}}{{for n in notes(u)}}{{note(n)}}{{end}}{{me()}}>>>
+
+fragment top() <<<<!doctype html><html><head><meta charset="utf-8"><title>Notes</title></head><body><ol>
+>>>
+
+// cached: the same for everyone (C and Rust functions, called when the piece is built)
+fragment note(n: Note) <<<\
+<li id="note-{{n.id}}" data-slug="{{n.slug}}" data-words="{{n.words}}" data-serial="{{n.serial}}">\
+<h2>{{shout(n.title)}}</h2><p class="live-slug">{{slug(n.title + " " + n.body, 24)}}</p>\
+<p class="count">{{word_count(n.body)}}</p>{{if is_long(n.body, 5)}}<p class="long">long</p>{{end}}</li>
+>>>
+
+// per viewer: rendered for each request
+fragment me() per viewer <<<</ol><p class="me">{{shout(viewer.name)}} has {{word_count(viewer.name)}} word(s)</p></body></html>
+>>>
+
+action add_note(title: Text, body: Text) {
+  require present(title) else invalid
+  create Note { owner: viewer, title: title, body: body, slug: slug(title, 40), words: word_count(body), serial: next_serial() }
+}

@@ -308,6 +308,35 @@ rows made to hit the edges: dividing by 0, none, negatives, and overflow at 64 b
 **Not yet:** fractional numbers (one design: `Decimal`, an Int scaled by 10⁴), scheduled actions
 (run at a time), and `now` in `cold` screens.
 
+## External functions (23 Oct 2026)
+
+When a spec can't say something, it calls code outside etch through the C ABI: C, or Rust's
+`extern "C"`, in `apps/<app>/ext/` (C sources are compiled into the app; `ext.rs` goes into its
+crate). `apps/notes` and `scripts/notes-check.sh` use every form.
+
+    extern fn slug(title: Text, max: Int): Text      // pure: pages may call it
+    extern effect fn notify(text: Text): Int         // effects: only actions call it
+
+- **What crosses:** Int, Bool (0 or 1), Time and Duration (ms) as 64-bit integers; Text as its
+  UTF-8 bytes and length, borrowed for the call only. A Text result is written with
+  `etch_ext_write` (`include/etch.h`; `etch_rt::ext` in Rust), so etch never takes memory it
+  would have to free; what isn't UTF-8 is replaced.
+- **Pure, or effects:** a cached piece calls a pure function once, when it's built, and serves
+  that result until its inputs change. etch can't check purity: a function that reads the
+  clock, a file or its own state shows a stale result. `--verify` and the scrubber compare kept
+  pages with fresh renders, so this usually shows in tests. `extern effect fn` runs only in
+  actions, on the writer, inside the action's transaction: its effect isn't undone if the action
+  then fails, and a slow one delays every write. (Email, webhooks and other services want an
+  outbox and jobs instead: not built yet.)
+- **No data access:** an external function gets no database: what it needs is passed in, which
+  keeps etch's read tracking exact. It can't run inside a query (SQLite runs those); an action
+  may compute one from its arguments and store the result in a field.
+- **Costs:** a text argument is written into a buffer first; C is a separate native library, so
+  it isn't inlined. It runs in the server's process: memory errors in C can corrupt what every
+  reader shares (Rust is the safer choice). A function that allocates breaks the fast path's
+  zero allocations for its pages (C's allocations aren't even counted by the hot-path test).
+- **Not yet:** linking system libraries (`-lfoo`), Lists and records across the ABI.
+
 ## Lessons kept from crudspec and AgentLang
 
 - **The whole app is one program, checked as a whole** (crudspec): names, types, permissions,

@@ -492,6 +492,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "notes-app"
+version = "0.1.0"
+dependencies = [
+ "etch-rt",
+ "rusqlite",
+]
+
+[[package]]
 name = "numbers-app"
 version = "0.1.0"
 dependencies = [

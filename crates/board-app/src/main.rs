@@ -6,6 +6,12 @@ mod gen {
     include!(env!("ETCH_GEN_RS"));
 }
 
+/// The app's external functions in Rust (apps/<app>/ext/ext.rs; empty when there are none).
+#[allow(clippy::all, dead_code, unused)]
+pub mod ext {
+    include!(env!("ETCH_EXT_RS"));
+}
+
 fn main() {
     etch_rt::app::main::<gen::Spec>(gen::CONFIGS, gen::SESSION_COOKIE)
 }

@@ -20,6 +20,16 @@ $HOME/etch-target-etchc/release/etchc emit apps/${APP:-campfire} $GEN
 $BIN/opt -passes=verify -disable-output $GEN/app.ll
 $BIN/llvm-as $GEN/app.ll -o $GEN/app.bc
 rm -f $GEN/libetchapp.a; $BIN/llvm-ar rcs $GEN/libetchapp.a $GEN/app.bc
+# the app's external functions (apps/<app>/ext/): C sources into libetchext.a; ext.rs, Rust
+# functions, into the app crate (an empty module when there is none)
+EXT=apps/${APP:-campfire}/ext
+rm -rf $GEN/ext; mkdir -p $GEN/ext; rm -f $GEN/libetchext.a
+for c in $EXT/*.c; do
+  [ -e "$c" ] || continue
+  cc -O2 -fPIC -Wall -Werror -Iinclude -c "$c" -o $GEN/ext/$(basename "$c" .c).o
+done
+ls $GEN/ext/*.o > /dev/null 2>&1 && ar rcs $GEN/libetchext.a $GEN/ext/*.o
+if [ -f $EXT/ext.rs ]; then export ETCH_EXT_RS=/mnt/d/code/etch/$EXT/ext.rs; else : > $GEN/ext_none.rs; export ETCH_EXT_RS=$GEN/ext_none.rs; fi
 t1=$(date +%s.%N)
 FLAGS="-Clinker-plugin-lto -Clink-arg=-fuse-ld=lld -Clink-arg=-B$BIN/gcc-ld $EXTRA"
 ETCH_GEN_DIR=$GEN RUSTFLAGS="$FLAGS" CARGO_TARGET_DIR=$HOME/etch-target-gen taskset -c 0-7 cargo build -q --profile $PROFILE -p ${CRATE:-campfire-app}

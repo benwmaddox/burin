@@ -378,6 +378,36 @@ impl<'a, 'b> Act<'a, 'b> {
                 self.line(&format!("{p} = alloca %Str\n  call void @etch_w_token(ptr %w, i64 {n}, ptr {p})"));
                 Ok((p, Shape::Str))
             }
+            // an external function: its arguments as the C ABI takes them (text as its bytes'
+            // pointer and length); a text result written into the writer's buffer, then kept
+            Expr::Call(f, a, _) if self.m.externs.contains_key(f) => {
+                let Some(Decl::Extern { params, ret, .. }) = self.m.externs.get(f) else { unreachable!() };
+                let (params, ret) = (params.clone(), ret.clone());
+                let mut list = vec![];
+                for (p, x) in params.iter().zip(a) {
+                    let (v, shape) = self.value(x)?;
+                    if shape == Shape::Str {
+                        let (s, ptr, len) = (self.v(), self.v(), self.v());
+                        self.line(&format!("{s} = load %Str, ptr {v}\n  {ptr} = extractvalue %Str {s}, 0\n  {len} = extractvalue %Str {s}, 1"));
+                        list.push(format!("ptr {ptr}, i64 {len}"));
+                    } else if matches!(p.ty, Type::Text) {
+                        return Err(format!("`{f}`'s `{}` is text", p.name));
+                    } else {
+                        list.push(format!("i64 {v}"));
+                    }
+                }
+                if matches!(ret, Type::Text) {
+                    let (o, d) = (self.v(), self.v());
+                    let sep = if list.is_empty() { "" } else { ", " };
+                    self.line(&format!("{o} = call ptr @etch_w_ext_out(ptr %w)\n  call void @{f}({}{sep}ptr {o})", list.join(", ")));
+                    self.line(&format!("{d} = alloca %Str\n  call void @etch_w_ext_take(ptr %w, ptr {d})"));
+                    Ok((d, Shape::Str))
+                } else {
+                    let r = self.v();
+                    self.line(&format!("{r} = call i64 @{f}({})", list.join(", ")));
+                    Ok((r, Shape::I64))
+                }
+            }
             _ => Err(format!("an action can't compute `{}` yet", show(e))),
         }
     }

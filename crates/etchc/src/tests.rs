@@ -225,3 +225,45 @@ fn a_page_adds_numbers_instead_of_joining_them() {
     assert!(ll.contains("call void @etch_time(ptr") && ll.contains("i64 3, i64"), "no duration text");
     assert!(ll.contains("i64 4, i64"), "no grouped number");
 }
+
+const EXTERNS: &str = r#"
+extern fn slug(t: Text, max: Int): Text
+extern fn long(t: Text): Bool
+extern effect fn notify(t: Text): Int
+"#;
+
+#[test]
+fn a_pure_extern_in_a_page_passes() {
+    verdict(&format!(r#"{EXTERNS}
+fragment p() <<<{{{{for p in recent()}}}}<a href="/p/{{{{slug(p.body, 20)}}}}">{{{{if long(p.body)}}}}long{{{{end}}}}</a>{{{{end}}}}>>>"#)).unwrap();
+}
+
+#[test]
+fn an_extern_with_effects_in_a_page_is_refused() {
+    let e = verdict(&format!(r#"{EXTERNS}
+fragment p() <<<{{{{for p in recent()}}}}{{{{notify(p.body)}}}}{{{{end}}}}>>>"#)).unwrap_err();
+    assert!(e.contains("only actions call it"), "{e}");
+}
+
+#[test]
+fn an_extern_with_effects_in_an_action_passes() {
+    verdict(&format!(r#"{EXTERNS}
+action post(body: Text) {{
+  create Post {{ author: viewer, body: slug(body, 20) + text(notify(body)) }}
+}}"#)).unwrap();
+}
+
+#[test]
+fn an_extern_of_a_type_the_c_abi_has_not_is_refused() {
+    let e = verdict("extern fn who(u: User): Text").unwrap_err();
+    assert!(e.contains("an external function takes Int, Bool, Time, Duration or Text"), "{e}");
+    let e = verdict("extern fn author_of(t: Text): User").unwrap_err();
+    assert!(e.contains("an external function returns"), "{e}");
+}
+
+#[test]
+fn an_extern_with_the_wrong_arguments_is_refused() {
+    let e = verdict(&format!(r#"{EXTERNS}
+fragment p() <<<{{{{for p in recent()}}}}{{{{slug(p.body)}}}}{{{{end}}}}>>>"#)).unwrap_err();
+    assert!(e.contains("arguments") || e.contains("takes"), "{e}");
+}

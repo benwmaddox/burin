@@ -204,6 +204,11 @@ pub enum Decl {
     Entity(Entity),
     Viewer { entity: String, cookie: String, via_entity: String, via_field: String, to_field: String, span: Span },
     Fn { name: String, params: Vec<Param>, ret: Type, body: Expr, span: Span },
+    /// `extern fn f(…): T`: a function outside etch, called through the C ABI (C, or Rust's
+    /// `extern "C"`), from `apps/<app>/ext/`. It must be pure (the same result for the same
+    /// arguments, no effects): cached pieces call it once and keep the result. `extern effect fn`
+    /// may have effects: only actions call it (on the writer, not undone if the action fails).
+    Extern { name: String, params: Vec<Param>, ret: Type, effect: bool, span: Span },
     View { name: String, params: Vec<Param>, query: Query, span: Span },
     Const { name: String, value: Expr, span: Span },
     /// `per viewer`: keyed by the viewer (its memory per viewer is reported)

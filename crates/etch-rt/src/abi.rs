@@ -468,11 +468,13 @@ pub struct Writer {
     pub signed_out: bool,
     /// where the action goes (`go`)
     pub go: Option<String>,
+    /// an external function's text result, before it's kept in the arena
+    ext: Vec<u8>,
 }
 
 impl Writer {
     pub fn new(seq: i64) -> Writer {
-        Writer { now: 0, seq, next_ids: HashMap::new(), arena: Arena::default(), signed_in: None, signed_out: false, go: None }
+        Writer { now: 0, seq, next_ids: HashMap::new(), arena: Arena::default(), signed_in: None, signed_out: false, go: None, ext: Vec::new() }
     }
     /// A new batch: its time; the arena emptied.
     pub fn begin(&mut self, now: i64) {
@@ -624,4 +626,60 @@ pub unsafe extern "C" fn etch_w_copy(w: *mut Writer, src: *const Str, dst: *mut 
     let p = (*w).arena.take(n);
     std::ptr::copy_nonoverlapping(s.ptr, p, n);
     *dst = Str { ptr: p, len: s.len };
+}
+
+// ---- external functions (`extern fn`): include/etch.h
+
+/// Appends text to an external function's result (what C code calls; Rust code may too).
+/// Text that isn't UTF-8 is replaced where it's used. # Safety: `out` the buffer the function
+/// was given; `p` readable for `n` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn etch_ext_write(out: *mut Vec<u8>, p: *const u8, n: i64) {
+    if n > 0 && !p.is_null() {
+        buf(out).extend_from_slice(std::slice::from_raw_parts(p, n as usize));
+    }
+}
+
+/// A buffer's bytes and length, for an external function's text argument. # Safety: a live Vec.
+#[no_mangle]
+pub unsafe extern "C" fn etch_vec_ptr(v: *mut Vec<u8>) -> *const u8 {
+    (*v).as_ptr()
+}
+/// # Safety: a live Vec.
+#[no_mangle]
+pub unsafe extern "C" fn etch_vec_len(v: *mut Vec<u8>) -> i64 {
+    (*v).len() as i64
+}
+
+/// An external function's text result, into the page (escaped when `esc`): what isn't UTF-8 is
+/// replaced (U+FFFD), so the page stays valid text. # Safety: live Vecs.
+#[no_mangle]
+pub unsafe extern "C" fn etch_emit(out: *mut Vec<u8>, t: *mut Vec<u8>, esc: i64) {
+    let o = buf(out);
+    match std::str::from_utf8(&*t) {
+        Ok(s) => put(o, s, esc),
+        Err(_) => put(o, &String::from_utf8_lossy(&*t), esc),
+    }
+}
+
+/// The writer's buffer for an external function's text result, emptied. # Safety: a live Writer.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_ext_out(w: *mut Writer) -> *mut Vec<u8> {
+    let w = &mut *w;
+    w.ext.clear();
+    &mut w.ext
+}
+
+/// The external function's text result, kept in the writer's arena as the action's text (what
+/// isn't UTF-8 replaced). # Safety: a live Writer; `dst` writable.
+#[no_mangle]
+pub unsafe extern "C" fn etch_w_ext_take(w: *mut Writer, dst: *mut Str) {
+    let w = &mut *w;
+    if std::str::from_utf8(&w.ext).is_err() {
+        w.ext = String::from_utf8_lossy(&w.ext).into_owned().into_bytes();
+    }
+    let n = w.ext.len();
+    let p = w.arena.take(n.max(1));
+    std::ptr::copy_nonoverlapping(w.ext.as_ptr(), p, n);
+    *dst = Str { ptr: p, len: n as i64 };
 }

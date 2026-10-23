@@ -331,6 +331,15 @@ impl Parser {
                 let to_field = self.ident()?;
                 Ok(Decl::Viewer { entity, cookie, via_entity, via_field, to_field, span })
             }
+            "extern" => {
+                let effect = self.eat_kw("effect");
+                self.expect_kw("fn")?;
+                let name = self.ident()?;
+                let params = self.params()?;
+                self.expect(":")?;
+                let ret = self.ty()?;
+                Ok(Decl::Extern { name, params, ret, effect, span })
+            }
             "fn" => {
                 let name = self.ident()?;
                 let params = self.params()?;
