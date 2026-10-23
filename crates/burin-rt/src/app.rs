@@ -343,7 +343,7 @@ pub fn emit_page<'a, G: Glue>(snap: &'a Snap, c: &Connection, ctx: &Ctx, s: usiz
                 Part::Seg(seg) => sink.seg(seg),
                 Part::Live => {
                     let mut b = [0u8; 160];
-                    let n = live_tag(&mut b, s, key, snap.live_seq);
+                    let n = live_tag(&mut b, s, key, snap.live_seq.get());
                     sink.bytes(&b[..n]);
                 }
                 Part::Render(kind, k) => {
@@ -432,6 +432,9 @@ pub struct Stats {
     pub quiet: AtomicU64,
     /// live events published (each to the open pages on its topic)
     pub live: AtomicU64,
+    /// streams opened past their rings: sent `missed` (signals), or `refresh` (lists)
+    pub missed: AtomicU64,
+    pub refreshed: AtomicU64,
     /// kept pages the scrubber compared with a fresh build, and the ones it found different (and
     /// rebuilt): a missed edge
     pub scrubbed: AtomicU64,
@@ -665,8 +668,8 @@ impl<G: Glue> App<G> {
             let st = &self.stats;
             let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
             let s = format!(
-                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"rendered":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"blocks":{},"block_us":{},"quiet":{},"live":{},"kept":{},"version":{}}}"#,
-                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.rendered), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced), g(&st.blocks), g(&st.block_us), g(&st.quiet), g(&st.live),
+                r#"{{"fast":{},"cold":{},"verified":{},"mismatched":{},"refused":{},"batches":{},"acts":{},"write_reads":{},"forwarded":{},"rendered":{},"cleared":{},"audiences":{},"scrubbed":{},"scrub_fixed":{},"verify_raced":{},"blocks":{},"block_us":{},"quiet":{},"live":{},"missed":{},"refreshed":{},"kept":{},"version":{}}}"#,
+                g(&st.fast), g(&st.cold), g(&st.verified), g(&st.mismatched), g(&st.refused), g(&st.batches), g(&st.acts), g(&st.write_reads), g(&st.forwarded), g(&st.rendered), g(&st.cleared), g(&st.audiences), g(&st.scrubbed), g(&st.scrub_fixed), g(&st.verify_raced), g(&st.blocks), g(&st.block_us), g(&st.quiet), g(&st.live), g(&st.missed), g(&st.refreshed),
                 self.snap.load().regs.iter().map(|r| r.len()).sum::<usize>(), self.snap.load().version
             );
             return respond(out, 200, "application/json", &[], s.as_bytes());
@@ -787,7 +790,7 @@ fn fresh<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, uid: i64) -> Op
     // the live events it includes, as the published snapshot does: read before the database is,
     // so one that commits meanwhile is sent again (harmless: Turbo replaces an element of the
     // same id) rather than missed (a quiet batch's signals come after it: sent again too)
-    snap.live_seq = crate::live::HUB.published();
+    snap.live_seq.set(crate::live::HUB.published());
     if !build_screen::<G>(c, ctx, &mut snap, s, key) {
         return None;
     }
@@ -800,7 +803,7 @@ fn fresh<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, uid: i64) -> Op
 /// A page built per request (a cold screen, a public one): its cached pieces built now too.
 fn per_request<G: Glue>(c: &Connection, ctx: &Ctx, s: usize, key: i64, viewer: i64) -> Result<(Vec<u8>, Vec<u8>), Option<String>> {
     let mut snap = Snap::new(G::REGS, G::LISTS, G::SCREENS);
-    snap.live_seq = crate::live::HUB.published();
+    snap.live_seq.set(crate::live::HUB.published());
     for (kind, k) in G::screen_regs(s, key) {
         let rec = load::<G>(c, ctx, kind, k, 0).ok_or(None)?;
         snap.regs[kind].insert(k, Arc::new(build::<G>(ctx, kind, rec.ptr())));
@@ -883,6 +886,7 @@ impl<G: Glue> crate::Handler for App<G> {
                 // signals it missed and can't be sent: `missed` (the page's script reloads what
                 // they'd have changed)
                 if missed {
+                    self.stats.missed.fetch_add(1, Ordering::Relaxed);
                     head.extend_from_slice(&crate::live::unnumbered(&crate::live::turbo_stream("missed", "", None)));
                 }
                 let mut last = since;
@@ -893,6 +897,7 @@ impl<G: Glue> crate::Handler for App<G> {
                 last
             }
             crate::live::Replay::Refresh => {
+                self.stats.refreshed.fetch_add(1, Ordering::Relaxed);
                 let last = crate::live::HUB.last();
                 head.extend_from_slice(&crate::live::event_bytes(last, &crate::live::turbo_stream("refresh", "", None)));
                 last
@@ -1057,11 +1062,17 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
                     }
                 }
             }
-            // its signals (a room read: the viewer's other pages): after the published snapshot
-            // (pages built since replay them, which signals allow)
+            // its signals (a room read: the viewer's other pages). They change no page, so the
+            // published snapshot then counts them as included: pages from it start after them
+            // (a run of reads mustn't fill the signals' ring past every page's number)
             let events = number(signal_streams::<G>(&c, &cur, std::mem::take(&mut w.signals)));
             stats.live.fetch_add(events.len() as u64, Ordering::Relaxed);
-            crate::live::HUB.publish(events, vec![]);
+            if !events.is_empty() {
+                crate::live::HUB.publish(events, vec![]);
+                let last = crate::live::HUB.last();
+                cur.live_seq.set(last);
+                crate::live::HUB.set_published(last);
+            }
             stats.published.store(stats.commits.load(Ordering::SeqCst), Ordering::SeqCst);
             stats.batches.fetch_add(1, Ordering::Relaxed);
             stats.quiet.fetch_add(1, Ordering::Relaxed);
@@ -1335,9 +1346,9 @@ fn writer<G: Glue>(mut c: Connection, ctx: Arc<Ctx>, snap: Arc<ArcSwap<Snap>>, r
         let mut streams: Vec<(u64, Vec<u8>, Option<Arc<Vec<i64>>>)> = live.into_iter().map(|(t, s)| (t, s, None)).collect();
         streams.extend(signal_streams::<G>(&c, &next, std::mem::take(&mut w.signals)));
         let events = number(streams);
-        next.live_seq = crate::live::HUB.last();
+        next.live_seq.set(crate::live::HUB.last());
         stats.live.fetch_add(events.len() as u64, Ordering::Relaxed);
-        let seq = next.live_seq;
+        let seq = next.live_seq.get();
         snap.store(Arc::new(next));
         crate::live::HUB.set_published(seq);
         crate::live::HUB.publish(events, revokes);

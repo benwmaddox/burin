@@ -38,12 +38,12 @@ sleep 0.4
 act $DAVID post_message "room=$B" "body=in b" > /dev/null
 act $DAVID post_message "room=$A" "body=in a" > /dev/null
 sleep 0.4
-want "Jason's page (on A): read A (opening it), then unread for B and A" "$(signals jasonA)" "read $A,unread $B,unread $A,"
-want "Kevin's (not in B): only A's" "$(signals kevinA)" "read $A,unread $A,"
+want "Jason's page (on A): unread for B and A" "$(signals jasonA)" "unread $B,unread $A,"
+want "Kevin's (not in B): only A's" "$(signals kevinA)" "unread $A,"
 # Jason reads B on another page: his page on A marks it read
 hold $JASON $B jasonB
 sleep 0.4
-want "…and read for B, when he opens B elsewhere" "$(signals jasonA)" "read $A,unread $B,unread $A,read $B,"
+want "…and read for B, when he opens B elsewhere" "$(signals jasonA)" "unread $B,unread $A,read $B,"
 # Jason leaves both pages; A was posted to while he sat in it
 want "while he's in A, its new post still counts (the page's script hides it)" "$(sidebar_unread $JASON $A)" 1
 kill $HOLDS 2>/dev/null || true
@@ -56,14 +56,28 @@ hold $JASON $A jasonA2; hold $KEVIN $A kevinA2
 sleep 0.4
 act $DAVID create_closed_room "name=Just us" "users=$JU" > /dev/null
 sleep 0.3
-want "a closed room: its member's sidebar reloads, not others'" "$(signals jasonA2)|$(signals kevinA2)" "read $A,sidebar,|read $A,"
+want "a closed room: its member's sidebar reloads, not others'" "$(signals jasonA2)|$(signals kevinA2)" "sidebar,|"
 act $DAVID create_open_room "name=Everyone" > /dev/null
 sleep 0.3
-want "an open room: every sidebar reloads" "$(signals jasonA2)|$(signals kevinA2)" "read $A,sidebar,sidebar,|read $A,sidebar,"
+want "an open room: every sidebar reloads" "$(signals jasonA2)|$(signals kevinA2)" "sidebar,sidebar,|sidebar,"
 # a failed action signals nothing
 act $KEVIN post_message "room=$B" "body=not a member" > /dev/null
 sleep 0.3
-want "a refused post signals no one" "$(signals jasonA2)" "read $A,sidebar,sidebar,"
+want "a refused post signals no one" "$(signals jasonA2)" "sidebar,sidebar,"
+# a long run of reads (each a batch that changes no page, with its read signal) mustn't leave
+# new pages behind the signals' ring: the room made unread under the server each time (in
+# SQLite, which read_room reads), then read by opening a stream
+JM=$(q "select id from Membership where room = $A and user = $JU")
+kill $HOLDS 2>/dev/null || true
+q0=$(curl -sS $U/_burin/stats | sed 's/.*"quiet":\([0-9]*\).*/\1/')
+for i in $(seq 1 270); do
+  node /mnt/d/code/burin/scripts/x.js $D/data/app.sqlite "update Membership set seen = 0 where id = $JM" 2>/dev/null
+  curl -sSN -m 0.15 -H "Cookie: session_token=$JASON" "$U$(src $JASON $A)" > /dev/null || true
+done
+want "270 reads, each quiet" "$(( $(curl -sS $U/_burin/stats | sed 's/.*"quiet":\([0-9]*\).*/\1/') - q0 >= 270 ))" 1
+curl -sSN -m 0.5 -H "Cookie: session_token=$KEVIN" "$U$(src $KEVIN $A)" > $D/after.txt || true
+want "a page after them doesn't start with missed" "$(grep -c 'action="missed"' $D/after.txt)" 0
+want "no stream was sent missed or refresh" "$(curl -sS $U/_burin/stats | grep -oE '"missed":[0-9]+|"refreshed":[0-9]+' | tr '\n' ' ')" '"missed":0 "refreshed":0 '
 curl -sS $U/_burin/stats | grep -oE '"mismatched":[0-9]+|"live":[0-9]+' | tr '\n' ' '; echo
 grep -iE "panic" $D/server.log && fail=1
 [ $fail = 0 ] && echo PASS || { echo FAIL; exit 1; }

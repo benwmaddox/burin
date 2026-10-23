@@ -76,7 +76,7 @@ pub struct Snap {
     pub version: u64,
     /// the last live event this snapshot includes (a page from it carries it: its stream gets the
     /// ones after)
-    pub live_seq: u64,
+    pub live_seq: Seq,
     pub sessions: HashMap<Box<[u8]>, i64>,
     /// by register kind (the generated index), by key
     pub regs: Vec<HashMap<i64, Arc<Reg>>>,
@@ -90,7 +90,7 @@ pub struct Snap {
 
 impl Snap {
     pub fn new(regs: usize, lists: usize, screens: usize) -> Snap {
-        Snap { version: 0, live_seq: 0, sessions: HashMap::new(), regs: vec![HashMap::new(); regs], lists: vec![HashMap::new(); lists], screens: vec![HashMap::new(); screens], blocks: vec![HashMap::new(); lists] }
+        Snap { version: 0, live_seq: Seq::default(), sessions: HashMap::new(), regs: vec![HashMap::new(); regs], lists: vec![HashMap::new(); lists], screens: vec![HashMap::new(); screens], blocks: vec![HashMap::new(); lists] }
     }
     /// The next snapshot: everything shared, the version moved on.
     pub fn next(&self) -> Snap {
@@ -164,5 +164,25 @@ mod id_tests {
         assert_eq!(super::first_id(b"<div id=\"message_7\" class=\"m\"><b id=\"x\">").as_deref(), Some("message_7"));
         assert_eq!(super::first_id(b"<div data-id=\"7\">").as_deref(), None);
         assert_eq!(super::first_id(b"<li class=\"a\" id=\"n-2\">").as_deref(), Some("n-2"));
+    }
+}
+
+/// A snapshot's last live event. A batch whose only events are signals raises it in place: they
+/// change no page, so a page from the snapshot may start after them.
+#[derive(Default)]
+pub struct Seq(std::sync::atomic::AtomicU64);
+
+impl Clone for Seq {
+    fn clone(&self) -> Seq {
+        Seq(self.get().into())
+    }
+}
+
+impl Seq {
+    pub fn get(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub fn set(&self, v: u64) {
+        self.0.store(v, std::sync::atomic::Ordering::Release);
     }
 }

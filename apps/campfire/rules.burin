@@ -59,9 +59,9 @@ action read_room(room: Room) {
   require member(viewer, room) else not_found
   for each ms in Membership where .room == room and .user == viewer and .seen != .room.posted {
     set ms.seen = ms.room.posted
+    // the viewer's other pages mark it read (Rails: the user's reads stream), when it was unread
+    signal read(room) to viewer
   }
-  // the viewer's other pages mark it read (Rails: the user's reads stream)
-  signal read(room) to viewer
 }
 
 // Whether a room has posts the viewer hasn't read.

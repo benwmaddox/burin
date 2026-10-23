@@ -51,10 +51,10 @@ want "the append carries the message" "$(grep -c 'data: .*live hello' $D/stream.
 want "the edit's replace carries the new text" "$(grep -c 'data: .*live edited' $D/stream.txt)" 2
 want "events have ids" "$(grep -c '^id: [0-9]' $D/stream.txt)" 6
 # a reconnect from the post gets what it missed after it (and nothing earlier): the first stream's
-# closing read the room (read), and so does its own opening
+# closing read the room (read: it had posts since it opened)
 POST=$(grep -B2 'data: <turbo-stream action="append"' $D/stream.txt | grep -m1 '^id: ' | sed 's/id: //')
 curl -sSN -m 1 -H "Cookie: session_token=$JASON" -H "Last-Event-ID: $POST" "$U$SRC" > $D/replay.txt || true
-want "a reconnect gets the events after its Last-Event-ID" "$(grep -o 'data: <turbo-stream action="[a-z]*"' $D/replay.txt | sed 's/.*action="//; s/"$//' | tr '\n' ',')" "unread,replace,replace,remove,read,read,"
+want "a reconnect gets the events after its Last-Event-ID" "$(grep -o 'data: <turbo-stream action="[a-z]*"' $D/replay.txt | sed 's/.*action="//; s/"$//' | tr '\n' ',')" "unread,replace,replace,remove,read,"
 # not a member: refused
 OUT=$(sql "select r.id from Room r where r.type = 'closed' and r.id not in (select room from Membership where user = $JU) limit 1")
 if [ -n "$OUT" ]; then
