@@ -378,3 +378,21 @@ fn a_counted_while_spends_no_steps_and_every_other_does() {
         assert_eq!(steps(f), 1, "{f} isn't counted");
     }
 }
+
+#[test]
+fn a_helper_s_constant_table_is_computed_when_compiling() {
+    let src = format!(
+        "{BASE}\nfn crc(t: Text): Int {{\n  var table = ints(256)\n  for i in 0..256 {{\n    var c = i\n    for k in 0..8 {{\n      if c & 1 == 1 {{ c = 0xEDB88320 ^ (c >> 1) }} else {{ c = c >> 1 }}\n    }}\n    table[i] = c\n  }}\n  var crc = 0xFFFFFFFF\n  for i in 0..byte_length(t) {{\n    crc = table[(crc ^ byte_at(t, i)) & 255] ^ (crc >> 8)\n  }}\n  return crc ^ 0xFFFFFFFF\n}}\n\
+         fn later(n: Int): Int {{\n  var a = ints(4)\n  a[1] = 7\n  a[2] = n\n  return a[1] + a[2]\n}}"
+    );
+    let app = app_of(&src).unwrap();
+    let m = check::Model::new(&app).map_err(|e| e.msg).unwrap();
+    let ir = crate::helpers::emit(&m, true).map_err(|e| e.1).unwrap();
+    // CRC-32's table: a constant, its entries computed (entry 1 is 0x77073096); no building loop
+    assert!(ir.contains("@hc_crc_table = private unnamed_addr constant [256 x i64] [i64 0, i64 1996959894,"), "{ir}");
+    let crc = ir.split("define ").find(|d| d.starts_with("i64 @burin_fn_crc(")).unwrap();
+    assert!(!crc.contains("3988292384"), "the table isn't built at run time");
+    // a table a run changes later: its own copy of the constant values
+    let later = ir.split("define ").find(|d| d.starts_with("i64 @burin_fn_later(")).unwrap();
+    assert!(ir.contains("@hc_later_a = private unnamed_addr constant [4 x i64] [i64 0, i64 7, i64 0, i64 0]") && later.contains("@llvm.memcpy"), "{later}");
+}

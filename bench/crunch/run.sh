@@ -40,8 +40,8 @@ build 0
 node -e '
 const rows = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n").map(JSON.parse);
 const c = rows.find(r => r.run === "c-clang");
-console.log("run              deflate MB/s   vs clang   crc32 MB/s   vs clang");
-for (const r of rows) console.log(r.run.padEnd(16), String(r.deflate_mb_s).padStart(12), (r.deflate_mb_s / c.deflate_mb_s).toFixed(2).padStart(10), String(r.crc32_mb_s).padStart(12), (r.crc32_mb_s / c.crc32_mb_s).toFixed(2).padStart(10));
+console.log("run              deflate MB/s   vs clang   crc32 MB/s   vs clang   crc32 64 B ns   deflate 1 KB ns");
+for (const r of rows) console.log(r.run.padEnd(16), String(r.deflate_mb_s).padStart(12), (r.deflate_mb_s / c.deflate_mb_s).toFixed(2).padStart(10), String(r.crc32_mb_s).padStart(12), (r.crc32_mb_s / c.crc32_mb_s).toFixed(2).padStart(10), String(r.crc32_64b_ns).padStart(15), String(r.deflate_1k_ns).padStart(17));
 const g = rows.find(r => r.run === "c-gcc");
 console.log(`context (other algorithms): zlib 1 ${g.zlib1_mb_s} MB/s (${g.zlib1_compressed} bytes), zlib 6 ${g.zlib6_mb_s} (${g.zlib6_compressed}), libdeflate 1 ${g.libdeflate1_mb_s} (${g.libdeflate1_compressed}), libdeflate 6 ${g.libdeflate6_mb_s} (${g.libdeflate6_compressed}); fixed-code greedy: ${g.compressed} bytes; zlib crc32 ${g.zlib_crc32_mb_s} MB/s`);
 ' $OUT

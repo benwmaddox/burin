@@ -192,7 +192,12 @@ int main(int argc, char **argv) {
     double crc_s;
     int64_t crc = 0;
     MEDIAN(runs, crc_s, crc = crc32_bytes(t, n));
-    printf("{\"impl\":\"c\",\"bytes\":%lld,\"deflate_mb_s\":%.1f,\"compressed\":%zu,\"crc32_mb_s\":%.1f,\"crc32\":%lld", (long long)n, mb / s, m, mb / crc_s, (long long)crc);
+    // small inputs: a call's own cost (its tables, built each call as burin's source does)
+    int64_t sink = 0, small = n < 64 ? n : 64, kb = n < 1024 ? n : 1024;
+    double crc64_s, d1k_s;
+    MEDIAN(runs, crc64_s, for (int k = 0; k < 100000; k++) { sink += crc32_bytes(t, small); __asm__ volatile("" : : "r"(sink) : "memory"); });
+    MEDIAN(runs, d1k_s, for (int k = 0; k < 2000; k++) { sink += (int64_t)deflate_fixed(t, kb, out); __asm__ volatile("" : : "r"(sink) : "memory"); });
+    printf("{\"impl\":\"c\",\"bytes\":%lld,\"deflate_mb_s\":%.1f,\"compressed\":%zu,\"crc32_mb_s\":%.1f,\"crc32\":%lld,\"crc32_64b_ns\":%.0f,\"deflate_1k_ns\":%.0f", (long long)n, mb / s, m, mb / crc_s, (long long)crc, crc64_s * 1e9 / 100000, d1k_s * 1e9 / 2000);
     // context: zlib (levels 1 and 6) and libdeflate (1 and 6), raw DEFLATE; zlib's crc32
     for (int level = 1; level <= 6; level += 5) {
         size_t zn = 0;

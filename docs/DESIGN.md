@@ -476,29 +476,55 @@ burin as a helper: a `fn` with a body of statements.
   - The rest come from a bump arena per thread, marked on entry and released on every way out.
     The memory is kept for the next call; a call can't take more than 256 MB.
   - Arena arrays are `noalias` (as malloc's), so LLVM knows they don't overlap the text.
+- **Constant tables:** a helper's top-level statements that depend on nothing at run time
+  (building a table from constants) run in the compiler, with the generated code's own rules.
+  - A table nothing changes later becomes a constant in the binary; one changed later gets its
+    own copy of the values; scalars start as their computed values.
+  - If running a statement fails, or takes more than 50 million turns, it simply stays in the code.
+- **Facts for LLVM:** the compiler doesn't optimize; it says what it knows, and LLVM's passes
+  do the rest.
+  - A Text's length is under 2^47, so arithmetic on positions can't overflow.
+  - `min` and `max` are LLVM's own `smin`/`smax`.
+  - Arena arrays don't overlap anything (`noalias`).
 - **Measured** (`bench/crunch/run.sh`, Silesia's dickens, 10.2 MB, one core, median of 9):
   DEFLATE (greedy LZ77 over a 32 KB window, fixed Huffman codes) in burin and the same
-  algorithm in C give the same bytes, which inflate back.
+  algorithm in C give the same bytes, which inflate back. Small inputs are a call on the first
+  64 bytes or 1 KB, many times.
 
-  | | DEFLATE MB/s | vs clang -O2 | CRC-32 MB/s |
-  |---|---|---|---|
-  | burin | 24.8 | 0.70 | 579 |
-  | burin, no step budget | 27.0 | 0.76 | 582 |
-  | C, clang -O2 | 35.6 | 1.00 | 564 |
-  | C, gcc -O2 | 35.4 | 0.99 | 575 |
-  | C, clang with overflow and bounds traps | 28.0 | 0.79 | 579 |
-  | C, gcc with overflow and bounds traps | 33.7 | 0.95 | 581 |
+  | | DEFLATE MB/s | vs clang -O2 | CRC-32 MB/s | CRC-32, 64 B | DEFLATE, 1 KB |
+  |---|---|---|---|---|---|
+  | burin | 29.7 | 0.85 | 577 | 75 ns | 8.5 µs |
+  | burin, no step budget | 28.8 | 0.83 | 584 | 75 ns | 8.3 µs |
+  | C, clang -O2 | 34.9 | 1.00 | 578 | 860 ns | 20.3 µs |
+  | C, gcc -O2 | 35.1 | 1.01 | 590 | 853 ns | 21.9 µs |
+  | C, clang with overflow and bounds traps | 28–33 | 0.79–0.95 | 577 | 856 ns | 29.3 µs |
+  | C, gcc with overflow and bounds traps | 33.5 | 0.96 | 586 | 863 ns | 29.3 µs |
 
-  - burin is about as fast as C with checks.
-  - Its gap to plain C is the step budget (about 8%, all on the inner byte-matching `while`)
-    plus checks C doesn't make: every `byte_at` and index is bounds-checked, every `+` is
-    overflow-checked.
+  How it got there:
+
+  | DEFLATE MB/s | change |
+  |---|---|
+  | 24.8 | the first version |
+  | 26.1 | counted `while` loops spend no steps |
+  | 28.5 | Text lengths' range; `smin`/`smax` |
+  | 29.9 | any counted part of an `and` counts |
+
+  - Constant tables made small inputs 3–9× faster.
+  - The C version mirrors the burin source, so it builds its tables on every call. A C
+    programmer would build them once; burin does that from plain code.
+  - burin is now about as fast as C with checks (that run varies between 28 and 33 MB/s), and
+    0.85× plain C.
+  - Nearly all of the time is one loop without calls: DEFLATE's byte matching. Its gap to C is
+    two bounds checks and two values reloaded from the stack (the function keeps many values
+    live).
   - CRC-32 matches C.
   - For context, other algorithms: libdeflate level 1 runs at 240 MB/s to 41% of the size (this
     algorithm gets 49.6%).
 - **Next:**
-  - Fewer checks where the compiler can prove a range (hoisting, as Roc does).
-  - Tables built at compile time.
+  - The same facts for pages and actions: a field that isn't optional is never none; `max N`
+    text; a list's `limit`; snapshot data never changes.
+  - A byte-matching builtin (8 bytes at a time).
+  - Cheaper `out_byte`.
   - Arrays passed between helpers.
   - Text built from pieces.
   - A `Bytes` type for results that aren't UTF-8.

@@ -44,12 +44,30 @@ fn deflate_and_crc32_timed() {
     }
     let mut crc = 0;
     let crc_s = median(runs, || crc = unsafe { burin_fn_crc32(input.as_ptr(), input.len() as i64) });
+    // small inputs, burin's usual (a row's text in a cached piece): a call's own cost shows
+    let (small, k) = (&input[..64.min(input.len())], 100_000);
+    let mut sink = 0i64;
+    let crc64_ns = median(runs, || {
+        for _ in 0..k {
+            sink = sink.wrapping_add(unsafe { burin_fn_crc32(small.as_ptr(), small.len() as i64) });
+        }
+    }) * 1e9 / k as f64;
+    let (kb, k2) = (&input[..1024.min(input.len())], 2_000);
+    let deflate1k_ns = median(runs, || {
+        for _ in 0..k2 {
+            out.clear();
+            unsafe { burin_fn_deflate(kb.as_ptr(), kb.len() as i64, &mut out) };
+        }
+    }) * 1e9 / k2 as f64;
+    std::hint::black_box(sink);
     let mb = input.len() as f64 / 1e6;
     println!(
-        "{{\"impl\":\"burin\",\"bytes\":{},\"deflate_mb_s\":{:.1},\"compressed\":{},\"crc32_mb_s\":{:.1},\"crc32\":{crc}}}",
+        "{{\"impl\":\"burin\",\"bytes\":{},\"deflate_mb_s\":{:.1},\"compressed\":{},\"crc32_mb_s\":{:.1},\"crc32\":{crc},\"crc32_64b_ns\":{:.0},\"deflate_1k_ns\":{:.0}}}",
         input.len(),
         mb / deflate,
         out.len(),
-        mb / crc_s
+        mb / crc_s,
+        crc64_ns,
+        deflate1k_ns
     );
 }

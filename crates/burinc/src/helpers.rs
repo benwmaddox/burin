@@ -805,7 +805,38 @@ fn helper(m: &Model, d: &Decl, steps: bool) -> Result<(String, Vec<String>), E> 
         sig.push("ptr %out".into());
     }
     g.start("body");
-    g.block(body)?;
+    // what depends on nothing at run time, computed now: its results begin the call (a table no
+    // statement left changes is a constant in the binary; one changed later, its own copy)
+    let (kept, start) = constants(m, params, body);
+    let changed_later = assigned(&kept);
+    let mut globals = String::new();
+    for (n, v) in &start {
+        match v {
+            SV::Int(x) => g.stmt(&HStmt::Var(n.clone(), Expr::Int(*x, *span), *span))?,
+            SV::Bool(b) => g.stmt(&HStmt::Var(n.clone(), Expr::Bool(*b, *span), *span))?,
+            SV::Arr(el, vals) => {
+                let (global, zero) = (format!("@hc_{name}_{n}"), vals.iter().all(|x| *x == 0));
+                let items = if zero { "zeroinitializer".to_string() } else { format!("[{}]", vals.iter().map(|x| format!("{} {x}", el.ll())).collect::<Vec<_>>().join(", ")) };
+                if changed_later.contains(n) {
+                    let make = match el {
+                        Elem::I64 => "ints",
+                        Elem::I32 => "int32s",
+                        Elem::U8 => "bytes",
+                    };
+                    g.stmt(&HStmt::Var(n.clone(), Expr::Call(make.into(), vec![Expr::Int(vals.len() as i64, *span)], *span), *span))?;
+                    if !zero {
+                        let _ = writeln!(globals, "{global} = private unnamed_addr constant [{} x {}] {items}, align 16", vals.len(), el.ll());
+                        let Some(Local::Arr(p, _, _)) = g.lookup(n).cloned() else { unreachable!() };
+                        g.line(&format!("call void @llvm.memcpy.p0.p0.i64(ptr align 8 {p}, ptr align 16 {global}, i64 {}, i1 false)", vals.len() * el.bytes()));
+                    }
+                } else {
+                    let _ = writeln!(globals, "{global} = private unnamed_addr constant [{} x {}] {items}, align 16", vals.len(), el.ll());
+                    g.declare(*span, n, Local::Arr(global, vals.len().to_string(), *el))?;
+                }
+            }
+        }
+    }
+    g.block(&kept)?;
     // the end without a `return`: an Int or Bool helper has no answer (none)
     if !g.ended {
         if rt == Ty::Text {
@@ -817,6 +848,7 @@ fn helper(m: &Model, d: &Decl, steps: bool) -> Result<(String, Vec<String>), E> 
     }
     let mut f = String::new();
     let rty = if rt == Ty::Text { "void" } else { "i64" };
+    f.push_str(&globals);
     let _ = writeln!(f, "define {rty} @burin_fn_{name}({}) {{\nentry:", sig.join(", "));
     if rt == Ty::Text {
         f.push_str("  %out0 = call i64 @burin_vec_len(ptr %out)\n");
@@ -884,7 +916,7 @@ pub fn emit(m: &Model, steps: bool) -> Result<String, E> {
         walk(&graph, n, &mut vec![])?;
     }
     if !out.is_empty() {
-        out.insert_str(0, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\ndeclare void @burin_vec_truncate(ptr, i64)\ndeclare i64 @burin_out_byte(ptr, i64)\ndeclare i64 @burin_ha_budget()\ndeclare i64 @burin_ha_mark()\ndeclare void @burin_ha_release(i64)\ndeclare noalias ptr @burin_ha_alloc(i64)\ndeclare i64 @llvm.smin.i64(i64, i64)\ndeclare i64 @llvm.smax.i64(i64, i64)\n\n");
+        out.insert_str(0, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\ndeclare void @burin_vec_truncate(ptr, i64)\ndeclare i64 @burin_out_byte(ptr, i64)\ndeclare i64 @burin_ha_budget()\ndeclare i64 @burin_ha_mark()\ndeclare void @burin_ha_release(i64)\ndeclare noalias ptr @burin_ha_alloc(i64)\ndeclare i64 @llvm.smin.i64(i64, i64)\ndeclare i64 @llvm.smax.i64(i64, i64)\ndeclare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n\n");
     }
     Ok(out)
 }
@@ -906,4 +938,304 @@ fn inline_fns(m: &Model, body: &[HStmt]) -> Vec<HStmt> {
             other => other.clone(),
         })
         .collect()
+}
+
+// ---- constant tables: what a helper computes from constants alone is computed here, once
+
+/// A value computed when compiling.
+#[derive(Clone, Debug, PartialEq)]
+enum SV {
+    Int(i64),
+    Bool(bool),
+    Arr(Elem, Vec<i64>),
+}
+
+/// Loop turns the compiler spends on one helper's constant statements (past it, they run as
+/// written, at run time).
+const COMPILE_STEPS: u64 = 50_000_000;
+
+enum Flow {
+    Next,
+    Break,
+    Continue,
+}
+
+/// The compile-time interpreter: the generated code's own rules (checked arithmetic, bounds,
+/// element sizes); anything it can't do or that fails is None, and the statement stays.
+struct Interp<'a> {
+    m: &'a Model<'a>,
+    scopes: Vec<HashMap<String, SV>>,
+    steps: u64,
+}
+
+impl Interp<'_> {
+    fn get(&self, n: &str) -> Option<&SV> {
+        self.scopes.iter().rev().find_map(|s| s.get(n))
+    }
+    fn get_mut(&mut self, n: &str) -> Option<&mut SV> {
+        self.scopes.iter_mut().rev().find_map(|s| s.get_mut(n))
+    }
+    fn int(&mut self, e: &Expr) -> Option<i64> {
+        match self.ex(e)? {
+            SV::Int(v) => Some(v),
+            _ => None,
+        }
+    }
+    fn bool(&mut self, e: &Expr) -> Option<bool> {
+        match self.ex(e)? {
+            SV::Bool(v) => Some(v),
+            _ => None,
+        }
+    }
+    fn ex(&mut self, e: &Expr) -> Option<SV> {
+        Some(match e {
+            Expr::Int(n, _) | Expr::Dur(n, _) => SV::Int(*n),
+            Expr::Bool(b, _) => SV::Bool(*b),
+            Expr::Name(n, _) => match self.get(n) {
+                Some(v @ (SV::Int(_) | SV::Bool(_))) => v.clone(),
+                Some(SV::Arr(..)) => return None,
+                None => match self.m.consts.get(n) {
+                    Some(Decl::Const { value: v @ (Expr::Int(..) | Expr::Dur(..) | Expr::Bool(..)), .. }) => self.ex(v)?,
+                    _ => return None,
+                },
+            },
+            Expr::Not(a, _) => SV::Bool(!self.bool(a)?),
+            Expr::Bin(BinOp::And, a, b, _) => SV::Bool(self.bool(a)? && self.bool(b)?),
+            Expr::Bin(BinOp::Or, a, b, _) => SV::Bool(self.bool(a)? || self.bool(b)?),
+            Expr::Bin(op @ (BinOp::Eq | BinOp::Ne), a, b, _) => {
+                let (x, y) = (self.ex(a)?, self.ex(b)?);
+                if matches!(x, SV::Arr(..)) || std::mem::discriminant(&x) != std::mem::discriminant(&y) {
+                    return None;
+                }
+                SV::Bool((x == y) == (*op == BinOp::Eq))
+            }
+            Expr::Bin(op, a, b, _) => {
+                let (x, y) = (self.int(a)?, self.int(b)?);
+                match op {
+                    BinOp::Lt => SV::Bool(x < y),
+                    BinOp::Le => SV::Bool(x <= y),
+                    BinOp::Gt => SV::Bool(x > y),
+                    BinOp::Ge => SV::Bool(x >= y),
+                    BinOp::Add => SV::Int(x.checked_add(y)?),
+                    BinOp::Sub => SV::Int(x.checked_sub(y)?),
+                    BinOp::Mul => SV::Int(x.checked_mul(y)?),
+                    BinOp::Div => SV::Int(x.checked_div(y)?),
+                    BinOp::Mod => SV::Int(x.checked_rem(y)?),
+                    BinOp::Shl if (0..64).contains(&y) => SV::Int(x << y),
+                    BinOp::Shr if (0..64).contains(&y) => SV::Int(x >> y),
+                    BinOp::BitAnd => SV::Int(x & y),
+                    BinOp::BitOr => SV::Int(x | y),
+                    BinOp::BitXor => SV::Int(x ^ y),
+                    BinOp::AddWrap => SV::Int(x.wrapping_add(y)),
+                    BinOp::SubWrap => SV::Int(x.wrapping_sub(y)),
+                    BinOp::MulWrap => SV::Int(x.wrapping_mul(y)),
+                    _ => return None,
+                }
+            }
+            Expr::If(c, a, b, _) => {
+                if self.bool(c)? {
+                    self.ex(a)?
+                } else {
+                    self.ex(b)?
+                }
+            }
+            Expr::Call(f, a, _) => match (f.as_str(), a.as_slice()) {
+                ("__at", [Expr::Name(n, _), i]) => {
+                    let i = self.int(i)?;
+                    match self.get(n)? {
+                        SV::Arr(_, v) => SV::Int(*v.get(usize::try_from(i).ok()?)?),
+                        _ => return None,
+                    }
+                }
+                ("min", [x, y]) => SV::Int(self.int(x)?.min(self.int(y)?)),
+                ("max", [x, y]) => SV::Int(self.int(x)?.max(self.int(y)?)),
+                ("abs", [x]) => {
+                    let x = self.int(x)?;
+                    if x == i64::MIN {
+                        return None;
+                    }
+                    SV::Int(x.abs())
+                }
+                _ => return None,
+            },
+            _ => return None,
+        })
+    }
+
+    fn block(&mut self, b: &[HStmt]) -> Option<Flow> {
+        self.scopes.push(HashMap::new());
+        let mut flow = Some(Flow::Next);
+        for s in b {
+            flow = self.stmt(s);
+            if !matches!(flow, Some(Flow::Next)) {
+                break;
+            }
+        }
+        self.scopes.pop();
+        flow
+    }
+
+    fn turn(&mut self) -> Option<()> {
+        self.steps += 1;
+        (self.steps <= COMPILE_STEPS).then_some(())
+    }
+
+    fn stmt(&mut self, s: &HStmt) -> Option<Flow> {
+        match s {
+            HStmt::Var(n, init, _) => {
+                let v = match init {
+                    Expr::Call(f, a, _) if matches!(f.as_str(), "ints" | "int32s" | "bytes") && a.len() == 1 => {
+                        let el = match f.as_str() {
+                            "ints" => Elem::I64,
+                            "int32s" => Elem::I32,
+                            _ => Elem::U8,
+                        };
+                        let len = self.int(&a[0])?;
+                        // (a big table stays a run-time one: the binary needn't carry it)
+                        if len < 0 || len > ARRAY_MAX / el.bytes() as i64 || len > 1 << 20 {
+                            return None;
+                        }
+                        SV::Arr(el, vec![0; len as usize])
+                    }
+                    e => self.ex(e)?,
+                };
+                self.scopes.last_mut()?.insert(n.clone(), v);
+            }
+            HStmt::Set(n, e, _) => {
+                let v = self.ex(e)?;
+                let slot = self.get_mut(n)?;
+                if matches!(slot, SV::Arr(..)) || std::mem::discriminant(slot) != std::mem::discriminant(&v) {
+                    return None;
+                }
+                *slot = v;
+            }
+            HStmt::SetAt(n, i, e, _) => {
+                let (i, v) = (self.int(i)?, self.int(e)?);
+                let SV::Arr(el, a) = self.get_mut(n)? else { return None };
+                let fits = match el {
+                    Elem::I64 => true,
+                    Elem::I32 => i32::try_from(v).is_ok(),
+                    Elem::U8 => (0..=255).contains(&v),
+                };
+                if !fits {
+                    return None;
+                }
+                *a.get_mut(usize::try_from(i).ok()?)? = v;
+            }
+            HStmt::If(c, a, b, _) => return if self.bool(c)? { self.block(a) } else { self.block(b) },
+            HStmt::While(c, b, _) => loop {
+                self.turn()?;
+                if !self.bool(c)? {
+                    break;
+                }
+                if let Flow::Break = self.block(b)? {
+                    break;
+                }
+            },
+            HStmt::For(n, a, b, body, _) => {
+                let (from, to) = (self.int(a)?, self.int(b)?);
+                for i in from..to {
+                    self.turn()?;
+                    self.scopes.push(HashMap::from([(n.clone(), SV::Int(i))]));
+                    let flow = self.block(body);
+                    self.scopes.pop();
+                    if let Flow::Break = flow? {
+                        break;
+                    }
+                }
+            }
+            HStmt::Break(_) => return Some(Flow::Break),
+            HStmt::Continue(_) => return Some(Flow::Continue),
+            // what a run does (its result, its bytes): never here
+            HStmt::Return(..) | HStmt::Out(..) => return None,
+        }
+        Some(Flow::Next)
+    }
+}
+
+/// The names an expression reads.
+fn expr_names(e: &Expr, out: &mut Vec<String>) {
+    match e {
+        Expr::Name(n, _) => out.push(n.clone()),
+        Expr::Call(_, a, _) => a.iter().for_each(|x| expr_names(x, out)),
+        Expr::Bin(_, l, r, _) => {
+            expr_names(l, out);
+            expr_names(r, out);
+        }
+        Expr::Not(x, _) => expr_names(x, out),
+        Expr::If(c, a, b, _) => {
+            expr_names(c, out);
+            expr_names(a, out);
+            expr_names(b, out);
+        }
+        _ => {}
+    }
+}
+
+/// The names statements read (anywhere in them).
+fn stmt_names(body: &[HStmt], out: &mut Vec<String>) {
+    for s in body {
+        match s {
+            HStmt::Var(_, e, _) | HStmt::Set(_, e, _) | HStmt::Out(e, _) => expr_names(e, out),
+            HStmt::SetAt(n, i, e, _) => {
+                out.push(n.clone());
+                expr_names(i, out);
+                expr_names(e, out);
+            }
+            HStmt::If(c, a, b, _) => {
+                expr_names(c, out);
+                stmt_names(a, out);
+                stmt_names(b, out);
+            }
+            HStmt::While(c, a, _) => {
+                expr_names(c, out);
+                stmt_names(a, out);
+            }
+            HStmt::For(_, f, t, a, _) => {
+                expr_names(f, out);
+                expr_names(t, out);
+                stmt_names(a, out);
+            }
+            HStmt::Return(Some(e), _) => expr_names(e, out),
+            _ => {}
+        }
+    }
+}
+
+/// A helper's body split: its top-level statements that depend on nothing at run time are run
+/// here, in order. What the statements left read or change of their results comes back as
+/// values to begin with (by name). A statement runs here only when it reads nothing a statement
+/// left (or a parameter) made or changed, and changes nothing such a statement already read.
+fn constants(m: &Model, params: &[Param], body: &[HStmt]) -> (Vec<HStmt>, Vec<(String, SV)>) {
+    let mut it = Interp { m, scopes: vec![HashMap::new()], steps: 0 };
+    let mut runtime: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+    let mut read_at_runtime: Vec<String> = vec![];
+    let mut kept = vec![];
+    for s in body {
+        let one = std::slice::from_ref(s);
+        let mut reads = vec![];
+        stmt_names(one, &mut reads);
+        let mut writes = assigned(one);
+        if let HStmt::Var(n, _, _) = s {
+            writes.push(n.clone());
+        }
+        let free = !reads.iter().chain(&writes).any(|n| runtime.contains(n)) && !writes.iter().any(|n| read_at_runtime.contains(n));
+        if free {
+            // run on a copy: kept only when it all worked
+            let saved = (it.scopes.clone(), it.steps);
+            if matches!(it.stmt(s), Some(Flow::Next)) {
+                continue;
+            }
+            (it.scopes, it.steps) = saved;
+        }
+        read_at_runtime.extend(reads.iter().filter(|n| it.scopes[0].contains_key(*n)).cloned());
+        runtime.extend(writes);
+        kept.push(s.clone());
+    }
+    let mut needed = vec![];
+    stmt_names(&kept, &mut needed);
+    needed.extend(assigned(&kept));
+    let mut start: Vec<(String, SV)> = it.scopes.swap_remove(0).into_iter().filter(|(n, _)| needed.contains(n)).collect();
+    start.sort_by(|a, b| a.0.cmp(&b.0));
+    (kept, start)
 }
